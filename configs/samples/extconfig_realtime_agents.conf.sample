@@ -3,12 +3,14 @@
 ;
 ; Realtime engine bindings. Merge into /etc/asterisk/extconfig.conf.
 ;
-; Maps the three PJSIP realtime tables to the ODBC connection named
-; `asterisk` (defined in res_odbc_agents.conf.sample). The `ps_endpoints`
-; on the right is the Postgres table name the API writes to.
+; Maps the four PJSIP realtime tables (endpoint/auth/aor/registration)
+; to the ODBC connection named `asterisk` (defined in
+; res_odbc_agents.conf.sample). The ps_* names on the right are the
+; Postgres table names the call-engine writes to.
 ;
 
 [settings]
-ps_endpoints => odbc,asterisk,ps_endpoints
-ps_auths     => odbc,asterisk,ps_auths
-ps_aors      => odbc,asterisk,ps_aors
+ps_endpoints     => odbc,asterisk,ps_endpoints
+ps_auths         => odbc,asterisk,ps_auths
+ps_aors          => odbc,asterisk,ps_aors
+ps_registrations => odbc,asterisk,ps_registrations

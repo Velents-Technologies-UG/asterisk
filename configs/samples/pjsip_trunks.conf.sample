@@ -1,0 +1,20 @@
+;
+; pjsip_trunks.conf.sample
+;
+; PJSIP transport for outbound trunks. The trunk endpoints / auths / aors
+; / registrations themselves are provisioned at runtime via the realtime
+; backend (see configs/samples/sorcery_realtime_agents.conf.sample), so
+; this file only defines the UDP transport they bind to.
+;
+; Append to /etc/asterisk/pjsip.conf alongside the WSS transport from
+; pjsip_wss_agents.conf.sample.
+;
+
+[transport-udp]
+type=transport
+protocol=udp
+bind=0.0.0.0:5060
+; Restrict source ranges in production. Trunk providers publish their
+; signalling IPs - put them in a deny/permit pair below.
+; deny=0.0.0.0/0
+; permit=54.172.60.0/23   ; example: Twilio US East
