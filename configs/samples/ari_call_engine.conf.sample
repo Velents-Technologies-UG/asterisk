@@ -1,0 +1,28 @@
+;
+; ari_call_engine.conf.sample
+;
+; Drop the [general] block into ari.conf and add (or merge) the [asterisk]
+; user. Update the password before deploying. The username/password must
+; match ARI_USERNAME / ARI_PASSWORD in services/agenthub-call-engine/.env.
+;
+
+; ----- ari.conf -----
+[general]
+enabled = yes
+pretty = yes
+allowed_origins = *
+
+[asterisk]
+type = user
+read_only = no
+password = asterisk
+password_format = plain
+
+; ----- http.conf -----
+; Required so ARI can serve its WebSocket. Make sure bindaddr is reachable
+; from the call-engine host (use 0.0.0.0 when running in containers).
+;
+; [general]
+; enabled = yes
+; bindaddr = 0.0.0.0
+; bindport = 8088

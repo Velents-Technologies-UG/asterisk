@@ -1,0 +1,57 @@
+;
+; extensions_ai_runtime.conf.sample
+;
+; Dialplan fragments used by the agenthub-call-engine service
+; (see the agent-hub repo: services/agenthub-call-engine).
+;
+; Include this file from your main extensions.conf:
+;
+;     #include extensions_ai_runtime.conf
+;
+; Required modules (all ship with Asterisk 18+):
+;     app_stasis.so
+;     res_stasis.so
+;     res_ari.so
+;     res_ari_*.so
+;     app_audiosocket.so
+;     res_audiosocket.so
+;
+
+;
+; [ai-runtime]
+;
+; Target context for the Local channel originated by the call-engine. The
+; call-engine sets the following channel variables on the originate so this
+; context is reusable for any future AI runtime endpoint:
+;
+;     AUDIOSOCKET_HOST  - host where the AudioSocket server is listening
+;     AUDIOSOCKET_PORT  - TCP port (default 8090)
+;     AUDIOSOCKET_UUID  - per-call UUID, echoed back by the server in its
+;                         first protocol message
+;
+; slin16 is forced so the AudioSocket carries 16 kHz signed-linear PCM,
+; matching the sample WAV the stub plays.
+;
+[ai-runtime]
+exten => s,1,NoOp(ai-runtime: AudioSocket ${AUDIOSOCKET_HOST}:${AUDIOSOCKET_PORT} uuid=${AUDIOSOCKET_UUID})
+ same => n,Answer()
+ same => n,Set(CHANNEL(audioreadformat)=slin16)
+ same => n,Set(CHANNEL(audiowriteformat)=slin16)
+ same => n,AudioSocket(${AUDIOSOCKET_UUID},${AUDIOSOCKET_HOST}:${AUDIOSOCKET_PORT})
+ same => n,Hangup()
+
+;
+; [call-engine-test]
+;
+; Trivial test context. Point a SIP endpoint or trunk at extension 100 to
+; hand the call to the Stasis app served by agenthub-call-engine. The Stasis
+; app name must match ARI_APP in the call-engine .env (default: call-engine).
+;
+[call-engine-test]
+exten => 100,1,NoOp(Sending ${CALLERID(num)} to Stasis(call-engine))
+ same => n,Stasis(call-engine)
+ same => n,Hangup()
+
+; Catch-all so failed originates / unmatched extensions don't loop.
+exten => _X.,1,NoOp(ai-runtime: unmatched ${EXTEN})
+ same => n,Hangup()
