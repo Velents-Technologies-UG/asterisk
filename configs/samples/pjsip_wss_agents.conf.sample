@@ -1,0 +1,95 @@
+;
+; pjsip_wss_agents.conf.sample
+;
+; PJSIP fragments wiring browser-based agent softphones into Asterisk:
+;   - Secure WebSocket transport on port 8089 (TLS termination via http.conf)
+;   - Reusable [agent-endpoint-template] / [agent-aor-template] /
+;     [agent-auth-template] templates that the agenthub-call-engine
+;     provisions per-agent via PJSIP realtime
+;   - One static [agent-demo] endpoint for smoke testing without the API
+;
+; Required modules:
+;     res_pjsip.so, res_pjsip_session.so, res_pjsip_transport_websocket.so
+;     res_http_websocket.so, res_srtp.so
+;     (for realtime) res_sorcery_realtime.so, res_config_odbc.so, res_odbc.so
+;
+; Companion files:
+;     http_wss.conf.sample           - http.conf TLS bind on 8089
+;     sorcery_realtime_agents.conf.sample
+;     extconfig_realtime_agents.conf.sample
+;     res_odbc_agents.conf.sample
+;
+
+;------------------------------------------------------------
+; WebSocket-Secure transport (browser softphones)
+;------------------------------------------------------------
+[transport-wss]
+type=transport
+protocol=wss
+bind=0.0.0.0
+; PJSIP only declares the protocol; the actual TLS listener is the
+; Asterisk HTTP server bound to 0.0.0.0:8089 (see http_wss.conf.sample).
+
+;------------------------------------------------------------
+; Templates: WebRTC + DTLS-SRTP, opus + alaw
+;------------------------------------------------------------
+[agent-endpoint-template](!)
+type=endpoint
+transport=transport-wss
+context=from-agents
+disallow=all
+allow=opus
+allow=alaw
+direct_media=no
+ice_support=yes
+use_avpf=yes
+rtcp_mux=yes
+media_encryption=dtls
+dtls_verify=fingerprint
+dtls_setup=actpass
+dtls_auto_generate_cert=yes
+rtp_symmetric=yes
+force_rport=yes
+rewrite_contact=yes
+webrtc=yes
+allow_subscribe=yes
+send_pai=yes
+
+[agent-aor-template](!)
+type=aor
+max_contacts=1
+remove_existing=yes
+qualify_frequency=60
+
+[agent-auth-template](!)
+type=auth
+auth_type=userpass
+
+;------------------------------------------------------------
+; Static demo agent (handy for connectivity testing without the API).
+; The realtime-provisioned agents created by agenthub-call-engine
+; inherit the same templates above through sorcery defaults.
+;------------------------------------------------------------
+[agent-demo](agent-auth-template)
+type=auth
+username=agent-demo
+password=change-me-in-production
+
+[agent-demo](agent-aor-template)
+type=aor
+
+[agent-demo](agent-endpoint-template)
+type=endpoint
+auth=agent-demo
+aors=agent-demo
+callerid=Demo Agent <agent-demo>
+
+;------------------------------------------------------------
+; Dialplan context the templates land in (extensions.conf).
+; Agents dial * + extension to reach internal flows; everything else
+; is left to outbound routing handled by other contexts.
+;------------------------------------------------------------
+; [from-agents]
+; exten => *97,1,VoiceMailMain()
+; exten => 100,1,Stasis(call-engine)         ; loop into the AI runtime
+; exten => _X.,1,Hangup()

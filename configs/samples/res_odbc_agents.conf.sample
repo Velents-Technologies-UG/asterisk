@@ -1,0 +1,37 @@
+;
+; res_odbc_agents.conf.sample
+;
+; ODBC connection used by extconfig_realtime_agents.conf.sample.
+; Merge into /etc/asterisk/res_odbc.conf.
+;
+; Prereqs on the Asterisk host:
+;   apt install unixodbc odbc-postgresql
+;
+; /etc/odbcinst.ini:
+;   [PostgreSQL]
+;   Description = PostgreSQL ODBC driver
+;   Driver      = /usr/lib/x86_64-linux-gnu/odbc/psqlodbcw.so
+;
+; /etc/odbc.ini:
+;   [asterisk-pgsql]
+;   Description = Asterisk PJSIP realtime
+;   Driver      = PostgreSQL
+;   Servername  = postgres                  ; or 127.0.0.1
+;   Port        = 5432
+;   Database    = agenthub
+;   Username    = callengine
+;   Password    = callengine
+;   Protocol    = 11
+;
+; Verify with:  isql -v asterisk-pgsql callengine callengine
+;
+
+[asterisk]
+enabled => yes
+dsn => asterisk-pgsql
+username => callengine
+password => callengine
+pre-connect => yes
+sanitysql => SELECT 1
+backslash_is_escape => yes
+max_connections => 5
