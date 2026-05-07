@@ -1,0 +1,34 @@
+;
+; http_wss.conf.sample
+;
+; Asterisk HTTP server settings required for the WSS transport used by
+; pjsip_wss_agents.conf.sample. Merge into /etc/asterisk/http.conf.
+;
+; Browsers will connect to wss://<host>:8089/ws and Asterisk's HTTP
+; server upgrades the connection; res_pjsip_transport_websocket then
+; hands the SIP traffic to res_pjsip.
+;
+
+[general]
+enabled=yes
+bindaddr=0.0.0.0
+bindport=8088
+
+; --- TLS / WSS ---
+tlsenable=yes
+tlsbindaddr=0.0.0.0:8089
+
+; PEM-encoded server certificate. Self-signed is fine for local dev,
+; but production should use a CA-signed cert (e.g. Let's Encrypt) so the
+; browser doesn't refuse the WSS upgrade.
+tlscertfile=/etc/asterisk/keys/asterisk.pem
+tlsprivatekey=/etc/asterisk/keys/asterisk.key
+
+; Restrict ciphers if your security baseline requires it:
+; tlscipher=ECDHE-RSA-AES256-GCM-SHA384:ECDHE-RSA-AES128-GCM-SHA256
+
+; Generating a quick self-signed cert for local testing:
+;   openssl req -x509 -newkey rsa:2048 -keyout asterisk.key -out asterisk.pem \
+;     -days 365 -nodes -subj "/CN=asterisk.local"
+;   chmod 640 asterisk.key asterisk.pem
+;   chown asterisk:asterisk asterisk.key asterisk.pem

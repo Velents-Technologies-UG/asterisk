@@ -1,0 +1,52 @@
+# Asterisk dev image. Overlays a published Asterisk base with the
+# config samples from this repo. Builds in ~30 s and produces a ~250 MB
+# image. Use this for docker-compose / local k3d iteration. For
+# reproducible production builds from this fork's source tree, use
+# Dockerfile.prod instead.
+#
+# Build:
+#   docker build -t velents/asterisk:dev -f deploy/Dockerfile.dev .
+# Run:
+#   docker run --rm -it --network host velents/asterisk:dev
+
+FROM andrius/asterisk:22-current
+
+USER root
+
+# envsubst (gettext-base) is used by entrypoint.sh to render
+# *.conf.template files at start time.
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends gettext-base ca-certificates curl; \
+    rm -rf /var/lib/apt/lists/*
+
+# Config overlays. The .sample suffix is dropped so they're picked up
+# by Asterisk's config loader as-is. ConfigMap mounts in K8s override
+# these via subPath; the in-image copies are the dev defaults.
+COPY configs/samples/extensions_ai_runtime.conf.sample        /etc/asterisk/extensions_ai_runtime.conf
+COPY configs/samples/ari_call_engine.conf.sample              /etc/asterisk/ari.conf
+COPY configs/samples/http_wss.conf.sample                     /etc/asterisk/http.conf
+COPY configs/samples/pjsip_wss_agents.conf.sample             /etc/asterisk/pjsip_wss_agents.conf
+COPY configs/samples/pjsip_trunks.conf.sample                 /etc/asterisk/pjsip_trunks.conf
+COPY configs/samples/sorcery_realtime_agents.conf.sample      /etc/asterisk/sorcery.conf
+COPY configs/samples/extconfig_realtime_agents.conf.sample    /etc/asterisk/extconfig.conf
+COPY configs/samples/res_odbc_agents.conf.sample              /etc/asterisk/res_odbc.conf
+
+# Top-level extensions.conf includes the [ai-runtime] / [from-flows]
+# / [call-engine-test] contexts. pjsip.conf includes both the WSS
+# (browser softphones) and trunk (PSTN) fragments.
+RUN printf '[general]\nstatic=yes\nwriteprotect=no\n\n#include "extensions_ai_runtime.conf"\n' \
+      > /etc/asterisk/extensions.conf \
+ && printf '#include "pjsip_wss_agents.conf"\n#include "pjsip_trunks.conf"\n' \
+      > /etc/asterisk/pjsip.conf \
+ && chown -R asterisk:asterisk /etc/asterisk
+
+COPY deploy/entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+# Documented; hostNetwork=true in K8s bypasses Docker EXPOSE. Useful
+# for `docker run -p ...` paths.
+EXPOSE 5060/udp 5060/tcp 5061/tcp 8088/tcp 8089/tcp 5038/tcp
+# RTP range 10000-20000/udp is also bound; see deploy/README.md.
+
+ENTRYPOINT ["/entrypoint.sh"]

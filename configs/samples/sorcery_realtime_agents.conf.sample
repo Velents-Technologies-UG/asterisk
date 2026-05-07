@@ -1,0 +1,20 @@
+;
+; sorcery_realtime_agents.conf.sample
+;
+; Tells res_pjsip to look up endpoints / auths / aors / registrations via
+; the realtime backend (mapped to ODBC -> Postgres in extconfig + res_odbc).
+; Merge into /etc/asterisk/sorcery.conf.
+;
+; With this in place the agenthub-call-engine + agent-hub Trunks tab can
+; insert rows into ps_endpoints / ps_auths / ps_aors / ps_registrations
+; / trunks_meta and Asterisk picks them up on the next request (no
+; pjsip reload needed for endpoint / auth / aor changes; registrations
+; require a reload, which the call-engine triggers via
+; POST /control/asterisk/reload).
+;
+
+[res_pjsip]
+endpoint=realtime,ps_endpoints
+auth=realtime,ps_auths
+aor=realtime,ps_aors
+registration=realtime,ps_registrations
