@@ -75,10 +75,18 @@ RUN set -eux; \
              /var/log/asterisk /var/run/asterisk
 
 # Asterisk binaries + libs + sounds + default modules from the build stage.
+# libasterisk*.so* are Asterisk's own top-level shared libs (libasteriskssl,
+# libasteriskpj) that `make install` drops directly under /usr/lib — they
+# live OUTSIDE /usr/lib/asterisk/, so they need their own COPY line.
+# Without them the final image fails with:
+#   error while loading shared libraries: libasteriskssl.so.1: cannot open
+#   shared object file: No such file or directory
 COPY --from=builder /usr/sbin/asterisk          /usr/sbin/asterisk
+COPY --from=builder /usr/lib/libasterisk*.so*   /usr/lib/
 COPY --from=builder /usr/lib/asterisk           /usr/lib/asterisk
 COPY --from=builder /var/lib/asterisk           /var/lib/asterisk
 COPY --from=builder /etc/asterisk               /etc/asterisk
+RUN ldconfig
 
 # Our config overlays (source of truth for the in-image defaults).
 COPY configs/samples/extensions_ai_runtime.conf.sample        /etc/asterisk/extensions_ai_runtime.conf
