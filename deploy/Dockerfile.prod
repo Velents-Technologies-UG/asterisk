@@ -1,0 +1,108 @@
+# Production Asterisk image. Multi-stage: stage 1 compiles Asterisk
+# from this fork's source; stage 2 ships only the runtime libraries +
+# binaries + our config overlays.
+#
+# Build (~10-15 min on a 4-core builder; final image ~600 MB):
+#   docker build -t velents/asterisk:22.0.0 -f deploy/Dockerfile.prod .
+# Run:
+#   docker run --rm -it --network host velents/asterisk:22.0.0
+
+ARG ASTERISK_BUILD_BASE=debian:bookworm
+ARG ASTERISK_RUNTIME_BASE=debian:bookworm-slim
+
+# ----------------------------------------------------------- builder ------
+FROM ${ASTERISK_BUILD_BASE} AS builder
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+        build-essential autoconf automake libtool pkg-config m4 \
+        libssl-dev libsrtp2-dev libxml2-dev libxslt1-dev libsqlite3-dev \
+        libjansson-dev libedit-dev libcurl4-openssl-dev libpq-dev \
+        uuid-dev unixodbc-dev odbc-postgresql \
+        libncurses-dev libnewt-dev libopus-dev \
+        libpopt-dev libical-dev libspeex-dev libspeexdsp-dev libogg-dev libvorbis-dev \
+        wget xz-utils ca-certificates patch python3 ; \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /usr/src/asterisk
+COPY . .
+
+# Bootstrap, configure, build. pjproject is bundled (downloaded by
+# configure); jansson is the system package. BUILD_NATIVE disabled so
+# the binary runs on any x86-64 / arm64 host (no -march=native baked in).
+RUN set -eux; \
+    ./bootstrap.sh; \
+    ./configure \
+        --prefix=/usr \
+        --sysconfdir=/etc \
+        --localstatedir=/var \
+        --with-pjproject-bundled; \
+    make menuselect.makeopts; \
+    menuselect/menuselect \
+        --disable BUILD_NATIVE \
+        --enable CORE-SOUNDS-EN-WAV \
+        --enable MOH-OPSOUND-WAV \
+        menuselect.makeopts; \
+    make -j"$(nproc)"; \
+    make install; \
+    make install-headers
+
+# ---------------------------------------------------------- runtime -------
+FROM ${ASTERISK_RUNTIME_BASE}
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+        libssl3 libsrtp2-1 libxml2 libxslt1.1 libsqlite3-0 \
+        libjansson4 libedit2 libcurl4 libpq5 \
+        libodbc2 odbc-postgresql \
+        libncurses6 libnewt0.52 libopus0 \
+        libpopt0 libical3 libspeex1 libspeexdsp1 libogg0 libvorbis0a \
+        libuuid1 ca-certificates gettext-base \
+        curl tini ; \
+    rm -rf /var/lib/apt/lists/*; \
+    groupadd -r -g 1000 asterisk; \
+    useradd  -r -u 1000 -g asterisk -d /var/lib/asterisk -s /sbin/nologin asterisk; \
+    mkdir -p /etc/asterisk/keys \
+             /var/spool/asterisk/recording \
+             /var/spool/asterisk/voicemail \
+             /var/lib/asterisk/sounds/custom \
+             /var/log/asterisk /var/run/asterisk
+
+# Asterisk binaries + libs + sounds + default modules from the build stage.
+COPY --from=builder /usr/sbin/asterisk          /usr/sbin/asterisk
+COPY --from=builder /usr/lib/asterisk           /usr/lib/asterisk
+COPY --from=builder /var/lib/asterisk           /var/lib/asterisk
+COPY --from=builder /etc/asterisk               /etc/asterisk
+
+# Our config overlays (source of truth for the in-image defaults).
+COPY configs/samples/extensions_ai_runtime.conf.sample        /etc/asterisk/extensions_ai_runtime.conf
+COPY configs/samples/ari_call_engine.conf.sample              /etc/asterisk/ari.conf
+COPY configs/samples/http_wss.conf.sample                     /etc/asterisk/http.conf
+COPY configs/samples/pjsip_wss_agents.conf.sample             /etc/asterisk/pjsip_wss_agents.conf
+COPY configs/samples/pjsip_trunks.conf.sample                 /etc/asterisk/pjsip_trunks.conf
+COPY configs/samples/sorcery_realtime_agents.conf.sample      /etc/asterisk/sorcery.conf
+COPY configs/samples/extconfig_realtime_agents.conf.sample    /etc/asterisk/extconfig.conf
+COPY configs/samples/res_odbc_agents.conf.sample              /etc/asterisk/res_odbc.conf
+
+RUN set -eux; \
+    printf '[general]\nstatic=yes\nwriteprotect=no\n\n#include "extensions_ai_runtime.conf"\n' \
+      > /etc/asterisk/extensions.conf; \
+    printf '#include "pjsip_wss_agents.conf"\n#include "pjsip_trunks.conf"\n' \
+      > /etc/asterisk/pjsip.conf; \
+    chown -R asterisk:asterisk /etc/asterisk /var/spool/asterisk \
+                                /var/lib/asterisk /var/log/asterisk /var/run/asterisk
+
+COPY deploy/entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+EXPOSE 5060/udp 5060/tcp 5061/tcp 8088/tcp 8089/tcp 5038/tcp
+
+# tini reaps the asterisk child cleanly when the container receives
+# SIGTERM (k8s pod stop).
+ENTRYPOINT ["/usr/bin/tini", "--", "/entrypoint.sh"]
