@@ -84,3 +84,24 @@ exten => _X.,1,NoOp(inbound ${CALLERID(num)} -> ${EXTEN})
  same => n,Set(__CALLED_DID=${EXTEN})
  same => n,Stasis(call-engine,inbound,${EXTEN})
  same => n,Hangup()
+
+;------------------------------------------------------------
+; [from-agents]: ring a tenant staff member's PJSIP endpoint when the
+; queue dispatcher routes an ESCALATING call to them (Gap C).
+;
+; Originated by the call-engine as:
+;     Local/agent_<staff_id>@from-agents/n
+;
+; The /n suffix keeps the Local channel's Stasis side connected to the
+; customer's bridge while this dialplan side rings the physical
+; endpoint. Endpoint naming follows the realtime PJSIP convention used
+; by pjsip_wss_agents.conf: each staff member has a PJSIP endpoint
+; named `staff_<id>` provisioned via res_sorcery_realtime.
+;
+; If your endpoint name pattern differs (e.g. `agent_<id>` directly,
+; or includes a tenant prefix), change the Dial() target below.
+;------------------------------------------------------------
+[from-agents]
+exten => _agent_X.,1,NoOp(Ringing staff_${EXTEN:6} for queue call)
+ same => n,Dial(PJSIP/staff_${EXTEN:6},20)
+ same => n,Hangup()
