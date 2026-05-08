@@ -1,0 +1,10 @@
+CI rebuild trigger
+==================
+
+This file exists to bump the commit SHA on the active asterisk
+development branch and re-trigger the CI image build pipeline. It
+has no runtime effect and can be safely overwritten on every
+rebuild trigger.
+
+Last triggered: 2026-05-08
+Reason: force a fresh build of the asterisk container image.
