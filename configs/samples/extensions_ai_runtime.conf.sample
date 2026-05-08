@@ -52,3 +52,35 @@ exten => _flow_.,1,NoOp(Entering flow ${EXTEN:5})
 ; Catch-all so unmatched extensions don't loop.
 exten => _X.,1,NoOp(ai-runtime: unmatched ${EXTEN})
  same => n,Hangup()
+
+;------------------------------------------------------------
+; [from-trunk]: inbound calls from PSTN/SIP trunks (Gap A).
+; The dialed E.164 (or local number) lands in ${EXTEN}. We hand it to
+; Stasis as the second arg AND stash it as a channel variable so the
+; call-engine can resolve which Phase J flow to run for this DID via
+; the tenant `inbound_numbers` table:
+;
+;     +12025550100 -> inbound_numbers row -> flow public_id -> FlowRunner
+;
+; If no mapping exists for the DID, the call-engine falls through to
+; the legacy AI-runtime inbound handler (no-op for the customer; you
+; just get a connect with the AI agent on the other side).
+;
+; Point your trunk endpoint at this context, e.g. in pjsip_trunks:
+;     [trunk-in]
+;     type = endpoint
+;     context = from-trunk
+;------------------------------------------------------------
+[from-trunk]
+; Plus-prefixed E.164 (e.g. +12025550100). The leading + is preserved
+; in EXTEN; the call-engine normalises both forms when looking up.
+exten => _+X.,1,NoOp(inbound ${CALLERID(num)} -> ${EXTEN})
+ same => n,Set(__CALLED_DID=${EXTEN})
+ same => n,Stasis(call-engine,inbound,${EXTEN})
+ same => n,Hangup()
+
+; Bare-digit DIDs (e.g. 2025550100, or shorter local numbers).
+exten => _X.,1,NoOp(inbound ${CALLERID(num)} -> ${EXTEN})
+ same => n,Set(__CALLED_DID=${EXTEN})
+ same => n,Stasis(call-engine,inbound,${EXTEN})
+ same => n,Hangup()
