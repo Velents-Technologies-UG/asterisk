@@ -32,11 +32,16 @@ bind=0.0.0.0
 
 ;------------------------------------------------------------
 ; Templates: WebRTC + DTLS-SRTP, opus + alaw
+;
+; context=from-wss-agents-out routes every dial from a registered
+; agent's softphone to the [from-wss-agents-out] dialplan in
+; extensions_ai_runtime.conf, which hands the call to Stasis so
+; the call-engine can apply the tenant's outbound_rules.
 ;------------------------------------------------------------
 [agent-endpoint-template](!)
 type=endpoint
 transport=transport-wss
-context=from-agents
+context=from-wss-agents-out
 disallow=all
 allow=opus
 allow=alaw
@@ -85,11 +90,9 @@ aors=agent-demo
 callerid=Demo Agent <agent-demo>
 
 ;------------------------------------------------------------
-; Dialplan context the templates land in (extensions.conf).
-; Agents dial * + extension to reach internal flows; everything else
-; is left to outbound routing handled by other contexts.
+; Dialplan landing context for WSS agent outbound is
+; [from-wss-agents-out] in extensions_ai_runtime.conf.sample. The
+; legacy [from-agents] context is now reserved for the queue
+; dispatcher's INBOUND ring target (_agent_X. pattern); see
+; extensions_ai_runtime.conf.sample.
 ;------------------------------------------------------------
-; [from-agents]
-; exten => *97,1,VoiceMailMain()
-; exten => 100,1,Stasis(call-engine)         ; loop into the AI runtime
-; exten => _X.,1,Hangup()
