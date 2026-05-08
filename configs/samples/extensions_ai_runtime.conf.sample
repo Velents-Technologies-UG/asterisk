@@ -39,10 +39,6 @@ exten => 100,1,NoOp(Sending ${CALLERID(num)} to Stasis(call-engine))
 ; [from-flows]: dial flow_<publicId> to invoke the visual call-flow
 ; runner (Phase J1+). The call-engine StasisStart sees args[0]==='flow'
 ; and hands the channel to FlowRunner with the matching public_id.
-;
-; Examples:
-;   exten flow_main_menu  -> runs flow with public_id 'main_menu'
-;   exten flow_after_hours -> runs flow with public_id 'after_hours'
 ;------------------------------------------------------------
 [from-flows]
 exten => _flow_.,1,NoOp(Entering flow ${EXTEN:5})
@@ -51,4 +47,71 @@ exten => _flow_.,1,NoOp(Entering flow ${EXTEN:5})
 
 ; Catch-all so unmatched extensions don't loop.
 exten => _X.,1,NoOp(ai-runtime: unmatched ${EXTEN})
+ same => n,Hangup()
+
+;------------------------------------------------------------
+; [from-trunk]: inbound calls from PSTN/SIP trunks (Gap A).
+;------------------------------------------------------------
+[from-trunk]
+exten => _+X.,1,NoOp(inbound ${CALLERID(num)} -> ${EXTEN})
+ same => n,Set(__CALLED_DID=${EXTEN})
+ same => n,Stasis(call-engine,inbound,${EXTEN})
+ same => n,Hangup()
+
+exten => _X.,1,NoOp(inbound ${CALLERID(num)} -> ${EXTEN})
+ same => n,Set(__CALLED_DID=${EXTEN})
+ same => n,Stasis(call-engine,inbound,${EXTEN})
+ same => n,Hangup()
+
+;------------------------------------------------------------
+; [from-agents]: ring a tenant staff member's PJSIP endpoint when the
+; queue dispatcher routes an ESCALATING call to them (Gap C).
+;
+; Originated by the call-engine as Local/agent_<staff_id>@from-agents/n.
+; This is the INBOUND ring target, NOT where outbound from agents
+; goes; outbound is in [from-wss-agents-out] below.
+;------------------------------------------------------------
+[from-agents]
+exten => _agent_X.,1,NoOp(Ringing staff_${EXTEN:6} for queue call)
+ same => n,Dial(PJSIP/staff_${EXTEN:6},20)
+ same => n,Hangup()
+
+;------------------------------------------------------------
+; [from-wss-agents-out]: WSS softphone OUTBOUND. Hands every dialed
+; number to Stasis so the call-engine can apply the tenant's
+; outbound_rules row (trunk, caller-id, recording) and originate the
+; trunk leg. Replaces the static [Long-Distance] -> [Outbound-Dial]
+; path that was used before this feature shipped.
+;
+; The WSS endpoint template (pjsip_wss_agents.conf.sample) sets
+; context = from-wss-agents-out so every dial from a registered
+; agent's softphone lands here.
+;
+; Args passed to Stasis:
+;   args[0] = 'outbound_human'
+;   args[1] = dialed number (EXTEN)
+;   args[2] = calling endpoint (e.g. 'staff_5') so the call-engine
+;             can resolve which staff member is dialing
+;------------------------------------------------------------
+[from-wss-agents-out]
+exten => _X.,1,NoOp(Outbound from ${CHANNEL(endpoint)} -> ${EXTEN})
+ same => n,Set(__AGENT_ENDPOINT=${CHANNEL(endpoint)})
+ same => n,Set(__DIALED_NUMBER=${EXTEN})
+ same => n,Stasis(call-engine,outbound_human,${EXTEN},${CHANNEL(endpoint)})
+ same => n,Hangup()
+
+;------------------------------------------------------------
+; [from-trunk-out]: target context for the Local channel the
+; call-engine originates to actually place the trunk leg of an
+; outbound human call. The trunk endpoint and caller-id are set as
+; channel variables on the originate; we Set CALLERID and Dial.
+;
+; Channel variables (set by call-engine .originate({variables:{...}})):
+;   TRUNK_ENDPOINT       e.g. 'trunk-out' or 'usa-trunk'
+;   OUTBOUND_CALLER_ID   E.164 string, may be empty
+;------------------------------------------------------------
+[from-trunk-out]
+exten => _X.,1,NoOp(Trunk leg via ${TRUNK_ENDPOINT} -> ${EXTEN})
+ same => n,ExecIf($[!${ISNULL(${OUTBOUND_CALLER_ID})}]?Set(CALLERID(num)=${OUTBOUND_CALLER_ID}))
+ same => n,Dial(PJSIP/${EXTEN}@${TRUNK_ENDPOINT},60)
  same => n,Hangup()
