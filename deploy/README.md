@@ -205,11 +205,21 @@ problem, not the app.
 
 If `curl http://127.0.0.1:8092/healthz` from inside the Asterisk pod
 returns `Connection refused`, the control-api sidecar isn't running.
-Check `kubectl logs <pod>` for `control-api ... listening on
-0.0.0.0:8092`. Most common causes: the image was built before the
-sidecar was added (rebuild with `Dockerfile.prod` or `Dockerfile.dev`),
-or `entrypoint.sh` was overridden by a ConfigMap mount that masked
-`/usr/local/bin/control-api`.
+The entrypoint now fails the container with a clear message in
+`kubectl logs <pod>` whenever any of these is true:
+
+| Log line | Meaning | Fix |
+|----------|---------|-----|
+| `entrypoint: FATAL: python3 not found on PATH` | Image was built before python3 was added (or a slimming step removed it). | Rebuild from `Dockerfile.dev` or `Dockerfile.prod`. |
+| `entrypoint: FATAL: /usr/local/bin/control-api missing or unreadable` | Image is older than the sidecar, or a ConfigMap mount on `/usr/local/bin/` masked it. | Rebuild, or fix the mount path. |
+| `entrypoint: FATAL: control-api did not bind 127.0.0.1:8092 within 10s` | Sidecar started but the python process exited before binding — usually a syntax error in `control_api.py` or a port collision (`hostNetwork: true` + something else on 8092). | Look for the `[control-api] ...` lines just above for the underlying error. |
+
+If you instead see `[control-api] ... listening on 0.0.0.0:8092 ... ready`
+followed by `entrypoint: control-api ready on :8092`, the sidecar is
+healthy and any 502 you're seeing in agent-hub is downstream — usually
+the cross-cluster ingress (see the table above). The sidecar is also
+auto-restarted on crash so a transient panic doesn't permanently break
+the listener.
 
 ## See also
 

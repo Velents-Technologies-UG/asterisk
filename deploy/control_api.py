@@ -13,6 +13,7 @@
 
 import json
 import os
+import signal
 import sys
 import logging
 from http import HTTPStatus
@@ -21,9 +22,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 PORT = int(os.environ.get("CONTROL_API_PORT", "8092"))
 SECRET = os.environ.get("CONTROL_API_SECRET", "").strip()
 
+# stderr so logs are not buffered behind the supervisor's pipe in
+# entrypoint.sh — `kubectl logs` then shows startup errors in real time.
 logging.basicConfig(
     level=logging.INFO,
-    format="control-api %(asctime)s %(levelname)s %(message)s",
+    format="%(asctime)s %(levelname)s %(message)s",
+    stream=sys.stderr,
 )
 log = logging.getLogger("control-api")
 
@@ -103,14 +107,42 @@ def main():
         log.warning(
             "CONTROL_API_SECRET is not set; /control/* will return 503 until DevOps wires the secret."
         )
-    server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
-    log.info("listening on 0.0.0.0:%d (secret %s)", PORT, "set" if SECRET else "MISSING")
+
+    # Bind explicitly before declaring readiness. If this raises
+    # (port in use, permissions, address family), the exception
+    # surfaces in stderr and the supervisor in entrypoint.sh restarts
+    # us with backoff — which is preferable to silently dying.
+    try:
+        server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
+    except OSError as exc:
+        log.error("failed to bind 0.0.0.0:%d: %s", PORT, exc)
+        return 1
+
+    # k8s sends SIGTERM on pod stop; default action would kill us
+    # without closing the socket cleanly, leaving the port in TIME_WAIT
+    # for the next pod. shutdown() exits serve_forever() in the main
+    # thread, then we close the socket in the finally below.
+    def _graceful(signum, _frame):
+        log.info("received signal %d; shutting down", signum)
+        # shutdown() blocks if called from the same thread that's in
+        # serve_forever(). Spawn a tiny thread to do the call.
+        import threading
+        threading.Thread(target=server.shutdown, daemon=True).start()
+
+    signal.signal(signal.SIGTERM, _graceful)
+    signal.signal(signal.SIGINT, _graceful)
+
+    log.info(
+        "listening on 0.0.0.0:%d (secret %s) — ready for /healthz and /control/*",
+        PORT,
+        "set" if SECRET else "MISSING",
+    )
     try:
         server.serve_forever()
-    except KeyboardInterrupt:
-        log.info("shutting down on SIGINT")
     finally:
         server.server_close()
+        log.info("control-api stopped")
+    return 0
 
 
 if __name__ == "__main__":
