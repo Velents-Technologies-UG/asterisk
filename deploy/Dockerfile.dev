@@ -14,11 +14,12 @@ FROM andrius/asterisk:22-current
 USER root
 
 # envsubst (gettext-base) is used by entrypoint.sh to render
-# *.conf.template files at start time.
+# *.conf.template files at start time. python3 is the runtime for
+# the call-engine control-api sidecar (deploy/control_api.py).
 RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
-        gettext-base ca-certificates curl python3-minimal tini; \
+        gettext-base ca-certificates curl python3; \
     rm -rf /var/lib/apt/lists/*
 
 # Config overlays. The .sample suffix is dropped so they're picked up
@@ -51,5 +52,4 @@ RUN chmod +x /entrypoint.sh /usr/local/bin/control-api
 EXPOSE 5060/udp 5060/tcp 5061/tcp 8088/tcp 8089/tcp 5038/tcp 8092/tcp
 # RTP range 10000-20000/udp is also bound; see deploy/README.md.
 
-# tini -g so SIGTERM fans out to both asterisk and the control API.
-ENTRYPOINT ["/usr/bin/tini", "-g", "--", "/entrypoint.sh"]
+ENTRYPOINT ["/entrypoint.sh"]
