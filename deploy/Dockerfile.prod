@@ -74,7 +74,7 @@ RUN set -eux; \
         libncurses6 libnewt0.52 libopus0 \
         libpopt0 libical3 libspeex1 libspeexdsp1 libogg0 libvorbis0a \
         libuuid1 ca-certificates gettext-base \
-        curl tini ; \
+        curl tini python3-minimal ; \
     rm -rf /var/lib/apt/lists/*; \
     groupadd -r -g 1000 asterisk; \
     useradd  -r -u 1000 -g asterisk -d /var/lib/asterisk -s /sbin/nologin asterisk; \
@@ -117,11 +117,13 @@ RUN set -eux; \
     chown -R asterisk:asterisk /etc/asterisk /var/spool/asterisk \
                                 /var/lib/asterisk /var/log/asterisk /var/run/asterisk
 
-COPY deploy/entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
+COPY deploy/entrypoint.sh   /entrypoint.sh
+COPY deploy/control_api.py  /usr/local/bin/control-api
+RUN chmod +x /entrypoint.sh /usr/local/bin/control-api
 
-EXPOSE 5060/udp 5060/tcp 5061/tcp 8088/tcp 8089/tcp 5038/tcp
+EXPOSE 5060/udp 5060/tcp 5061/tcp 8088/tcp 8089/tcp 5038/tcp 8092/tcp
 
-# tini reaps the asterisk child cleanly when the container receives
-# SIGTERM (k8s pod stop).
-ENTRYPOINT ["/usr/bin/tini", "--", "/entrypoint.sh"]
+# tini reaps both children (asterisk + the control API sidecar) cleanly
+# on SIGTERM. -g forwards the signal to the whole process group so the
+# control API exits alongside asterisk.
+ENTRYPOINT ["/usr/bin/tini", "-g", "--", "/entrypoint.sh"]

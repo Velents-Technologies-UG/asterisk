@@ -17,7 +17,8 @@ USER root
 # *.conf.template files at start time.
 RUN set -eux; \
     apt-get update; \
-    apt-get install -y --no-install-recommends gettext-base ca-certificates curl; \
+    apt-get install -y --no-install-recommends \
+        gettext-base ca-certificates curl python3-minimal tini; \
     rm -rf /var/lib/apt/lists/*
 
 # Config overlays. The .sample suffix is dropped so they're picked up
@@ -41,12 +42,14 @@ RUN printf '[general]\nstatic=yes\nwriteprotect=no\n\n#include "extensions_ai_ru
       > /etc/asterisk/pjsip.conf \
  && chown -R asterisk:asterisk /etc/asterisk
 
-COPY deploy/entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
+COPY deploy/entrypoint.sh   /entrypoint.sh
+COPY deploy/control_api.py  /usr/local/bin/control-api
+RUN chmod +x /entrypoint.sh /usr/local/bin/control-api
 
 # Documented; hostNetwork=true in K8s bypasses Docker EXPOSE. Useful
 # for `docker run -p ...` paths.
-EXPOSE 5060/udp 5060/tcp 5061/tcp 8088/tcp 8089/tcp 5038/tcp
+EXPOSE 5060/udp 5060/tcp 5061/tcp 8088/tcp 8089/tcp 5038/tcp 8092/tcp
 # RTP range 10000-20000/udp is also bound; see deploy/README.md.
 
-ENTRYPOINT ["/entrypoint.sh"]
+# tini -g so SIGTERM fans out to both asterisk and the control API.
+ENTRYPOINT ["/usr/bin/tini", "-g", "--", "/entrypoint.sh"]
