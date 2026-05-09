@@ -221,17 +221,110 @@ the cross-cluster ingress (see the table above). The sidecar is also
 auto-restarted on crash so a transient panic doesn't permanently break
 the listener.
 
-### Endpoint contract: SIP trunks CRUD (stub)
+### Endpoint contract: SIP trunks CRUD
 
 The agent-hub `/api/cx/trunks` route helpers (`lib/cx/trunks.ts`,
 `lib/cx/control-client.ts`) call into the call-engine for trunk
-provisioning. The Python sidecar in this repo provides an
-**in-memory** implementation so the agent-hub trunks page works
-end-to-end against a freshly-deployed pod. Storage is process-local;
-a pod restart wipes it. The real implementation will replace this
-with PJSIP realtime writes (`ps_endpoints` / `ps_aors` / `ps_auths`)
-and **must keep this exact wire contract** so agent-hub doesn't have
-to change.
+provisioning. The Python sidecar implements both modes:
+
+| Mode | When | Behavior |
+|------|------|----------|
+| **Postgres-backed** (production) | `DATABASE_URL` is set + `python3-psycopg2` is installed | Every trunk write upserts the four PJSIP realtime rows (`ps_endpoints` / `ps_aors` / `ps_auths` / `ps_registrations`) Asterisk reads via sorcery_realtime. Combined with `POST /control/asterisk/reload`, a new trunk goes live (REGISTERs to the provider, accepts inbound, dials outbound) without touching `pjsip.conf`. |
+| **In-memory** (dev / CI / unconfigured pods) | `DATABASE_URL` empty or psycopg2 missing | Trunks are kept in a Python dict so the agent-hub trunks page renders end-to-end, **but no SIP traffic flows.** Pod startup logs `trunk store=memory-only` so this is obvious. |
+
+#### What actually happens when you POST a trunk
+
+```
+agent-hub POST /api/cx/trunks ─▶ control_api POST /control/sip/trunks ─▶ INSERT ps_aors
+                                                                       ─▶ INSERT ps_auths
+                                                                       ─▶ INSERT ps_endpoints
+                                                                       ─▶ INSERT ps_registrations  (if enabled + has username)
+                                                                       ─▶ return 200 + TrunkRow
+
+agent-hub then calls POST /control/asterisk/reload  ─▶ asterisk -rx "module reload res_pjsip.so"
+                                                                       ─▶ Asterisk reads new
+                                                                          ps_registrations row
+                                                                       ─▶ sends SIP REGISTER to provider
+                                                                       ─▶ trunk online ✓
+
+Inbound from provider:  INVITE → identify_by=username → ps_endpoints.context=from-trunk
+                                  → dialplan [from-trunk] → Stasis(call-engine, inbound, ${EXTEN})
+
+Outbound from app:       Local/<E164>@from-trunk-out → Dial(PJSIP/${EXTEN}@<trunk_id>)
+                                                     → ps_endpoints lookup → INVITE to provider
+```
+
+#### How a trunk relates to the rest of Asterisk
+
+For an actual call to flow, eight relationships have to hold. The
+sidecar establishes them on every write; this table is what to
+verify on a live pod when a call doesn't connect.
+
+| # | From | To | Why it matters |
+|---|------|----|----|
+| 1 | `ps_endpoints.id` | trunk id from POST body | Dialplan `[from-trunk-out]` (`configs/samples/extensions_ai_runtime.conf.sample:113`) dials `PJSIP/${EXTEN}@${TRUNK_ENDPOINT}` — the endpoint name has to match the trunk id the call-engine puts in `TRUNK_ENDPOINT`. |
+| 2 | `ps_endpoints.context` | `from-trunk` (or `TRUNK_INBOUND_CONTEXT`) | Inbound INVITEs from the provider land in dialplan `[from-trunk]` (`extensions_ai_runtime.conf.sample:55`), which fires `Stasis(call-engine, inbound, ${EXTEN})`. Wrong context = inbound calls dropped. |
+| 3 | `ps_endpoints.aors` | trunk id (same string) | The endpoint resolves contact info via the matching `ps_aors` row. |
+| 4 | `ps_endpoints.auth` + `outbound_auth` | `<trunk-id>-auth` | Asterisk authenticates inbound (challenge) and outbound (sending INVITE) via this auth row. |
+| 5 | `ps_aors.contact` | trunk `serverUri` | When Asterisk dials out via `PJSIP/${EXTEN}@<trunk_id>`, it appends EXTEN to this contact. |
+| 6 | `ps_registrations.server_uri` + `client_uri` | provider host + `sip:<username>@<from_domain or host>` | The REGISTER request that gets the trunk online. Disabling the trunk drops this row → REGISTERs stop. |
+| 7 | `ps_endpoints.transport` | `transport-udp` | Has to match the section name in `pjsip_trunks.conf.sample:14` (`[transport-udp]` bound to `0.0.0.0:5060`). Override via `PJSIP_TRANSPORT_NAME` if you bind TLS instead. |
+| 8 | `ps_endpoints.identify_by` | `username,auth_username` | How Asterisk matches an incoming INVITE back to this endpoint. Comma-separated list of methods so providers that put the auth user (not the dialed user) on the From header still match. |
+
+What's outside this repo's scope but still required for an actual
+call to land somewhere useful:
+
+- **DID → tenant routing**: lives in the call-engine's StasisStart
+  `inbound` handler. `[from-trunk]` fires
+  `Stasis(call-engine, inbound, ${EXTEN})`; the call-engine looks
+  up the DID, resolves to a tenant + flow/agent, dispatches.
+- **Outbound rule → trunk choice**: lives in the call-engine's
+  `outbound_human` handler. `[from-wss-agents-out]` fires it; the
+  handler picks a trunk per tenant + dialed-prefix
+  (`outbound_rules` table) and originates
+  `Local/<E164>@from-trunk-out` with the chosen trunk id in
+  `TRUNK_ENDPOINT`.
+- **Provider IP allowlist** (`ps_endpoint_id_ips` rows) for
+  carriers that don't register and don't auth-challenge (Twilio
+  Elastic SIP, Telnyx). Not in v1 — current setup assumes
+  register-based trunks.
+
+#### Required pod env
+
+| Var | Required | What it does |
+|-----|----------|--------------|
+| `CONTROL_API_SECRET` | yes | Bearer auth on `/control/*` (existing). |
+| `DATABASE_URL` | for real call traffic | `postgres://USER:PASS@HOST:PORT/DB` of the same DB Asterisk reads via ODBC (the `[asterisk]` connection in `res_odbc_agents.conf`). Without it, sidecar falls back to memory-only. |
+| `ASTERISK_BIN` | no | Override the Asterisk CLI binary path (default `asterisk`, on PATH in both dev + prod images). Used by `/control/asterisk/reload`. |
+| `PJSIP_TRANSPORT_NAME` | no | Default `transport-udp` — must match `pjsip_trunks.conf`'s `[transport-udp]` section. |
+| `TRUNK_INBOUND_CONTEXT` | no | Dialplan context inbound INVITEs land in. Default `from-trunk` (matches `extensions_ai_runtime.conf`). |
+| `TRUNK_DEFAULT_ALLOW` | no | Codec list written to `ps_endpoints.allow`. Default `ulaw,alaw`. |
+
+#### Postgres schema requirement
+
+The four ps_* tables must already exist (created by Asterisk's
+contrib alembic migrations or `postgresql_config.sql`). Standard
+columns; no custom additions. The sidecar writes:
+
+- `ps_aors`: `(id, max_contacts, qualify_frequency, contact)`
+- `ps_auths`: `(id, auth_type, username, password, realm)` (only when password present)
+- `ps_endpoints`: `(id, transport, context, aors, auth, allow, dtmf_mode, identify_by, disallow, outbound_auth)`
+- `ps_registrations`: `(id, transport, server_uri, client_uri, expiration, retry_interval, outbound_auth)` (only when enabled + has auth)
+
+Disabling a trunk (`enabled: false`) drops the `ps_registrations`
+row so Asterisk stops re-registering, but keeps the endpoint /
+aor / auth so cached calls in flight don't drop. Deleting drops
+all four rows. ID convention: trunk id `primary` → endpoint
+`primary`, aor `primary`, auth `primary-auth`.
+
+#### Failure modes
+
+| Status | When |
+|--------|------|
+| 502 | Postgres write failed — error in pod logs (`trunk %s pjsip write failed: ...`). The trunk is **not** stored in memory either, so the API doesn't lie about success. |
+| 502 | `/control/asterisk/reload`: `asterisk -rx` exited non-zero. `stdout`/`stderr` returned in the body for diagnosis. |
+| 504 | `/control/asterisk/reload`: CLI hung past 10 s (Asterisk wedged). |
+| 422 | `/control/asterisk/reload`: requested module not in the whitelist (currently `res_pjsip.so`, `res_pjsip_endpoint_identifier_ip.so`). |
 
 | Method | Path | Behavior |
 |--------|------|----------|
