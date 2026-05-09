@@ -132,6 +132,63 @@ All three should be `Running`.
   via menuselect overrides in a fork of `Dockerfile.prod`.
 - TLS certificates — provided via Secret mount at `/etc/asterisk/keys`.
 
+## Call-engine control API ingress (cross-cluster)
+
+The call-engine is a sibling service that runs in the same AWS cluster
+as Asterisk (separate pod) and listens on **TCP 8092** for
+`/control/*` and `/healthz`. It is a sensitive admin surface: it
+provisions PJSIP trunks, dispositions calls, drives the dialplan over
+ARI, and exposes operational telemetry.
+
+agent-hub runs in our **GCP** cluster and has to reach this surface
+cross-cloud over the public internet, because there is no
+VPC-peering / Interconnect between the two clusters. The Next.js
+server-side helper (`agent-hub:lib/cx/control-client.ts`) reads
+`CALL_ENGINE_CONTROL_URL` (full base URL, no trailing slash) and sends
+`Authorization: Bearer ${CONTROL_API_SECRET}` with every request.
+
+### What DevOps needs to wire up
+
+| Hop | Concern | Required setting |
+|-----|---------|------------------|
+| Public DNS | hostname | `asterisk.velents.ai` already CNAME's the AWS NLB / k8s ingress (Cloudflare grey-cloud, DNS-only — keep it grey-cloud so the bearer token isn't terminated at Cloudflare). |
+| Ingress (AWS) | `Host: asterisk.velents.ai` matcher | Add a new path block for `/control/` and `/healthz` (in addition to whatever exists today on 80/443). |
+| Ingress backend | service + port | Forward `/control/` and `/healthz` to the call-engine `Service` on container port `8092` (NOT to the Asterisk pod — Asterisk does **not** listen on 8092; only the sibling call-engine does). |
+| Auth | bearer token | The app enforces this. The ingress only needs to pass `Authorization` through. Do **not** strip it. |
+| TLS | scheme | HTTPS only on the public side. Internal hop ingress→call-engine can stay HTTP/8092 within the cluster. |
+| Source-IP allowlist | scope | **Deferred (follow-up).** We are launching with bearer-only. Track adding `nginx.ingress.kubernetes.io/whitelist-source-range: <GCP-NAT-CIDR>` (or the equivalent ALB SG rule) as a follow-up before this surface widens beyond trunks. |
+
+### agent-hub side (GCP)
+
+Set in the agent-hub deployment env:
+
+```
+CALL_ENGINE_CONTROL_URL=https://asterisk.velents.ai
+CONTROL_API_SECRET=<rotated-shared-secret>
+```
+
+Test from a GCP-side shell with curl:
+
+```bash
+curl -fsS -H "Authorization: Bearer $CONTROL_API_SECRET" \
+  https://asterisk.velents.ai/healthz
+curl -fsS -H "Authorization: Bearer $CONTROL_API_SECRET" \
+  https://asterisk.velents.ai/control/sip/trunks
+```
+
+Both must return 200 from the GCP cluster's egress before the
+`/dashboard/build/voip/trunks` page will render. If you see 502 / 504
+in agent-hub logs (`call-engine unreachable at <url>` or
+`call-engine timed out at <url> after 5s`), the network path is the
+problem, not the app.
+
+### Common gotcha
+
+`curl http://127.0.0.1:8092/healthz` from **inside the Asterisk pod**
+will always fail with `Connection refused`. Asterisk does not run the
+control API; the call-engine pod does. Curl from the call-engine pod
+(or from a debug pod targeting the call-engine `Service`) instead.
+
 ## See also
 
 - `configs/samples/README.call-engine.md` — install steps for a
