@@ -65,6 +65,12 @@ FROM ${ASTERISK_RUNTIME_BASE}
 
 ENV DEBIAN_FRONTEND=noninteractive
 
+# NOTE: install full `python3`, NOT `python3-minimal`. The minimal
+# package omits the `json` stdlib module (and other libpython3.X-stdlib
+# bits) that deploy/control_api.py imports — building with
+# `python3-minimal` produced a CrashLoopBackOff:
+#   ModuleNotFoundError: No module named 'json'
+# in the prod-17 image. Adds ~30 MB to the runtime layer; worth it.
 RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
@@ -74,7 +80,7 @@ RUN set -eux; \
         libncurses6 libnewt0.52 libopus0 \
         libpopt0 libical3 libspeex1 libspeexdsp1 libogg0 libvorbis0a \
         libuuid1 ca-certificates gettext-base \
-        curl tini python3-minimal ; \
+        curl tini python3 ; \
     rm -rf /var/lib/apt/lists/*; \
     groupadd -r -g 1000 asterisk; \
     useradd  -r -u 1000 -g asterisk -d /var/lib/asterisk -s /sbin/nologin asterisk; \
