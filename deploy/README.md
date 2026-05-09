@@ -221,6 +221,114 @@ the cross-cluster ingress (see the table above). The sidecar is also
 auto-restarted on crash so a transient panic doesn't permanently break
 the listener.
 
+### Endpoint contract: flow analytics (spec 2.1.5)
+
+The velentsAgents tenant API exposes per-flow IVR analytics under
+`/FlowAnalytics/*` (see `app/FlowAnalytics/` in that repo). It does
+**not** own the lifecycle event source-of-truth — it proxies and
+transforms responses from the call-engine. The call-engine team
+owns the four endpoints below, served by the same control-api
+process documented above (bearer auth, same secret, same host).
+
+All endpoints are **GET**, return `application/json`, and accept
+the standard `Authorization: Bearer ${CONTROL_API_SECRET}` header
+that velentsAgents already forwards. Multi-tenancy: velentsAgents
+passes `?tenant=<tenant-id>` on every call so the call-engine
+scopes its query (do not infer tenant from any other source).
+
+| Method | Path | Query | Returns |
+|--------|------|-------|---------|
+| GET | `/control/flow-analytics/overview` | `from`, `to`, `tenant`, `flow_id?` | `{ kpis }` |
+| GET | `/control/flow-analytics/flows` | `tenant` | `{ flows: [{ flow_id, name, is_active }] }` |
+| GET | `/control/flow-analytics/{flow}/funnel` | `from`, `to`, `tenant` | `{ funnel, steps }` |
+| GET | `/control/flow-analytics/{flow}/trend` | `from`, `to`, `tenant`, `granularity=day\|hour\|week` | `{ trend }` |
+
+#### Response shapes
+
+Stable envelope keys — additional keys may appear; consumers must
+ignore unknown ones. `null` is permitted for percentile fields
+when the sample size is too small. All durations are in
+**milliseconds** for per-step dwell, **seconds** for whole-call
+duration. Don't mix units.
+
+```jsonc
+// /overview
+{
+  "kpis": {
+    "total_calls":            1234,
+    "completed_calls":         987,
+    "completion_rate_pct":      80.0,
+    "abandoned_calls":         247,
+    "avg_duration_seconds":    142.3,
+    "p50_duration_seconds":    118,
+    "p95_duration_seconds":    412
+  }
+}
+```
+
+```jsonc
+// /{flow}/funnel
+{
+  "funnel": [ /* same shape as steps[]; ordered by flow position */ ],
+  "steps":  [
+    {
+      "step_id":              "node_42",
+      "label":                "Verify account number",
+      "entered":              900,
+      "completed":            812,
+      "abandoned":             88,
+      "abandonment_rate_pct":   9.8,
+      "avg_dwell_ms":         3450,
+      "p50_dwell_ms":         2900,
+      "p95_dwell_ms":         9100
+    }
+  ]
+}
+```
+
+```jsonc
+// /{flow}/trend
+{
+  "trend": [
+    {
+      "bucket":                "2026-05-01",        // ISO date for granularity=day; ISO hour for hour; ISO Mon-of-week for week
+      "total_calls":            128,
+      "completed_calls":         99,
+      "completion_rate_pct":     77.3,
+      "avg_duration_seconds":   140.0
+    }
+  ]
+}
+```
+
+```jsonc
+// /flows
+{
+  "flows": [
+    { "flow_id": "flow_abc123", "name": "Main IVR", "is_active": true }
+  ]
+}
+```
+
+#### Error envelope
+
+velentsAgents converts every non-2xx into a clean 502/503 with a
+short message. The call-engine should respond with:
+
+| Status | When |
+|--------|------|
+| 401    | Missing or wrong bearer (velentsAgents will surface as 502) |
+| 422    | `from > to`, unknown `granularity`, malformed `tenant` |
+| 503    | Underlying event store unavailable (velentsAgents will retry twice with 200 ms backoff before surfacing) |
+
+#### Out-of-scope (deferred for v2)
+
+- CSV / XLSX export of any of the above.
+- Period-over-period delta (`?compare=true`) — the agent-hub UI
+  reserves the slot but velentsAgents will not pass it yet.
+- Materialized rollup table on the velentsAgents side. Add only
+  if dashboard latency exceeds ~500 ms p95.
+
 ## See also
 
 - `configs/samples/README.call-engine.md` — install steps for a
