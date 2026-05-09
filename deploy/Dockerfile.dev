@@ -14,12 +14,15 @@ FROM andrius/asterisk:22-current
 USER root
 
 # envsubst (gettext-base) is used by entrypoint.sh to render
-# *.conf.template files at start time. python3 is the runtime for
-# the call-engine control-api sidecar (deploy/control_api.py).
+# *.conf.template files at start time. python3 + python3-psycopg2
+# are the runtime for the call-engine control-api sidecar
+# (deploy/control_api.py); psycopg2 lets the sidecar write the PJSIP
+# realtime rows (ps_endpoints / ps_aors / ps_auths / ps_registrations)
+# that Asterisk reads back over ODBC. Apt-only on purpose — no pip.
 RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
-        gettext-base ca-certificates curl python3; \
+        gettext-base ca-certificates curl python3 python3-psycopg2; \
     rm -rf /var/lib/apt/lists/*
 
 # Config overlays. The .sample suffix is dropped so they're picked up

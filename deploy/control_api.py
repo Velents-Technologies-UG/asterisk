@@ -1,26 +1,66 @@
 #!/usr/bin/env python3
 # Minimal control API that runs alongside Asterisk in the same pod.
 #
-# This is the listener agent-hub talks to over the cross-cluster ingress
-# (asterisk.velents.ai/control/*, /healthz). Today it is a stub: it
-# answers /healthz, validates the bearer token, and returns an empty
-# trunks list so the agent-hub trunks page renders without a 502. The
-# remaining /control/* endpoints (SIP trunk CRUD, calls, dispositions,
-# etc.) are wired up to ARI/AMI in follow-ups.
+# Stub. Answers /healthz, enforces bearer auth, and now provides
+# in-memory CRUD for SIP trunks under /control/sip/trunks/* so the
+# agent-hub trunks page works end-to-end. The contract matches what
+# agent-hub's `lib/cx/trunks.ts::upsertTrunk` already sends (camelCase
+# input, snake_case TrunkRow output, `items` envelope on list).
 #
-# Stdlib only (no pip): the runtime image installs python3-minimal but
-# does not pip install anything.
+# Storage is intentionally process-local — a pod restart wipes it.
+# When the call-engine team takes over this surface, replace the
+# in-memory dict with PJSIP realtime writes (ps_endpoints / ps_aors /
+# ps_auths) and keep the same wire contract so agent-hub doesn't need
+# to change.
+#
+# Stdlib only (no pip): the runtime image installs python3 but does
+# not pip install anything.
 
 import json
 import os
+import re
+import shutil
 import signal
+import subprocess
 import sys
+import threading
 import logging
+from datetime import datetime, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+# psycopg2 is optional. With DATABASE_URL set, every trunk write also
+# upserts the four PJSIP realtime rows (ps_endpoints / ps_aors /
+# ps_auths / ps_registrations) Asterisk reads over ODBC, so the trunk
+# REGISTERs and carries calls. Without it (or without DATABASE_URL),
+# the API still works in memory-only mode for UI demos.
+try:
+    import psycopg2
+    import psycopg2.extras
+    HAS_PSYCOPG2 = True
+except ImportError:
+    HAS_PSYCOPG2 = False
+
 PORT = int(os.environ.get("CONTROL_API_PORT", "8092"))
 SECRET = os.environ.get("CONTROL_API_SECRET", "").strip()
+DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
+ASTERISK_BIN = os.environ.get("ASTERISK_BIN", "asterisk")
+DEFAULT_TRANSPORT = os.environ.get("PJSIP_TRANSPORT_NAME", "transport-udp")
+DEFAULT_INBOUND_CONTEXT = os.environ.get("TRUNK_INBOUND_CONTEXT", "from-trunk")
+DEFAULT_CODEC_ALLOW = os.environ.get("TRUNK_DEFAULT_ALLOW", "ulaw,alaw")
+MAX_BODY_BYTES = 64 * 1024  # 64 KiB — way more than a trunk row needs.
+
+# In-memory trunk store. Key = trunk id; value = the canonical
+# snake_case TrunkRow that we hand back on read, plus a private
+# "_password" field that is NEVER serialized.
+_trunks: dict[str, dict] = {}
+_lock = threading.RLock()
+
+# Mirrors agent-hub's SAFE_ID at lib/cx/trunks.ts. Reject early so a
+# bad id doesn't propagate downstream where someone might forget to
+# escape it (hello, ps_endpoints PRIMARY KEY).
+_SAFE_ID = re.compile(r"^[a-zA-Z0-9_-]{1,60}$")
+_VALID_TRANSPORTS = {"udp", "tcp", "tls"}
 
 # stderr so logs are not buffered behind the supervisor's pipe in
 # entrypoint.sh — `kubectl logs` then shows startup errors in real time.
@@ -30,6 +70,243 @@ logging.basicConfig(
     stream=sys.stderr,
 )
 log = logging.getLogger("control-api")
+
+
+# ── trunk validation + projection ────────────────────────────
+
+class _ValidationError(ValueError):
+    pass
+
+
+# Camel-cased input keys (what agent-hub's upsertTrunk sends) → the
+# snake_case TrunkRow keys lib/cx/trunks.ts consumes. Optional fields
+# missing from the payload land in the row as `null`. Reserved keys
+# (outbound_auth, identify_by, allow) are reserved for the real
+# call-engine implementation that writes PJSIP realtime; the stub
+# always emits them as null so the consumer's TS shape is satisfied.
+_INPUT_TO_ROW_NULLABLE = {
+    "provider":     "provider",
+    "region":       "region",
+    "description":  "description",
+    "transport":    "transport",
+    "context":      "context",
+    "clientUri":    "client_uri",
+    "fromUser":     "from_user",
+    "fromDomain":   "from_domain",
+    "expiration":   "expiration",
+}
+
+
+def _validate_trunk_input(body):
+    """Return the canonical stored shape, or raise _ValidationError."""
+    for required in ("id", "displayName", "serverUri", "username"):
+        v = body.get(required)
+        if v is None or (isinstance(v, str) and not v.strip()):
+            raise _ValidationError(f"{required} required")
+
+    trunk_id = str(body["id"]).strip()
+    if not _SAFE_ID.match(trunk_id):
+        raise _ValidationError("id must be 1-60 chars, alphanumerics + _ -")
+
+    transport = body.get("transport")
+    if transport is not None:
+        if transport not in _VALID_TRANSPORTS:
+            raise _ValidationError(
+                "transport must be one of: " + ", ".join(sorted(_VALID_TRANSPORTS))
+            )
+
+    channel_limit = body.get("channelLimit", 50)
+    try:
+        channel_limit = int(channel_limit)
+    except (TypeError, ValueError):
+        raise _ValidationError("channelLimit must be an integer")
+    if not 1 <= channel_limit <= 1000:
+        raise _ValidationError("channelLimit must be between 1 and 1000")
+
+    expiration = body.get("expiration")
+    if expiration is not None:
+        try:
+            expiration = int(expiration)
+        except (TypeError, ValueError):
+            raise _ValidationError("expiration must be an integer")
+        if not 60 <= expiration <= 86400:
+            raise _ValidationError("expiration must be between 60 and 86400 seconds")
+
+    enabled = body.get("enabled", True)
+    if not isinstance(enabled, bool):
+        raise _ValidationError("enabled must be a boolean")
+
+    row = {
+        "id":            trunk_id,
+        "display_name":  str(body["displayName"]),
+        "server_uri":    str(body["serverUri"]),
+        "username":      str(body["username"]),
+        "channel_limit": channel_limit,
+        "enabled":       enabled,
+        "outbound_auth": None,    # reserved
+        "identify_by":   None,    # reserved
+        "allow":         None,    # reserved
+    }
+    for in_key, out_key in _INPUT_TO_ROW_NULLABLE.items():
+        v = body.get(in_key)
+        row[out_key] = None if v is None or v == "" else (
+            int(v) if out_key in {"expiration"} else v
+        )
+
+    # Password is stored under a private key so _to_row() can't
+    # accidentally serialize it.
+    pw = body.get("password")
+    row["_password"] = None if pw is None or pw == "" else str(pw)
+
+    return row
+
+
+def _to_row(stored):
+    """Public projection — strip private fields like _password."""
+    return {k: v for k, v in stored.items() if not k.startswith("_")}
+
+
+# ── PJSIP realtime writer ────────────────────────────────────
+#
+# These four tables are what Asterisk reads via sorcery_realtime +
+# extconfig (configs/samples/sorcery_realtime_agents.conf.sample,
+# extconfig_realtime_agents.conf.sample). When we INSERT a row into
+# ps_registrations and run `module reload res_pjsip.so`, Asterisk
+# sends a SIP REGISTER to the upstream provider — that's how a trunk
+# you create in the UI ends up actually carrying calls.
+#
+# Schema is the standard Asterisk-22 contrib shape. If a deployment
+# has columns missing, the IntegrityError will surface as 502 on the
+# API and the Postgres error in the pod logs — better than silently
+# writing nothing.
+
+class _DbError(RuntimeError):
+    pass
+
+
+def _db_enabled():
+    return HAS_PSYCOPG2 and bool(DATABASE_URL)
+
+
+def _db_conn():
+    return psycopg2.connect(DATABASE_URL)
+
+
+def _auth_id_for(trunk_id):
+    return f"{trunk_id}-auth"
+
+
+def _pjsip_upsert(row, password):
+    """Write the four ps_* rows so Asterisk picks the trunk up on reload."""
+    if not _db_enabled():
+        return
+    has_auth = bool(password) and bool(row.get("username"))
+    auth_id = _auth_id_for(row["id"]) if has_auth else None
+    transport = row.get("transport") or DEFAULT_TRANSPORT
+    context = row.get("context") or DEFAULT_INBOUND_CONTEXT
+    allow = row.get("allow") or DEFAULT_CODEC_ALLOW
+    server_uri = row["server_uri"]
+    expiration = row.get("expiration") or 3600
+    client_uri = row.get("client_uri") or (
+        f"sip:{row['username']}@{row.get('from_domain') or _server_uri_host(server_uri)}"
+        if row.get("username") else None
+    )
+
+    try:
+        with _db_conn() as conn, conn.cursor() as cur:
+            # 1) AOR — describes the contact Asterisk dials/sends INVITEs to.
+            cur.execute("""
+                INSERT INTO ps_aors (id, max_contacts, qualify_frequency, contact)
+                VALUES (%s, 1, 60, %s)
+                ON CONFLICT (id) DO UPDATE SET
+                    contact = EXCLUDED.contact,
+                    qualify_frequency = EXCLUDED.qualify_frequency
+            """, (row["id"], server_uri))
+
+            # 2) AUTH — only when the trunk has credentials.
+            if has_auth:
+                cur.execute("""
+                    INSERT INTO ps_auths (id, auth_type, username, password, realm)
+                    VALUES (%s, 'userpass', %s, %s, %s)
+                    ON CONFLICT (id) DO UPDATE SET
+                        username = EXCLUDED.username,
+                        password = EXCLUDED.password,
+                        realm    = EXCLUDED.realm
+                """, (auth_id, row["username"], password, row.get("from_domain")))
+            else:
+                cur.execute("DELETE FROM ps_auths WHERE id = %s", (_auth_id_for(row["id"]),))
+
+            # 3) ENDPOINT — what Asterisk uses for incoming AND outgoing.
+            cur.execute("""
+                INSERT INTO ps_endpoints
+                    (id, transport, context, aors, auth, allow, dtmf_mode,
+                     identify_by, disallow, outbound_auth)
+                VALUES (%s, %s, %s, %s, %s, %s, 'rfc4733', 'username,auth_username', 'all', %s)
+                ON CONFLICT (id) DO UPDATE SET
+                    transport     = EXCLUDED.transport,
+                    context       = EXCLUDED.context,
+                    aors          = EXCLUDED.aors,
+                    auth          = EXCLUDED.auth,
+                    allow         = EXCLUDED.allow,
+                    outbound_auth = EXCLUDED.outbound_auth
+            """, (row["id"], transport, context, row["id"], auth_id, allow, auth_id))
+
+            # 4) REGISTRATION — only when enabled. Disabling the trunk
+            #    drops the row so Asterisk stops re-registering.
+            if row.get("enabled", True) and has_auth and client_uri:
+                cur.execute("""
+                    INSERT INTO ps_registrations
+                        (id, transport, server_uri, client_uri, expiration,
+                         retry_interval, outbound_auth)
+                    VALUES (%s, %s, %s, %s, %s, 60, %s)
+                    ON CONFLICT (id) DO UPDATE SET
+                        server_uri     = EXCLUDED.server_uri,
+                        client_uri     = EXCLUDED.client_uri,
+                        expiration     = EXCLUDED.expiration,
+                        outbound_auth  = EXCLUDED.outbound_auth
+                """, (row["id"], transport, server_uri, client_uri, expiration, auth_id))
+            else:
+                cur.execute("DELETE FROM ps_registrations WHERE id = %s", (row["id"],))
+    except psycopg2.Error as exc:
+        raise _DbError(f"pjsip realtime write failed: {exc}") from exc
+
+
+def _pjsip_delete(trunk_id):
+    if not _db_enabled():
+        return
+    try:
+        with _db_conn() as conn, conn.cursor() as cur:
+            # Order: drop registrations first (foreign-key-ish), then
+            # endpoint, then auth, then aor.
+            cur.execute("DELETE FROM ps_registrations WHERE id = %s", (trunk_id,))
+            cur.execute("DELETE FROM ps_endpoints    WHERE id = %s", (trunk_id,))
+            cur.execute("DELETE FROM ps_auths        WHERE id = %s", (_auth_id_for(trunk_id),))
+            cur.execute("DELETE FROM ps_aors         WHERE id = %s", (trunk_id,))
+    except psycopg2.Error as exc:
+        raise _DbError(f"pjsip realtime delete failed: {exc}") from exc
+
+
+def _server_uri_host(server_uri):
+    """Extract host from sip:user@host:port or sip:host."""
+    s = server_uri.replace("sips:", "").replace("sip:", "")
+    if "@" in s:
+        s = s.split("@", 1)[1]
+    return s.split(":", 1)[0].split(";", 1)[0]
+
+
+# ── route table ──────────────────────────────────────────────
+
+_ROUTES = [
+    ("GET",    re.compile(r"^/control/sip/trunks/?$"),       "list_trunks"),
+    ("POST",   re.compile(r"^/control/sip/trunks/?$"),       "create_trunk"),
+    ("GET",    re.compile(r"^/control/sip/trunks/([^/]+)$"), "show_trunk"),
+    # POST to /control/sip/trunks/{id} also upserts (some callers
+    # PUT, some POST). Both land in the same handler.
+    ("POST",   re.compile(r"^/control/sip/trunks/([^/]+)$"), "upsert_trunk_by_id"),
+    ("PUT",    re.compile(r"^/control/sip/trunks/([^/]+)$"), "upsert_trunk_by_id"),
+    ("DELETE", re.compile(r"^/control/sip/trunks/([^/]+)$"), "delete_trunk"),
+    ("POST",   re.compile(r"^/control/asterisk/reload/?$"),  "reload_asterisk"),
+]
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -67,6 +344,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_PATCH(self):
         self._dispatch("PATCH")
 
+    # ── routing ──────────────────────────────────────────────
+
     def _dispatch(self, method):
         path = self.path.split("?", 1)[0]
 
@@ -89,16 +368,200 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(HTTPStatus.UNAUTHORIZED, {"error": "invalid bearer"})
             return
 
-        # Stub responses keep agent-hub pages rendering with empty data
-        # instead of bubbling a 502. Replace these with real ARI/AMI
-        # calls as we implement each surface.
-        if method == "GET" and path == "/control/sip/trunks":
-            self._send_json(HTTPStatus.OK, {"trunks": []})
+        for verb, pattern, handler_name in _ROUTES:
+            if verb != method:
+                continue
+            m = pattern.match(path)
+            if not m:
+                continue
+            getattr(self, handler_name)(*m.groups())
             return
 
         self._send_json(
             HTTPStatus.NOT_IMPLEMENTED,
             {"error": "not implemented in call-engine stub", "method": method, "path": path},
+        )
+
+    # ── body helpers ─────────────────────────────────────────
+
+    def _read_json_body(self):
+        """Return parsed JSON dict, or None if a response was already sent."""
+        ctype = self.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+        if ctype and ctype != "application/json":
+            self._send_json(HTTPStatus.UNSUPPORTED_MEDIA_TYPE,
+                            {"error": "content-type must be application/json"})
+            return None
+
+        try:
+            length = int(self.headers.get("content-length") or 0)
+        except ValueError:
+            self._send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid content-length"})
+            return None
+        if length > MAX_BODY_BYTES:
+            self._send_json(HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+                            {"error": "body too large"})
+            return None
+        if length == 0:
+            return {}
+
+        raw = self.rfile.read(length)
+        try:
+            data = json.loads(raw.decode("utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            self._send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid json"})
+            return None
+        if not isinstance(data, dict):
+            self._send_json(HTTPStatus.BAD_REQUEST, {"error": "body must be a JSON object"})
+            return None
+        return data
+
+    def _send_204(self):
+        self.send_response(HTTPStatus.NO_CONTENT)
+        self.send_header("content-length", "0")
+        self.end_headers()
+
+    # ── /control/sip/trunks handlers ─────────────────────────
+
+    def list_trunks(self):
+        with _lock:
+            items = [_to_row(t) for t in _trunks.values()]
+        # Stable order so the list page doesn't shuffle on every refresh.
+        items.sort(key=lambda r: r["id"])
+        self._send_json(HTTPStatus.OK, {"items": items})
+
+    def show_trunk(self, trunk_id):
+        with _lock:
+            t = _trunks.get(trunk_id)
+        if t is None:
+            self._send_json(HTTPStatus.NOT_FOUND, {"error": "trunk not found"})
+            return
+        self._send_json(HTTPStatus.OK, _to_row(t))
+
+    def create_trunk(self):
+        self._upsert_common(url_id=None)
+
+    def upsert_trunk_by_id(self, trunk_id):
+        self._upsert_common(url_id=trunk_id)
+
+    def _upsert_common(self, url_id):
+        body = self._read_json_body()
+        if body is None:
+            return  # response already sent
+        if url_id is not None:
+            body_id = body.get("id")
+            if body_id is None or body_id == "":
+                body["id"] = url_id
+            elif str(body_id) != url_id:
+                self._send_json(HTTPStatus.UNPROCESSABLE_ENTITY,
+                                {"error": "id in URL and body must match"})
+                return
+        try:
+            normalized = _validate_trunk_input(body)
+        except _ValidationError as exc:
+            self._send_json(HTTPStatus.UNPROCESSABLE_ENTITY, {"error": str(exc)})
+            return
+
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+        with _lock:
+            existing = _trunks.get(normalized["id"])
+            normalized["created_at"] = (existing or {}).get("created_at", now)
+            normalized["updated_at"] = now
+            password = normalized.pop("_password", None)
+            # Persist to Postgres BEFORE memory so a DB failure doesn't
+            # leave the API claiming success while Asterisk has nothing.
+            try:
+                _pjsip_upsert({**normalized, "username": normalized.get("username")}, password)
+            except _DbError as exc:
+                log.error("trunk %s pjsip write failed: %s", normalized["id"], exc)
+                self._send_json(HTTPStatus.BAD_GATEWAY, {"error": str(exc)})
+                return
+            # Stash password back so subsequent updates that omit it
+            # can still REGISTER from the cached value.
+            normalized["_password"] = password
+            _trunks[normalized["id"]] = normalized
+
+        self._send_json(HTTPStatus.OK, _to_row(normalized))
+
+    def delete_trunk(self, trunk_id):
+        with _lock:
+            removed = _trunks.pop(trunk_id, None)
+        # Delete from Postgres regardless of whether memory had it
+        # (the rows could have been seeded out of band, and we want
+        # idempotent deletes).
+        try:
+            _pjsip_delete(trunk_id)
+        except _DbError as exc:
+            log.error("trunk %s pjsip delete failed: %s", trunk_id, exc)
+            self._send_json(HTTPStatus.BAD_GATEWAY, {"error": str(exc)})
+            return
+        if removed is None and not _db_enabled():
+            self._send_json(HTTPStatus.NOT_FOUND, {"error": "trunk not found"})
+            return
+        self._send_204()
+
+    # ── /control/asterisk/reload ─────────────────────────────
+    #
+    # Real reload via the asterisk CLI socket (which lives in
+    # /var/run/asterisk and is owned by uid:gid 1000 — the same the
+    # sidecar runs as inside the pod). Without this, new
+    # ps_registrations rows aren't picked up and the trunk doesn't
+    # send a SIP REGISTER. agent-hub's POST handler calls this right
+    # after upsertTrunk.
+
+    def reload_asterisk(self):
+        body = self._read_json_body()
+        if body is None:
+            return
+        module = str(body.get("moduleName") or body.get("module") or "").strip()
+        if not module:
+            module = "res_pjsip.so"
+        # Whitelist: only reload PJSIP-related modules from this API
+        # (don't let a typo'd request reload core, app_*, etc.).
+        if module not in {"res_pjsip.so", "res_pjsip_endpoint_identifier_ip.so"}:
+            self._send_json(HTTPStatus.UNPROCESSABLE_ENTITY,
+                            {"error": f"module not allowed: {module}"})
+            return
+
+        if shutil.which(ASTERISK_BIN) is None:
+            # Sidecar may run in a no-asterisk dev container; surface
+            # honestly rather than pretending we reloaded.
+            self._send_json(HTTPStatus.OK, {
+                "reloaded": False,
+                "stub": True,
+                "module": module,
+                "reason": f"{ASTERISK_BIN} binary not on PATH",
+            })
+            return
+
+        try:
+            proc = subprocess.run(
+                [ASTERISK_BIN, "-rx", f"module reload {module}"],
+                capture_output=True, text=True, timeout=10, check=False,
+            )
+        except subprocess.TimeoutExpired:
+            self._send_json(HTTPStatus.GATEWAY_TIMEOUT,
+                            {"error": "asterisk -rx timed out after 10s"})
+            return
+        except OSError as exc:
+            self._send_json(HTTPStatus.BAD_GATEWAY,
+                            {"error": f"asterisk exec failed: {exc}"})
+            return
+
+        ok = proc.returncode == 0
+        out = (proc.stdout or "").strip()
+        err = (proc.stderr or "").strip()
+        log.info("asterisk reload %s rc=%d stdout=%r stderr=%r",
+                 module, proc.returncode, out[:200], err[:200])
+        self._send_json(
+            HTTPStatus.OK if ok else HTTPStatus.BAD_GATEWAY,
+            {
+                "reloaded": ok,
+                "stub": False,
+                "module": module,
+                "rc": proc.returncode,
+                "stdout": out,
+                "stderr": err,
+            },
         )
 
 
@@ -132,10 +595,18 @@ def main():
     signal.signal(signal.SIGTERM, _graceful)
     signal.signal(signal.SIGINT, _graceful)
 
+    if DATABASE_URL and not HAS_PSYCOPG2:
+        log.warning(
+            "DATABASE_URL is set but psycopg2 is not installed — falling back to "
+            "in-memory mode. Trunks will NOT register or carry calls. Rebuild the "
+            "image with python3-psycopg2."
+        )
+    db_mode = "postgres" if _db_enabled() else "memory-only"
     log.info(
-        "listening on 0.0.0.0:%d (secret %s) — ready for /healthz and /control/*",
+        "listening on 0.0.0.0:%d (secret %s, trunk store=%s) — ready for /healthz and /control/*",
         PORT,
         "set" if SECRET else "MISSING",
+        db_mode,
     )
     try:
         server.serve_forever()
