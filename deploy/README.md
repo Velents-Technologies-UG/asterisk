@@ -221,6 +221,105 @@ the cross-cluster ingress (see the table above). The sidecar is also
 auto-restarted on crash so a transient panic doesn't permanently break
 the listener.
 
+### Endpoint contract: SIP trunks CRUD (stub)
+
+The agent-hub `/api/cx/trunks` route helpers (`lib/cx/trunks.ts`,
+`lib/cx/control-client.ts`) call into the call-engine for trunk
+provisioning. The Python sidecar in this repo provides an
+**in-memory** implementation so the agent-hub trunks page works
+end-to-end against a freshly-deployed pod. Storage is process-local;
+a pod restart wipes it. The real implementation will replace this
+with PJSIP realtime writes (`ps_endpoints` / `ps_aors` / `ps_auths`)
+and **must keep this exact wire contract** so agent-hub doesn't have
+to change.
+
+| Method | Path | Behavior |
+|--------|------|----------|
+| GET    | `/control/sip/trunks`       | `200` `{"items": [TrunkRow, ...]}` (NB: key is `items`, not `trunks`). |
+| POST   | `/control/sip/trunks`       | `200` TrunkRow. **Upsert by `id`** — replaces if exists, `created_at` preserved. |
+| GET    | `/control/sip/trunks/{id}`  | `200` TrunkRow, or `404` `{"error":"trunk not found"}`. |
+| POST/PUT | `/control/sip/trunks/{id}` | Upsert; the URL `id` and (optional) body `id` must match. |
+| DELETE | `/control/sip/trunks/{id}`  | `204` empty body, or `404`. |
+| POST   | `/control/asterisk/reload`  | `200` `{"reloaded": false, "stub": true, "module": "..."}`. The real call-engine will exec `module reload` over AMI/ARI and flip `reloaded: true`. agent-hub already swallows failures here, so a 501 is harmless — but 200 keeps the network tab clean. |
+
+Bearer auth (`CONTROL_API_SECRET`) on every `/control/*` route, same
+as the existing surfaces. `/healthz` stays unauthenticated.
+
+#### Request body (POST — camelCase)
+
+Matches the body the agent-hub `lib/cx/trunks.ts::upsertTrunk`
+helper sends today. Required: `id`, `displayName`, `serverUri`,
+`username`. The rest are optional.
+
+```jsonc
+{
+  "id":           "primary",                  // required, ^[a-zA-Z0-9_-]{1,60}$
+  "displayName":  "PSTN Primary",
+  "serverUri":    "sip:sip.example.com",
+  "username":     "alice",
+  "password":     "…",                        // stored, NEVER returned
+  "provider":     "twilio",                   // optional
+  "region":       "eu-central",               // optional
+  "channelLimit": 50,                         // 1..1000, default 50
+  "description":  "…",                        // optional
+  "transport":    "udp",                      // udp | tcp | tls
+  "context":      "from-trunk",
+  "clientUri":    "sip:agent-hub.velents.ai",
+  "fromUser":     "+15550000",
+  "fromDomain":   "velents.ai",
+  "expiration":   3600,                       // seconds, 60..86400
+  "enabled":      true                        // default true
+}
+```
+
+#### Response body (TrunkRow — snake_case)
+
+Mirrors `lib/cx/trunks.ts::TrunkRow` minus `state` and `active_channels`
+(those are decorated from Redis on the agent-hub side, not the
+call-engine's concern). Reserved fields (`outbound_auth`, `identify_by`,
+`allow`) are emitted as `null` from the stub; the real call-engine
+populates them from PJSIP realtime row state.
+
+```jsonc
+{
+  "id":             "primary",
+  "display_name":   "PSTN Primary",
+  "provider":       null,
+  "region":         null,
+  "channel_limit":  50,
+  "description":    null,
+  "transport":      null,
+  "context":        null,
+  "outbound_auth":  null,
+  "from_user":      null,
+  "from_domain":    null,
+  "identify_by":    null,
+  "allow":          null,
+  "server_uri":     "sip:sip.example.com",
+  "client_uri":     null,
+  "expiration":     null,
+  "username":       "alice",
+  "enabled":        true,
+  "created_at":     "2026-05-09T17:55:00Z",
+  "updated_at":     "2026-05-09T17:55:00Z"
+}
+```
+
+`password` is never present in any response. Don't add it back when
+implementing the real version — agent-hub's `TrunkRow` interface
+doesn't carry it either.
+
+#### Error envelope
+
+| Status | When |
+|--------|------|
+| 400    | Body isn't valid JSON / not an object. |
+| 401    | Missing or wrong bearer. |
+| 404    | Unknown trunk id on GET / DELETE / upsert-by-id. |
+| 415    | `Content-Type` other than `application/json`. |
+| 422    | Validation: missing required, bad `id` regex, bad `transport`, out-of-range `channelLimit` / `expiration`, URL/body `id` mismatch. |
+| 503    | `CONTROL_API_SECRET` not set in the pod env. |
+
 ### Endpoint contract: flow analytics (spec 2.1.5)
 
 The velentsAgents tenant API exposes per-flow IVR analytics under
