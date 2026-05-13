@@ -3,18 +3,20 @@
 #
 # 1. Compute env-derived values that feed into envsubst (NAT block,
 #    anything else that needs shell-side conditionals).
-# 2. Render any *.conf.template files in /etc/asterisk via envsubst.
+# 2. Render /etc/odbc.ini from DATABASE_URL (so the realtime ODBC
+#    connection survives a pod restart without a hand-patched file).
+# 3. Render any *.conf.template files in /etc/asterisk via envsubst.
 #    This lets ConfigMaps reference env vars (ARI_PASSWORD, ODBC creds,
 #    external IP) without committing real values to git.
-# 3. Ensure runtime dirs exist + are writable (PVC mounts may replace
+# 4. Ensure runtime dirs exist + are writable (PVC mounts may replace
 #    them empty).
-# 4. Bring up the call-engine control-api sidecar on :8092 BEFORE
+# 5. Bring up the call-engine control-api sidecar on :8092 BEFORE
 #    asterisk. We pre-flight (python3 + script present), launch it
 #    under a supervisor that restarts on crash, then poll /healthz
 #    until it answers. If the sidecar can't bind we fail the whole
 #    container so k8s shows a clear startup error instead of letting
 #    asterisk run on its own and serving Connection refused on 8092.
-# 5. exec Asterisk in foreground, dropping to the `asterisk` user when
+# 6. exec Asterisk in foreground, dropping to the `asterisk` user when
 #    started as root (the standard non-K8s path). When already running
 #    as non-root (e.g. K8s securityContext.runAsUser=1000), skip the
 #    -U/-G drop because Asterisk rejects those flags off-root.
@@ -24,6 +26,7 @@ set -eu
 CONTROL_API_PORT="${CONTROL_API_PORT:-8092}"
 CONTROL_API_BIN=/usr/local/bin/control-api
 CONTROL_API_READY_TIMEOUT="${CONTROL_API_READY_TIMEOUT:-10}"
+RENDER_ODBC_BIN=/usr/local/bin/render-odbc
 
 log() { echo "entrypoint: $*"; }
 
@@ -59,7 +62,22 @@ else
 fi
 export ASTERISK_TLS_NAT_BLOCK
 
-# 2. Templates -> .conf via envsubst. Loop is no-op if no templates.
+# 2. /etc/odbc.ini from DATABASE_URL.
+#
+# unixODBC needs explicit Servername/Port/Database/Username/Password
+# in /etc/odbc.ini for the [asterisk-pgsql] DSN to resolve. Without
+# this step the file is empty on a fresh pod and Asterisk's realtime
+# engine can't load ps_endpoints / ps_aors / ps_auths / ps_registrations
+# — trunks created in the UI exist in the DB but Asterisk never sees
+# them. render-odbc no-ops if DATABASE_URL isn't set, so non-realtime
+# deployments aren't affected.
+if [ -r "$RENDER_ODBC_BIN" ]; then
+  python3 "$RENDER_ODBC_BIN" || log "WARNING: render-odbc exited non-zero; see message above"
+else
+  log "WARNING: $RENDER_ODBC_BIN missing; /etc/odbc.ini will not be regenerated"
+fi
+
+# 3. Templates -> .conf via envsubst. Loop is no-op if no templates.
 for tmpl in /etc/asterisk/*.conf.template; do
   [ -f "$tmpl" ] || continue
   out="${tmpl%.template}"
@@ -68,7 +86,7 @@ for tmpl in /etc/asterisk/*.conf.template; do
   log "rendered $tmpl -> $out"
 done
 
-# 3. Runtime dirs - idempotent. PVCs / emptyDirs may mask the image's
+# 4. Runtime dirs - idempotent. PVCs / emptyDirs may mask the image's
 # pre-created versions, so re-create on every start.
 for d in \
     /var/spool/asterisk/recording \
@@ -82,7 +100,7 @@ do
   chown asterisk:asterisk "$d" 2>/dev/null || true
 done
 
-# 4. Control API sidecar.
+# 5. Control API sidecar.
 #
 # Pre-flight checks fail the container with a clear message rather
 # than silently starting asterisk only — DevOps's prior debug session
@@ -143,7 +161,7 @@ if [ "$ready" -ne 1 ]; then
 fi
 log "control-api ready on :$CONTROL_API_PORT"
 
-# 5. Run asterisk in the foreground.
+# 6. Run asterisk in the foreground.
 if [ "$(id -u)" = 0 ]; then
   exec /usr/sbin/asterisk -f -U asterisk -G asterisk -vvv "$@"
 else
