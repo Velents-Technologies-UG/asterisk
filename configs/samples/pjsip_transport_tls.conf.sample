@@ -1,0 +1,28 @@
+;
+; pjsip_transport_tls.conf.sample
+;
+; Outbound SIP-over-TLS transport. Required by trunks whose server URI
+; is on port 5061 (or scheme sips:) — most wholesale SIP carriers
+; (innocalls, Twilio Elastic SIP, many EU/US providers) listen only
+; for TLS on 5061 and silently drop UDP packets at the same port,
+; which manifests as Contact `Unavail` with `nan` RTT in
+; `pjsip show endpoints`.
+;
+; The local bind on :5062 is arbitrary — TLS client connections use
+; ephemeral source ports anyway, but PJSIP requires the bind line.
+; Picked 5062 to avoid colliding with transport-udp (:5060) and
+; transport-wss (:5060 over HTTPS).
+;
+; verify_server=no starts permissive: many carriers serve certs whose
+; SAN doesn't match the dialed hostname, or whose chain doesn't
+; resolve via Asterisk's default CA bundle. Tighten in a follow-up
+; once a stable carrier cert chain is verified.
+;
+
+[transport-tls]
+type=transport
+protocol=tls
+bind=0.0.0.0:5062
+method=tlsv1_2
+verify_server=no
+verify_client=no

@@ -114,11 +114,17 @@ RUN ldconfig
 # res_odbc.conf is shipped as a *.template* — entrypoint.sh runs
 # envsubst over /etc/asterisk/*.conf.template at container start to
 # inject ODBC_USERNAME / ODBC_PASSWORD from the Kubernetes secret.
+#
+# pjsip_transport_tls.conf carries the outbound SIP-TLS transport that
+# carrier trunks on :5061 (innocalls etc.) require. Without it, the
+# realtime row for a TLS-only carrier falls back to transport-udp and
+# the AOR contact stays Unavail with nan RTT.
 COPY configs/samples/extensions_ai_runtime.conf.sample        /etc/asterisk/extensions_ai_runtime.conf
 COPY configs/samples/ari_call_engine.conf.sample              /etc/asterisk/ari.conf
 COPY configs/samples/http_wss.conf.sample                     /etc/asterisk/http.conf
 COPY configs/samples/pjsip_wss_agents.conf.sample             /etc/asterisk/pjsip_wss_agents.conf
 COPY configs/samples/pjsip_trunks.conf.sample                 /etc/asterisk/pjsip_trunks.conf
+COPY configs/samples/pjsip_transport_tls.conf.sample          /etc/asterisk/pjsip_transport_tls.conf
 COPY configs/samples/sorcery_realtime_agents.conf.sample      /etc/asterisk/sorcery.conf
 COPY configs/samples/extconfig_realtime_agents.conf.sample    /etc/asterisk/extconfig.conf
 COPY configs/samples/res_odbc_agents.conf.template            /etc/asterisk/res_odbc.conf.template
@@ -126,7 +132,7 @@ COPY configs/samples/res_odbc_agents.conf.template            /etc/asterisk/res_
 RUN set -eux; \
     printf '[general]\nstatic=yes\nwriteprotect=no\n\n#include "extensions_ai_runtime.conf"\n' \
       > /etc/asterisk/extensions.conf; \
-    printf '#include "pjsip_wss_agents.conf"\n#include "pjsip_trunks.conf"\n' \
+    printf '#include "pjsip_transport_tls.conf"\n#include "pjsip_wss_agents.conf"\n#include "pjsip_trunks.conf"\n' \
       > /etc/asterisk/pjsip.conf; \
     chown -R asterisk:asterisk /etc/asterisk /var/spool/asterisk \
                                 /var/lib/asterisk /var/log/asterisk /var/run/asterisk
@@ -135,7 +141,7 @@ COPY deploy/entrypoint.sh   /entrypoint.sh
 COPY deploy/control_api.py  /usr/local/bin/control-api
 RUN chmod +x /entrypoint.sh /usr/local/bin/control-api
 
-EXPOSE 5060/udp 5060/tcp 5061/tcp 8088/tcp 8089/tcp 5038/tcp 8092/tcp
+EXPOSE 5060/udp 5060/tcp 5061/tcp 5062/tcp 8088/tcp 8089/tcp 5038/tcp 8092/tcp
 
 # tini reaps both children (asterisk + the control API sidecar) cleanly
 # on SIGTERM. -g forwards the signal to the whole process group so the
