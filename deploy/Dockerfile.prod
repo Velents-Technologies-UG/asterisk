@@ -141,7 +141,8 @@ RUN set -eux; \
 
 COPY deploy/entrypoint.sh   /entrypoint.sh
 COPY deploy/control_api.py  /usr/local/bin/control-api
-RUN chmod +x /entrypoint.sh /usr/local/bin/control-api
+COPY deploy/render_odbc.py  /usr/local/bin/render-odbc
+RUN chmod +x /entrypoint.sh /usr/local/bin/control-api /usr/local/bin/render-odbc
 
 EXPOSE 5060/udp 5060/tcp 5061/tcp 5062/tcp 8088/tcp 8089/tcp 5038/tcp 8092/tcp
 
