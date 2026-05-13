@@ -30,18 +30,6 @@ RUN set -eux; \
 WORKDIR /usr/src/asterisk
 COPY . .
 
-# Bootstrap, configure, build. pjproject is bundled (downloaded by
-# configure); jansson is the system package. BUILD_NATIVE disabled so
-# the binary runs on any x86-64 / arm64 host (no -march=native baked in).
-#
-# `make samples` is what populates /etc/asterisk with the foundational
-# default configs (asterisk.conf, modules.conf, logger.conf, stasis.conf,
-# rtp.conf, ...). Without it `make install` only installs *.sample
-# placeholder files and Asterisk refuses to boot:
-#   'modules.conf' invalid or missing.
-#   ERROR ... Module initialization failed.  ASTERISK EXITING!
-# Our config overlays in stage-2 then replace specific files
-# (ari.conf, http.conf, pjsip.conf, etc.) on top of the samples.
 RUN set -eux; \
     ./bootstrap.sh; \
     ./configure \
@@ -65,16 +53,11 @@ FROM ${ASTERISK_RUNTIME_BASE}
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# NOTE: install full `python3`, NOT `python3-minimal`. The minimal
-# package omits the `json` stdlib module (and other libpython3.X-stdlib
-# bits) that deploy/control_api.py imports — building with
-# `python3-minimal` produced a CrashLoopBackOff:
-#   ModuleNotFoundError: No module named 'json'
-# in the prod-17 image. Adds ~30 MB to the runtime layer; worth it.
-#
-# python3-psycopg2 lets the control-api sidecar write the PJSIP
-# realtime rows (ps_endpoints / ps_aors / ps_auths / ps_registrations)
-# that Asterisk reads back via ODBC. Apt-only — no pip in the image.
+# python3 + python3-psycopg2 + python3-redis: the sidecar uses
+# psycopg2 to write the PJSIP realtime rows and redis to push trunk
+# status into the agent-hub `cx:trunks:status` hash. python3-minimal
+# would drop stdlib `json` (CrashLoopBackOff on prod-17); install the
+# full python3 metapackage instead. Apt-only — no pip in the image.
 RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
@@ -84,7 +67,7 @@ RUN set -eux; \
         libncurses6 libnewt0.52 libopus0 \
         libpopt0 libical3 libspeex1 libspeexdsp1 libogg0 libvorbis0a \
         libuuid1 ca-certificates gettext-base \
-        curl tini python3 python3-psycopg2 ; \
+        curl tini python3 python3-psycopg2 python3-redis ; \
     rm -rf /var/lib/apt/lists/*; \
     groupadd -r -g 1000 asterisk; \
     useradd  -r -u 1000 -g asterisk -d /var/lib/asterisk -s /sbin/nologin asterisk; \
@@ -94,13 +77,6 @@ RUN set -eux; \
              /var/lib/asterisk/sounds/custom \
              /var/log/asterisk /var/run/asterisk
 
-# Asterisk binaries + libs + sounds + default modules + foundation
-# configs (asterisk.conf / modules.conf / logger.conf / stasis.conf
-# courtesy of `make samples` in the builder) from the build stage.
-# libasterisk*.so* are Asterisk's own top-level shared libs
-# (libasteriskssl, libasteriskpj) that `make install` drops directly
-# under /usr/lib — they live OUTSIDE /usr/lib/asterisk/, so they need
-# their own COPY line.
 COPY --from=builder /usr/sbin/asterisk          /usr/sbin/asterisk
 COPY --from=builder /usr/lib/libasterisk*.so*   /usr/lib/
 COPY --from=builder /usr/lib/asterisk           /usr/lib/asterisk
@@ -108,19 +84,6 @@ COPY --from=builder /var/lib/asterisk           /var/lib/asterisk
 COPY --from=builder /etc/asterisk               /etc/asterisk
 RUN ldconfig
 
-# Our config overlays (source of truth for the in-image defaults).
-# These overwrite specific files installed by `make samples` above.
-#
-# *.conf.template files are rendered through envsubst by
-# deploy/entrypoint.sh at container start — that's how runtime env
-# vars (ODBC creds, ASTERISK_EXTERNAL_IP) get baked into the conf
-# without committing real values to git.
-#
-# pjsip_transport_tls.conf.template carries the outbound SIP-TLS
-# transport plus an envsubst placeholder for the NAT block. With
-# ASTERISK_EXTERNAL_IP set, the rendered transport advertises the
-# public IP in SIP Contact / SDP c= lines so the carrier can route
-# inbound INVITEs and RTP back to the pod from the cluster's NAT egress.
 COPY configs/samples/extensions_ai_runtime.conf.sample        /etc/asterisk/extensions_ai_runtime.conf
 COPY configs/samples/ari_call_engine.conf.sample              /etc/asterisk/ari.conf
 COPY configs/samples/http_wss.conf.sample                     /etc/asterisk/http.conf
@@ -146,7 +109,4 @@ RUN chmod +x /entrypoint.sh /usr/local/bin/control-api /usr/local/bin/render-odb
 
 EXPOSE 5060/udp 5060/tcp 5061/tcp 5062/tcp 8088/tcp 8089/tcp 5038/tcp 8092/tcp
 
-# tini reaps both children (asterisk + the control API sidecar) cleanly
-# on SIGTERM. -g forwards the signal to the whole process group so the
-# control API exits alongside asterisk.
 ENTRYPOINT ["/usr/bin/tini", "-g", "--", "/entrypoint.sh"]
