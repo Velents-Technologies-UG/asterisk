@@ -51,6 +51,15 @@ DEFAULT_INBOUND_CONTEXT = os.environ.get("TRUNK_INBOUND_CONTEXT", "from-trunk")
 DEFAULT_CODEC_ALLOW = os.environ.get("TRUNK_DEFAULT_ALLOW", "ulaw,alaw")
 MAX_BODY_BYTES = 64 * 1024  # 64 KiB — way more than a trunk row needs.
 
+# Behind-NAT mode is implied by ASTERISK_EXTERNAL_IP being set: when
+# the pod's external IP is advertised to the carrier, the endpoint
+# also needs rtp_symmetric + force_rport so return RTP from the
+# carrier's actual source port is accepted. Without these the audio
+# is one-way (we send out fine, carrier's reply RTP is dropped because
+# we expect a different source port than the one its NAT picked).
+BEHIND_NAT = bool(os.environ.get("ASTERISK_EXTERNAL_IP", "").strip()) or \
+    os.environ.get("ASTERISK_BEHIND_NAT", "").strip().lower() in ("1", "yes", "true")
+
 # In-memory trunk store. Key = trunk id; value = the canonical
 # snake_case TrunkRow that we hand back on read, plus a private
 # "_password" field that is NEVER serialized.
@@ -333,19 +342,45 @@ def _pjsip_upsert(row, password):
                 cur.execute("DELETE FROM ps_auths WHERE id = %s", (_auth_id_for(row["id"]),))
 
             # 3) ENDPOINT — what Asterisk uses for incoming AND outgoing.
-            cur.execute("""
-                INSERT INTO ps_endpoints
-                    (id, transport, context, aors, auth, allow, dtmf_mode,
-                     identify_by, disallow, outbound_auth)
-                VALUES (%s, %s, %s, %s, %s, %s, 'rfc4733', 'username,auth_username', 'all', %s)
-                ON CONFLICT (id) DO UPDATE SET
-                    transport     = EXCLUDED.transport,
-                    context       = EXCLUDED.context,
-                    aors          = EXCLUDED.aors,
-                    auth          = EXCLUDED.auth,
-                    allow         = EXCLUDED.allow,
-                    outbound_auth = EXCLUDED.outbound_auth
-            """, (row["id"], transport, context, row["id"], auth_id, allow, auth_id))
+            # NAT helpers (rtp_symmetric / force_rport / direct_media)
+            # are written only when BEHIND_NAT is on. They MUST be on
+            # for carriers to receive return RTP through the cluster's
+            # NAT egress; they break audio for direct-public deployments
+            # where Asterisk has its own routable IP.
+            if BEHIND_NAT:
+                cur.execute("""
+                    INSERT INTO ps_endpoints
+                        (id, transport, context, aors, auth, allow, dtmf_mode,
+                         identify_by, disallow, outbound_auth,
+                         rtp_symmetric, force_rport, direct_media)
+                    VALUES (%s, %s, %s, %s, %s, %s, 'rfc4733',
+                            'username,auth_username', 'all', %s,
+                            'yes', 'yes', 'no')
+                    ON CONFLICT (id) DO UPDATE SET
+                        transport     = EXCLUDED.transport,
+                        context       = EXCLUDED.context,
+                        aors          = EXCLUDED.aors,
+                        auth          = EXCLUDED.auth,
+                        allow         = EXCLUDED.allow,
+                        outbound_auth = EXCLUDED.outbound_auth,
+                        rtp_symmetric = EXCLUDED.rtp_symmetric,
+                        force_rport   = EXCLUDED.force_rport,
+                        direct_media  = EXCLUDED.direct_media
+                """, (row["id"], transport, context, row["id"], auth_id, allow, auth_id))
+            else:
+                cur.execute("""
+                    INSERT INTO ps_endpoints
+                        (id, transport, context, aors, auth, allow, dtmf_mode,
+                         identify_by, disallow, outbound_auth)
+                    VALUES (%s, %s, %s, %s, %s, %s, 'rfc4733', 'username,auth_username', 'all', %s)
+                    ON CONFLICT (id) DO UPDATE SET
+                        transport     = EXCLUDED.transport,
+                        context       = EXCLUDED.context,
+                        aors          = EXCLUDED.aors,
+                        auth          = EXCLUDED.auth,
+                        allow         = EXCLUDED.allow,
+                        outbound_auth = EXCLUDED.outbound_auth
+                """, (row["id"], transport, context, row["id"], auth_id, allow, auth_id))
 
             # 4) REGISTRATION — only when enabled. Disabling the trunk
             #    drops the row so Asterisk stops re-registering.
@@ -700,10 +735,11 @@ def main():
         )
     db_mode = "postgres" if _db_enabled() else "memory-only"
     log.info(
-        "listening on 0.0.0.0:%d (secret %s, trunk store=%s) — ready for /healthz and /control/*",
+        "listening on 0.0.0.0:%d (secret %s, trunk store=%s, behind_nat=%s) — ready for /healthz and /control/*",
         PORT,
         "set" if SECRET else "MISSING",
         db_mode,
+        "yes" if BEHIND_NAT else "no",
     )
     try:
         server.serve_forever()
