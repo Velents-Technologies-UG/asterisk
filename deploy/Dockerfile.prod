@@ -110,6 +110,10 @@ RUN ldconfig
 
 # Our config overlays (source of truth for the in-image defaults).
 # These overwrite specific files installed by `make samples` above.
+#
+# res_odbc.conf is shipped as a *.template* — entrypoint.sh runs
+# envsubst over /etc/asterisk/*.conf.template at container start to
+# inject ODBC_USERNAME / ODBC_PASSWORD from the Kubernetes secret.
 COPY configs/samples/extensions_ai_runtime.conf.sample        /etc/asterisk/extensions_ai_runtime.conf
 COPY configs/samples/ari_call_engine.conf.sample              /etc/asterisk/ari.conf
 COPY configs/samples/http_wss.conf.sample                     /etc/asterisk/http.conf
@@ -117,7 +121,7 @@ COPY configs/samples/pjsip_wss_agents.conf.sample             /etc/asterisk/pjsi
 COPY configs/samples/pjsip_trunks.conf.sample                 /etc/asterisk/pjsip_trunks.conf
 COPY configs/samples/sorcery_realtime_agents.conf.sample      /etc/asterisk/sorcery.conf
 COPY configs/samples/extconfig_realtime_agents.conf.sample    /etc/asterisk/extconfig.conf
-COPY configs/samples/res_odbc_agents.conf.sample              /etc/asterisk/res_odbc.conf
+COPY configs/samples/res_odbc_agents.conf.template            /etc/asterisk/res_odbc.conf.template
 
 RUN set -eux; \
     printf '[general]\nstatic=yes\nwriteprotect=no\n\n#include "extensions_ai_runtime.conf"\n' \
