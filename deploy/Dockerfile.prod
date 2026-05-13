@@ -111,20 +111,22 @@ RUN ldconfig
 # Our config overlays (source of truth for the in-image defaults).
 # These overwrite specific files installed by `make samples` above.
 #
-# res_odbc.conf is shipped as a *.template* — entrypoint.sh runs
-# envsubst over /etc/asterisk/*.conf.template at container start to
-# inject ODBC_USERNAME / ODBC_PASSWORD from the Kubernetes secret.
+# *.conf.template files are rendered through envsubst by
+# deploy/entrypoint.sh at container start — that's how runtime env
+# vars (ODBC creds, ASTERISK_EXTERNAL_IP) get baked into the conf
+# without committing real values to git.
 #
-# pjsip_transport_tls.conf carries the outbound SIP-TLS transport that
-# carrier trunks on :5061 (innocalls etc.) require. Without it, the
-# realtime row for a TLS-only carrier falls back to transport-udp and
-# the AOR contact stays Unavail with nan RTT.
+# pjsip_transport_tls.conf.template carries the outbound SIP-TLS
+# transport plus an envsubst placeholder for the NAT block. With
+# ASTERISK_EXTERNAL_IP set, the rendered transport advertises the
+# public IP in SIP Contact / SDP c= lines so the carrier can route
+# inbound INVITEs and RTP back to the pod from the cluster's NAT egress.
 COPY configs/samples/extensions_ai_runtime.conf.sample        /etc/asterisk/extensions_ai_runtime.conf
 COPY configs/samples/ari_call_engine.conf.sample              /etc/asterisk/ari.conf
 COPY configs/samples/http_wss.conf.sample                     /etc/asterisk/http.conf
 COPY configs/samples/pjsip_wss_agents.conf.sample             /etc/asterisk/pjsip_wss_agents.conf
 COPY configs/samples/pjsip_trunks.conf.sample                 /etc/asterisk/pjsip_trunks.conf
-COPY configs/samples/pjsip_transport_tls.conf.sample          /etc/asterisk/pjsip_transport_tls.conf
+COPY configs/samples/pjsip_transport_tls.conf.template        /etc/asterisk/pjsip_transport_tls.conf.template
 COPY configs/samples/sorcery_realtime_agents.conf.sample      /etc/asterisk/sorcery.conf
 COPY configs/samples/extconfig_realtime_agents.conf.sample    /etc/asterisk/extconfig.conf
 COPY configs/samples/res_odbc_agents.conf.template            /etc/asterisk/res_odbc.conf.template
