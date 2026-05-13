@@ -1,0 +1,24 @@
+;
+; res_odbc_agents.conf.template
+;
+; Rendered at container start by deploy/entrypoint.sh via envsubst:
+;   /etc/asterisk/res_odbc.conf.template -> /etc/asterisk/res_odbc.conf
+;
+; Required environment variables (Kubernetes secret "asterisk-odbc"):
+;   ODBC_USERNAME  - Postgres role, e.g. velents_admin
+;   ODBC_PASSWORD  - Postgres password, stored verbatim (may contain
+;                    literal % characters; do NOT URL-encode).
+;
+; The DSN "asterisk-pgsql" is defined in /etc/odbc.ini (server/port/db
+; + SSLmode=require). This file only carries the credentials.
+;
+
+[asterisk]
+enabled => yes
+dsn => asterisk-pgsql
+username => ${ODBC_USERNAME}
+password => ${ODBC_PASSWORD}
+pre-connect => no
+sanitysql => SELECT 1
+backslash_is_escape => yes
+max_connections => 5
