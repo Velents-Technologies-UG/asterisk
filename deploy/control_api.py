@@ -12,9 +12,6 @@
 # in-memory dict with PJSIP realtime writes (ps_endpoints / ps_aors /
 # ps_auths) and keep the same wire contract so agent-hub doesn't need
 # to change.
-#
-# Stdlib only (no pip): the runtime image installs python3 but does
-# not pip install anything.
 
 import json
 import os
@@ -25,6 +22,7 @@ import socket
 import subprocess
 import sys
 import threading
+import time
 import logging
 from datetime import datetime, timezone
 from http import HTTPStatus
@@ -42,14 +40,36 @@ try:
 except ImportError:
     HAS_PSYCOPG2 = False
 
+# redis is optional too. When present and REDIS_URL is set, a
+# background thread feeds endpoint statuses into the cx:trunks:status
+# hash so the agent-hub trunk page's badge can reflect reality
+# instead of being stuck on 'unknown'.
+try:
+    import redis as redis_lib
+    HAS_REDIS = True
+except ImportError:
+    HAS_REDIS = False
+
 PORT = int(os.environ.get("CONTROL_API_PORT", "8092"))
 SECRET = os.environ.get("CONTROL_API_SECRET", "").strip()
 DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
+REDIS_URL = os.environ.get("REDIS_URL", "").strip()
 ASTERISK_BIN = os.environ.get("ASTERISK_BIN", "asterisk")
 DEFAULT_TRANSPORT = os.environ.get("PJSIP_TRANSPORT_NAME", "transport-udp")
 DEFAULT_INBOUND_CONTEXT = os.environ.get("TRUNK_INBOUND_CONTEXT", "from-trunk")
 DEFAULT_CODEC_ALLOW = os.environ.get("TRUNK_DEFAULT_ALLOW", "ulaw,alaw")
+STATUS_FEEDER_INTERVAL = int(os.environ.get("STATUS_FEEDER_INTERVAL", "5"))
+STATUS_FEEDER_KEY = os.environ.get("STATUS_FEEDER_KEY", "cx:trunks:status")
 MAX_BODY_BYTES = 64 * 1024  # 64 KiB — way more than a trunk row needs.
+
+# Behind-NAT mode is implied by ASTERISK_EXTERNAL_IP being set: when
+# the pod's external IP is advertised to the carrier, the endpoint
+# also needs rtp_symmetric + force_rport so return RTP from the
+# carrier's actual source port is accepted. Without these the audio
+# is one-way (we send out fine, carrier's reply RTP is dropped because
+# we expect a different source port than the one its NAT picked).
+BEHIND_NAT = bool(os.environ.get("ASTERISK_EXTERNAL_IP", "").strip()) or \
+    os.environ.get("ASTERISK_BEHIND_NAT", "").strip().lower() in ("1", "yes", "true")
 
 # In-memory trunk store. Key = trunk id; value = the canonical
 # snake_case TrunkRow that we hand back on read, plus a private
@@ -62,6 +82,13 @@ _lock = threading.RLock()
 # escape it (hello, ps_endpoints PRIMARY KEY).
 _SAFE_ID = re.compile(r"^[a-zA-Z0-9_-]{1,60}$")
 _VALID_TRANSPORTS = {"udp", "tcp", "tls"}
+
+# Originate route input validation. Phone-number-shaped destinations
+# only (digits, +, *, #). No spaces, no quotes, no shell metacharacters
+# — the originate command is built as a single arg to asterisk -rx,
+# and the Asterisk CLI parser still splits on spaces internally.
+_DEST_RE = re.compile(r"^[0-9+*#]{1,64}$")
+_EXT_RE  = re.compile(r"^[a-zA-Z0-9_+*#-]{1,40}$")
 
 # stderr so logs are not buffered behind the supervisor's pipe in
 # entrypoint.sh — `kubectl logs` then shows startup errors in real time.
@@ -79,12 +106,6 @@ class _ValidationError(ValueError):
     pass
 
 
-# Camel-cased input keys (what agent-hub's upsertTrunk sends) → the
-# snake_case TrunkRow keys lib/cx/trunks.ts consumes. Optional fields
-# missing from the payload land in the row as `null`. Reserved keys
-# (outbound_auth, identify_by, allow) are reserved for the real
-# call-engine implementation that writes PJSIP realtime; the stub
-# always emits them as null so the consumer's TS shape is satisfied.
 _INPUT_TO_ROW_NULLABLE = {
     "provider":     "provider",
     "region":       "region",
@@ -154,8 +175,6 @@ def _validate_trunk_input(body):
             int(v) if out_key in {"expiration"} else v
         )
 
-    # Password is stored under a private key so _to_row() can't
-    # accidentally serialize it.
     pw = body.get("password")
     row["_password"] = None if pw is None or pw == "" else str(pw)
 
@@ -168,18 +187,6 @@ def _to_row(stored):
 
 
 # ── PJSIP realtime writer ────────────────────────────
-#
-# These four tables are what Asterisk reads via sorcery_realtime +
-# extconfig (configs/samples/sorcery_realtime_agents.conf.sample,
-# extconfig_realtime_agents.conf.sample). When we INSERT a row into
-# ps_registrations and run `module reload res_pjsip.so`, Asterisk
-# sends a SIP REGISTER to the upstream provider — that's how a trunk
-# you create in the UI ends up actually carrying calls.
-#
-# Schema is the standard Asterisk-22 contrib shape. If a deployment
-# has columns missing, the IntegrityError will surface as 502 on the
-# API and the Postgres error in the pod logs — better than silently
-# writing nothing.
 
 class _DbError(RuntimeError):
     pass
@@ -198,18 +205,7 @@ def _auth_id_for(trunk_id):
 
 
 def _pick_transport(server_uri, explicit=None):
-    """Resolve the static PJSIP transport object name for a trunk.
-
-    The trunk form's `transport` field (if present) takes precedence and
-    arrives as one of the short names in _VALID_TRANSPORTS ("udp", "tcp",
-    "tls"), which we map to the static transport ids declared in
-    pjsip_transport_tls.conf / pjsip_wss_agents.conf.
-
-    When no transport is supplied, auto-pick: serverUri using scheme
-    "sips:" or port 5061 -> transport-tls, otherwise DEFAULT_TRANSPORT.
-    Carriers on :5061 are TLS-only in practice; sending UDP there gets
-    silently dropped and the AOR contact stays Unavail with nan RTT.
-    """
+    """Resolve the static PJSIP transport object name for a trunk."""
     if explicit:
         return f"transport-{explicit}"
     s = (server_uri or "").strip()
@@ -229,21 +225,7 @@ def _pick_transport(server_uri, explicit=None):
 
 
 def _rewrite_uri_to_ip(uri):
-    """Resolve the hostname in a sip(s): URI to an A-record IP literal.
-
-    Asterisk's bundled pjlib DNS resolver fails with EDNSNOANSWERREC on
-    carrier hostnames that have no NAPTR/SRV records (typical for
-    wholesale SIP providers like innocalls), which makes qualify probes
-    and REGISTERs never leave the pod. The OS resolver here handles
-    those names fine, so we resolve once at upsert-time and write the
-    resulting IP into ps_aors.contact and ps_registrations.server_uri.
-    client_uri keeps the original hostname so the SIP From: header
-    still carries the carrier's expected domain.
-
-    Falls back to the original URI if resolution fails (e.g. transient
-    DNS error at upsert time) — better to write something Asterisk can
-    try than to fail the save outright.
-    """
+    """Resolve the hostname in a sip(s): URI to an A-record IP literal."""
     if not uri:
         return uri
     try:
@@ -262,7 +244,6 @@ def _rewrite_uri_to_ip(uri):
     host, _, port = hostpart.partition(":")
     if not host:
         return uri
-    # If already an IP literal, leave it alone.
     try:
         socket.inet_aton(host)
         return uri
@@ -288,10 +269,6 @@ def _pjsip_upsert(row, password):
     has_auth = bool(password) and bool(row.get("username"))
     auth_id = _auth_id_for(row["id"]) if has_auth else None
     server_uri = row["server_uri"]
-    # Pre-resolve the carrier hostname so pjlib's DNS resolver (which
-    # mis-handles NAPTR/SRV NODATA) isn't in the qualify/REGISTER path.
-    # client_uri keeps the hostname so the SIP From: header still
-    # advertises the carrier's domain.
     target_uri = _rewrite_uri_to_ip(server_uri)
     transport = _pick_transport(server_uri, row.get("transport"))
     context = row.get("context") or DEFAULT_INBOUND_CONTEXT
@@ -304,7 +281,6 @@ def _pjsip_upsert(row, password):
 
     try:
         with _db_conn() as conn, conn.cursor() as cur:
-            # 1) AOR — describes the contact Asterisk dials/sends INVITEs to.
             cur.execute("""
                 INSERT INTO ps_aors (id, max_contacts, qualify_frequency, contact)
                 VALUES (%s, 1, 60, %s)
@@ -313,13 +289,6 @@ def _pjsip_upsert(row, password):
                     qualify_frequency = EXCLUDED.qualify_frequency
             """, (row["id"], target_uri))
 
-            # 2) AUTH — only when the trunk has credentials. realm is
-            #    left NULL so Asterisk's outbound digest authenticator
-            #    matches whatever realm the carrier sends in its 401
-            #    challenge (carriers' challenge realm rarely matches
-            #    the hostname users type in the form — e.g. innocalls
-            #    challenges with realm `sip.innocalls.net` even though
-            #    the trunk talks to `cu622.sip.innocalls.net`).
             if has_auth:
                 cur.execute("""
                     INSERT INTO ps_auths (id, auth_type, username, password, realm)
@@ -332,23 +301,41 @@ def _pjsip_upsert(row, password):
             else:
                 cur.execute("DELETE FROM ps_auths WHERE id = %s", (_auth_id_for(row["id"]),))
 
-            # 3) ENDPOINT — what Asterisk uses for incoming AND outgoing.
-            cur.execute("""
-                INSERT INTO ps_endpoints
-                    (id, transport, context, aors, auth, allow, dtmf_mode,
-                     identify_by, disallow, outbound_auth)
-                VALUES (%s, %s, %s, %s, %s, %s, 'rfc4733', 'username,auth_username', 'all', %s)
-                ON CONFLICT (id) DO UPDATE SET
-                    transport     = EXCLUDED.transport,
-                    context       = EXCLUDED.context,
-                    aors          = EXCLUDED.aors,
-                    auth          = EXCLUDED.auth,
-                    allow         = EXCLUDED.allow,
-                    outbound_auth = EXCLUDED.outbound_auth
-            """, (row["id"], transport, context, row["id"], auth_id, allow, auth_id))
+            if BEHIND_NAT:
+                cur.execute("""
+                    INSERT INTO ps_endpoints
+                        (id, transport, context, aors, auth, allow, dtmf_mode,
+                         identify_by, disallow, outbound_auth,
+                         rtp_symmetric, force_rport, direct_media)
+                    VALUES (%s, %s, %s, %s, %s, %s, 'rfc4733',
+                            'username,auth_username', 'all', %s,
+                            'yes', 'yes', 'no')
+                    ON CONFLICT (id) DO UPDATE SET
+                        transport     = EXCLUDED.transport,
+                        context       = EXCLUDED.context,
+                        aors          = EXCLUDED.aors,
+                        auth          = EXCLUDED.auth,
+                        allow         = EXCLUDED.allow,
+                        outbound_auth = EXCLUDED.outbound_auth,
+                        rtp_symmetric = EXCLUDED.rtp_symmetric,
+                        force_rport   = EXCLUDED.force_rport,
+                        direct_media  = EXCLUDED.direct_media
+                """, (row["id"], transport, context, row["id"], auth_id, allow, auth_id))
+            else:
+                cur.execute("""
+                    INSERT INTO ps_endpoints
+                        (id, transport, context, aors, auth, allow, dtmf_mode,
+                         identify_by, disallow, outbound_auth)
+                    VALUES (%s, %s, %s, %s, %s, %s, 'rfc4733', 'username,auth_username', 'all', %s)
+                    ON CONFLICT (id) DO UPDATE SET
+                        transport     = EXCLUDED.transport,
+                        context       = EXCLUDED.context,
+                        aors          = EXCLUDED.aors,
+                        auth          = EXCLUDED.auth,
+                        allow         = EXCLUDED.allow,
+                        outbound_auth = EXCLUDED.outbound_auth
+                """, (row["id"], transport, context, row["id"], auth_id, allow, auth_id))
 
-            # 4) REGISTRATION — only when enabled. Disabling the trunk
-            #    drops the row so Asterisk stops re-registering.
             if row.get("enabled", True) and has_auth and client_uri:
                 cur.execute("""
                     INSERT INTO ps_registrations
@@ -373,8 +360,6 @@ def _pjsip_delete(trunk_id):
         return
     try:
         with _db_conn() as conn, conn.cursor() as cur:
-            # Order: drop registrations first (foreign-key-ish), then
-            # endpoint, then auth, then aor.
             cur.execute("DELETE FROM ps_registrations WHERE id = %s", (trunk_id,))
             cur.execute("DELETE FROM ps_endpoints    WHERE id = %s", (trunk_id,))
             cur.execute("DELETE FROM ps_auths        WHERE id = %s", (_auth_id_for(trunk_id),))
@@ -384,11 +369,98 @@ def _pjsip_delete(trunk_id):
 
 
 def _server_uri_host(server_uri):
-    """Extract host from sip:user@host:port or sip:host."""
     s = server_uri.replace("sips:", "").replace("sip:", "")
     if "@" in s:
         s = s.split("@", 1)[1]
     return s.split(":", 1)[0].split(";", 1)[0]
+
+
+# ── Redis status feeder ──────────────────────────────
+#
+# agent-hub's lib/cx/trunks.ts decorator reads `cx:trunks:status` from
+# Redis to render the per-trunk badge. Nothing else writes that hash,
+# so without this thread the badge is permanently 'unknown'. We poll
+# `pjsip show endpoints` every STATUS_FEEDER_INTERVAL seconds, derive
+# online/offline/unknown per endpoint id, and HSET the result.
+#
+# Parsing CLI output is fragile but avoids adding an ARI HTTP client
+# (which would also need credentials). The format is stable across
+# Asterisk 18/20/22 — if it ever changes we'll see endpoints stuck on
+# 'unknown' which is the same as the current broken state.
+
+def _parse_pjsip_endpoints(output):
+    """Yield (endpoint_id, state) tuples from `pjsip show endpoints` output.
+
+    Lines we care about look like (variable whitespace):
+       Endpoint:  inno-calls                                Unavailable   0 of inf
+       Endpoint:  innocalls                                 Not in use    0 of inf
+       Endpoint:  some-id                                   In use        1 of inf
+    The first column is the id; the second whitespace-separated chunk
+    is the human-readable state.
+    """
+    for line in output.splitlines():
+        s = line.strip()
+        if not s.startswith("Endpoint:"):
+            continue
+        # Skip the placeholder/header row.
+        if "<Endpoint" in s:
+            continue
+        rest = s[len("Endpoint:"):].strip()
+        parts = re.split(r"\s{2,}", rest)
+        if len(parts) < 2:
+            continue
+        ep_id = parts[0].strip()
+        state = parts[1].strip()
+        if ep_id:
+            yield ep_id, state
+
+
+def _state_to_status(state):
+    """Map Asterisk's free-text endpoint state to the agent-hub vocabulary."""
+    s = (state or "").lower()
+    if "not in use" in s or "in use" in s or s.startswith("avail"):
+        return "online"
+    if "unavailable" in s or s.startswith("unavail"):
+        return "offline"
+    return "unknown"
+
+
+def _status_feeder_loop(stop_event):
+    if not REDIS_URL:
+        log.info("status feeder: REDIS_URL unset; skipping")
+        return
+    if not HAS_REDIS:
+        log.warning(
+            "status feeder: python3-redis not installed; UI badge stays 'unknown'. "
+            "Rebuild the image with python3-redis in apt."
+        )
+        return
+    try:
+        client = redis_lib.from_url(REDIS_URL, decode_responses=True,
+                                    socket_connect_timeout=3, socket_timeout=3)
+        client.ping()
+    except Exception as exc:
+        log.error("status feeder: cannot connect to %s: %s", REDIS_URL, exc)
+        return
+    log.info("status feeder started: interval=%ds key=%s",
+             STATUS_FEEDER_INTERVAL, STATUS_FEEDER_KEY)
+    while not stop_event.is_set():
+        try:
+            if shutil.which(ASTERISK_BIN) is None:
+                stop_event.wait(STATUS_FEEDER_INTERVAL)
+                continue
+            proc = subprocess.run(
+                [ASTERISK_BIN, "-rx", "pjsip show endpoints"],
+                capture_output=True, text=True, timeout=5, check=False,
+            )
+            if proc.returncode == 0:
+                updates = {ep_id: _state_to_status(state)
+                           for ep_id, state in _parse_pjsip_endpoints(proc.stdout)}
+                if updates:
+                    client.hset(STATUS_FEEDER_KEY, mapping=updates)
+        except Exception as exc:
+            log.warning("status feeder iteration failed: %s", exc)
+        stop_event.wait(STATUS_FEEDER_INTERVAL)
 
 
 # ── route table ────────────────────────────────────
@@ -397,11 +469,10 @@ _ROUTES = [
     ("GET",    re.compile(r"^/control/sip/trunks/?$"),       "list_trunks"),
     ("POST",   re.compile(r"^/control/sip/trunks/?$"),       "create_trunk"),
     ("GET",    re.compile(r"^/control/sip/trunks/([^/]+)$"), "show_trunk"),
-    # POST to /control/sip/trunks/{id} also upserts (some callers
-    # PUT, some POST). Both land in the same handler.
     ("POST",   re.compile(r"^/control/sip/trunks/([^/]+)$"), "upsert_trunk_by_id"),
     ("PUT",    re.compile(r"^/control/sip/trunks/([^/]+)$"), "upsert_trunk_by_id"),
     ("DELETE", re.compile(r"^/control/sip/trunks/([^/]+)$"), "delete_trunk"),
+    ("POST",   re.compile(r"^/control/sip/originate/?$"),    "originate_call"),
     ("POST",   re.compile(r"^/control/asterisk/reload/?$"),  "reload_asterisk"),
 ]
 
@@ -441,30 +512,23 @@ class Handler(BaseHTTPRequestHandler):
     def do_PATCH(self):
         self._dispatch("PATCH")
 
-    # ── routing ─────────────────────────────────────
-
     def _dispatch(self, method):
         path = self.path.split("?", 1)[0]
-
         if path == "/healthz":
             self._send_json(HTTPStatus.OK, {"ok": True, "service": "call-engine-stub"})
             return
-
         if not path.startswith("/control/"):
             self._send_json(HTTPStatus.NOT_FOUND, {"error": "not found", "path": path})
             return
-
         if not SECRET:
             self._send_json(
                 HTTPStatus.SERVICE_UNAVAILABLE,
                 {"error": "CONTROL_API_SECRET not set in call-engine env"},
             )
             return
-
         if not self._bearer_ok():
             self._send_json(HTTPStatus.UNAUTHORIZED, {"error": "invalid bearer"})
             return
-
         for verb, pattern, handler_name in _ROUTES:
             if verb != method:
                 continue
@@ -473,22 +537,17 @@ class Handler(BaseHTTPRequestHandler):
                 continue
             getattr(self, handler_name)(*m.groups())
             return
-
         self._send_json(
             HTTPStatus.NOT_IMPLEMENTED,
             {"error": "not implemented in call-engine stub", "method": method, "path": path},
         )
 
-    # ── body helpers ──────────────────────────────────
-
     def _read_json_body(self):
-        """Return parsed JSON dict, or None if a response was already sent."""
         ctype = self.headers.get("content-type", "").split(";", 1)[0].strip().lower()
         if ctype and ctype != "application/json":
             self._send_json(HTTPStatus.UNSUPPORTED_MEDIA_TYPE,
                             {"error": "content-type must be application/json"})
             return None
-
         try:
             length = int(self.headers.get("content-length") or 0)
         except ValueError:
@@ -500,7 +559,6 @@ class Handler(BaseHTTPRequestHandler):
             return None
         if length == 0:
             return {}
-
         raw = self.rfile.read(length)
         try:
             data = json.loads(raw.decode("utf-8"))
@@ -522,7 +580,6 @@ class Handler(BaseHTTPRequestHandler):
     def list_trunks(self):
         with _lock:
             items = [_to_row(t) for t in _trunks.values()]
-        # Stable order so the list page doesn't shuffle on every refresh.
         items.sort(key=lambda r: r["id"])
         self._send_json(HTTPStatus.OK, {"items": items})
 
@@ -543,7 +600,7 @@ class Handler(BaseHTTPRequestHandler):
     def _upsert_common(self, url_id):
         body = self._read_json_body()
         if body is None:
-            return  # response already sent
+            return
         if url_id is not None:
             body_id = body.get("id")
             if body_id is None or body_id == "":
@@ -564,16 +621,12 @@ class Handler(BaseHTTPRequestHandler):
             normalized["created_at"] = (existing or {}).get("created_at", now)
             normalized["updated_at"] = now
             password = normalized.pop("_password", None)
-            # Persist to Postgres BEFORE memory so a DB failure doesn't
-            # leave the API claiming success while Asterisk has nothing.
             try:
                 _pjsip_upsert({**normalized, "username": normalized.get("username")}, password)
             except _DbError as exc:
                 log.error("trunk %s pjsip write failed: %s", normalized["id"], exc)
                 self._send_json(HTTPStatus.BAD_GATEWAY, {"error": str(exc)})
                 return
-            # Stash password back so subsequent updates that omit it
-            # can still REGISTER from the cached value.
             normalized["_password"] = password
             _trunks[normalized["id"]] = normalized
 
@@ -582,9 +635,6 @@ class Handler(BaseHTTPRequestHandler):
     def delete_trunk(self, trunk_id):
         with _lock:
             removed = _trunks.pop(trunk_id, None)
-        # Delete from Postgres regardless of whether memory had it
-        # (the rows could have been seeded out of band, and we want
-        # idempotent deletes).
         try:
             _pjsip_delete(trunk_id)
         except _DbError as exc:
@@ -596,14 +646,82 @@ class Handler(BaseHTTPRequestHandler):
             return
         self._send_204()
 
-    # ── /control/asterisk/reload ─────────────────────────
+    # ── /control/sip/originate ──────────────────────────
     #
-    # Real reload via the asterisk CLI socket (which lives in
-    # /var/run/asterisk and is owned by uid:gid 1000 — the same the
-    # sidecar runs as inside the pod). Without this, new
-    # ps_registrations rows aren't picked up and the trunk doesn't
-    # send a SIP REGISTER. agent-hub's POST handler calls this right
-    # after upsertTrunk.
+    # Trigger an outbound call through the named trunk. agent-hub's
+    # trunk page (or a future click-to-dial widget) POSTs here so it
+    # doesn't need ARI credentials of its own. Implementation shells
+    # to `asterisk -rx originate ...` — fire-and-forget; for
+    # call-id / live state we'd need to swap to ARI HTTP later.
+
+    def originate_call(self):
+        body = self._read_json_body()
+        if body is None:
+            return
+        destination = str(body.get("destination") or "").strip()
+        trunk_id = str(body.get("trunkId") or "").strip()
+        extension = str(body.get("extension") or "s").strip()
+        context = str(body.get("context") or DEFAULT_INBOUND_CONTEXT).strip()
+
+        if not _DEST_RE.match(destination):
+            self._send_json(HTTPStatus.UNPROCESSABLE_ENTITY,
+                            {"error": "destination must be 1-64 chars: digits, + * #"})
+            return
+        if not _SAFE_ID.match(trunk_id):
+            self._send_json(HTTPStatus.UNPROCESSABLE_ENTITY,
+                            {"error": "trunkId must be 1-60 chars, alphanumerics + _ -"})
+            return
+        if not _EXT_RE.match(extension):
+            self._send_json(HTTPStatus.UNPROCESSABLE_ENTITY,
+                            {"error": "extension format invalid"})
+            return
+        if not _SAFE_ID.match(context):
+            self._send_json(HTTPStatus.UNPROCESSABLE_ENTITY,
+                            {"error": "context format invalid"})
+            return
+
+        if shutil.which(ASTERISK_BIN) is None:
+            self._send_json(HTTPStatus.OK, {
+                "queued": False, "stub": True,
+                "reason": f"{ASTERISK_BIN} binary not on PATH",
+            })
+            return
+
+        channel = f"PJSIP/{destination}@{trunk_id}"
+        cli = f"originate {channel} extension {extension}@{context}"
+
+        try:
+            proc = subprocess.run(
+                [ASTERISK_BIN, "-rx", cli],
+                capture_output=True, text=True, timeout=10, check=False,
+            )
+        except subprocess.TimeoutExpired:
+            self._send_json(HTTPStatus.GATEWAY_TIMEOUT,
+                            {"error": "asterisk -rx originate timed out"})
+            return
+        except OSError as exc:
+            self._send_json(HTTPStatus.BAD_GATEWAY,
+                            {"error": f"asterisk exec failed: {exc}"})
+            return
+
+        ok = proc.returncode == 0
+        out = (proc.stdout or "").strip()
+        err = (proc.stderr or "").strip()
+        log.info("originate %s rc=%d stdout=%r stderr=%r",
+                 channel, proc.returncode, out[:200], err[:200])
+        self._send_json(
+            HTTPStatus.OK if ok else HTTPStatus.BAD_GATEWAY,
+            {
+                "queued": ok,
+                "channel": channel,
+                "extension": f"{extension}@{context}",
+                "rc": proc.returncode,
+                "stdout": out,
+                "stderr": err,
+            },
+        )
+
+    # ── /control/asterisk/reload ─────────────────────────
 
     def reload_asterisk(self):
         body = self._read_json_body()
@@ -612,24 +730,16 @@ class Handler(BaseHTTPRequestHandler):
         module = str(body.get("moduleName") or body.get("module") or "").strip()
         if not module:
             module = "res_pjsip.so"
-        # Whitelist: only reload PJSIP-related modules from this API
-        # (don't let a typo'd request reload core, app_*, etc.).
         if module not in {"res_pjsip.so", "res_pjsip_endpoint_identifier_ip.so"}:
             self._send_json(HTTPStatus.UNPROCESSABLE_ENTITY,
                             {"error": f"module not allowed: {module}"})
             return
-
         if shutil.which(ASTERISK_BIN) is None:
-            # Sidecar may run in a no-asterisk dev container; surface
-            # honestly rather than pretending we reloaded.
             self._send_json(HTTPStatus.OK, {
-                "reloaded": False,
-                "stub": True,
-                "module": module,
+                "reloaded": False, "stub": True, "module": module,
                 "reason": f"{ASTERISK_BIN} binary not on PATH",
             })
             return
-
         try:
             proc = subprocess.run(
                 [ASTERISK_BIN, "-rx", f"module reload {module}"],
@@ -643,7 +753,6 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(HTTPStatus.BAD_GATEWAY,
                             {"error": f"asterisk exec failed: {exc}"})
             return
-
         ok = proc.returncode == 0
         out = (proc.stdout or "").strip()
         err = (proc.stderr or "").strip()
@@ -651,14 +760,8 @@ class Handler(BaseHTTPRequestHandler):
                  module, proc.returncode, out[:200], err[:200])
         self._send_json(
             HTTPStatus.OK if ok else HTTPStatus.BAD_GATEWAY,
-            {
-                "reloaded": ok,
-                "stub": False,
-                "module": module,
-                "rc": proc.returncode,
-                "stdout": out,
-                "stderr": err,
-            },
+            {"reloaded": ok, "stub": False, "module": module,
+             "rc": proc.returncode, "stdout": out, "stderr": err},
         )
 
 
@@ -668,42 +771,44 @@ def main():
             "CONTROL_API_SECRET is not set; /control/* will return 503 until DevOps wires the secret."
         )
 
-    # Bind explicitly before declaring readiness. If this raises
-    # (port in use, permissions, address family), the exception
-    # surfaces in stderr and the supervisor in entrypoint.sh restarts
-    # us with backoff — which is preferable to silently dying.
     try:
         server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
     except OSError as exc:
         log.error("failed to bind 0.0.0.0:%d: %s", PORT, exc)
         return 1
 
-    # k8s sends SIGTERM on pod stop; default action would kill us
-    # without closing the socket cleanly, leaving the port in TIME_WAIT
-    # for the next pod. shutdown() exits serve_forever() in the main
-    # thread, then we close the socket in the finally below.
+    stop_event = threading.Event()
+
     def _graceful(signum, _frame):
         log.info("received signal %d; shutting down", signum)
-        # shutdown() blocks if called from the same thread that's in
-        # serve_forever(). Spawn a tiny thread to do the call.
-        import threading
+        stop_event.set()
         threading.Thread(target=server.shutdown, daemon=True).start()
 
     signal.signal(signal.SIGTERM, _graceful)
     signal.signal(signal.SIGINT, _graceful)
 
+    # Start the Redis status feeder in a daemon thread so the agent-hub
+    # trunk page's badge reflects PJSIP endpoint reality. Daemon=True
+    # means a python exit doesn't block on its termination.
+    feeder_thread = threading.Thread(
+        target=_status_feeder_loop, args=(stop_event,),
+        name="status-feeder", daemon=True,
+    )
+    feeder_thread.start()
+
     if DATABASE_URL and not HAS_PSYCOPG2:
         log.warning(
             "DATABASE_URL is set but psycopg2 is not installed — falling back to "
-            "in-memory mode. Trunks will NOT register or carry calls. Rebuild the "
-            "image with python3-psycopg2."
+            "in-memory mode. Trunks will NOT register or carry calls."
         )
     db_mode = "postgres" if _db_enabled() else "memory-only"
     log.info(
-        "listening on 0.0.0.0:%d (secret %s, trunk store=%s) — ready for /healthz and /control/*",
+        "listening on 0.0.0.0:%d (secret=%s store=%s nat=%s redis=%s)",
         PORT,
         "set" if SECRET else "MISSING",
         db_mode,
+        "yes" if BEHIND_NAT else "no",
+        "yes" if (REDIS_URL and HAS_REDIS) else "no",
     )
     try:
         server.serve_forever()
