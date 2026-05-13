@@ -1,18 +1,20 @@
 #!/bin/sh
 # Asterisk container entrypoint.
 #
-# 1. Render any *.conf.template files in /etc/asterisk via envsubst.
+# 1. Compute env-derived values that feed into envsubst (NAT block,
+#    anything else that needs shell-side conditionals).
+# 2. Render any *.conf.template files in /etc/asterisk via envsubst.
 #    This lets ConfigMaps reference env vars (ARI_PASSWORD, ODBC creds,
 #    external IP) without committing real values to git.
-# 2. Ensure runtime dirs exist + are writable (PVC mounts may replace
+# 3. Ensure runtime dirs exist + are writable (PVC mounts may replace
 #    them empty).
-# 3. Bring up the call-engine control-api sidecar on :8092 BEFORE
+# 4. Bring up the call-engine control-api sidecar on :8092 BEFORE
 #    asterisk. We pre-flight (python3 + script present), launch it
 #    under a supervisor that restarts on crash, then poll /healthz
 #    until it answers. If the sidecar can't bind we fail the whole
 #    container so k8s shows a clear startup error instead of letting
 #    asterisk run on its own and serving Connection refused on 8092.
-# 4. exec Asterisk in foreground, dropping to the `asterisk` user when
+# 5. exec Asterisk in foreground, dropping to the `asterisk` user when
 #    started as root (the standard non-K8s path). When already running
 #    as non-root (e.g. K8s securityContext.runAsUser=1000), skip the
 #    -U/-G drop because Asterisk rejects those flags off-root.
@@ -25,7 +27,39 @@ CONTROL_API_READY_TIMEOUT="${CONTROL_API_READY_TIMEOUT:-10}"
 
 log() { echo "entrypoint: $*"; }
 
-# 1. Templates -> .conf via envsubst. Loop is no-op if no templates.
+# 1. NAT-aware transport block.
+#
+# DevOps sets ASTERISK_EXTERNAL_IP to the public address the carrier
+# sees when this pod opens an outbound TLS connection (i.e. the
+# cluster's NAT-egress IP, or the LoadBalancer's external IP). When
+# present, the rendered transport-tls block tells Asterisk to rewrite
+# its outbound SIP Contact / Via headers and SDP c= lines to that IP
+# instead of the pod's internal 10.x.x.x. Without it, the carrier
+# accepts our REGISTER but cannot route inbound INVITEs or RTP back.
+#
+# ASTERISK_LOCAL_NET (default RFC1918) tells Asterisk NOT to apply
+# the NAT rewrite when talking to peers on the LAN — important for
+# in-cluster traffic to the agent-hub call-engine sidecar.
+if [ -n "${ASTERISK_EXTERNAL_IP:-}" ]; then
+  ASTERISK_TLS_NAT_BLOCK="external_media_address=${ASTERISK_EXTERNAL_IP}
+external_signaling_address=${ASTERISK_EXTERNAL_IP}
+local_net=${ASTERISK_LOCAL_NET:-10.0.0.0/8}"
+  if [ -n "${ASTERISK_LOCAL_NET2:-}" ]; then
+    ASTERISK_TLS_NAT_BLOCK="${ASTERISK_TLS_NAT_BLOCK}
+local_net=${ASTERISK_LOCAL_NET2}"
+  fi
+  if [ -n "${ASTERISK_LOCAL_NET3:-}" ]; then
+    ASTERISK_TLS_NAT_BLOCK="${ASTERISK_TLS_NAT_BLOCK}
+local_net=${ASTERISK_LOCAL_NET3}"
+  fi
+  log "NAT-aware transport: external IP=${ASTERISK_EXTERNAL_IP}"
+else
+  ASTERISK_TLS_NAT_BLOCK=""
+  log "no ASTERISK_EXTERNAL_IP set; SIP will advertise pod internal IP (OK only on host-network)"
+fi
+export ASTERISK_TLS_NAT_BLOCK
+
+# 2. Templates -> .conf via envsubst. Loop is no-op if no templates.
 for tmpl in /etc/asterisk/*.conf.template; do
   [ -f "$tmpl" ] || continue
   out="${tmpl%.template}"
@@ -34,7 +68,7 @@ for tmpl in /etc/asterisk/*.conf.template; do
   log "rendered $tmpl -> $out"
 done
 
-# 2. Runtime dirs - idempotent. PVCs / emptyDirs may mask the image's
+# 3. Runtime dirs - idempotent. PVCs / emptyDirs may mask the image's
 # pre-created versions, so re-create on every start.
 for d in \
     /var/spool/asterisk/recording \
@@ -48,7 +82,7 @@ do
   chown asterisk:asterisk "$d" 2>/dev/null || true
 done
 
-# 3. Control API sidecar.
+# 4. Control API sidecar.
 #
 # Pre-flight checks fail the container with a clear message rather
 # than silently starting asterisk only — DevOps's prior debug session
@@ -109,7 +143,7 @@ if [ "$ready" -ne 1 ]; then
 fi
 log "control-api ready on :$CONTROL_API_PORT"
 
-# 4. Run asterisk in the foreground.
+# 5. Run asterisk in the foreground.
 if [ "$(id -u)" = 0 ]; then
   exec /usr/sbin/asterisk -f -U asterisk -G asterisk -vvv "$@"
 else
