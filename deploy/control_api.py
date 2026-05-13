@@ -21,6 +21,7 @@ import os
 import re
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import threading
@@ -227,6 +228,59 @@ def _pick_transport(server_uri, explicit=None):
     return DEFAULT_TRANSPORT
 
 
+def _rewrite_uri_to_ip(uri):
+    """Resolve the hostname in a sip(s): URI to an A-record IP literal.
+
+    Asterisk's bundled pjlib DNS resolver fails with EDNSNOANSWERREC on
+    carrier hostnames that have no NAPTR/SRV records (typical for
+    wholesale SIP providers like innocalls), which makes qualify probes
+    and REGISTERs never leave the pod. The OS resolver here handles
+    those names fine, so we resolve once at upsert-time and write the
+    resulting IP into ps_aors.contact and ps_registrations.server_uri.
+    client_uri keeps the original hostname so the SIP From: header
+    still carries the carrier's expected domain.
+
+    Falls back to the original URI if resolution fails (e.g. transient
+    DNS error at upsert time) — better to write something Asterisk can
+    try than to fail the save outright.
+    """
+    if not uri:
+        return uri
+    try:
+        scheme, rest = uri.split(":", 1)
+    except ValueError:
+        return uri
+    if scheme not in ("sip", "sips"):
+        return uri
+    rest, sep, params = rest.partition(";")
+    if "@" in rest:
+        userpart, _, hostpart = rest.partition("@")
+        prefix = f"{scheme}:{userpart}@"
+    else:
+        hostpart = rest
+        prefix = f"{scheme}:"
+    host, _, port = hostpart.partition(":")
+    if not host:
+        return uri
+    # If already an IP literal, leave it alone.
+    try:
+        socket.inet_aton(host)
+        return uri
+    except OSError:
+        pass
+    try:
+        ip = socket.gethostbyname(host)
+    except OSError as exc:
+        log.warning("DNS resolve %s failed: %s; writing hostname as-is", host, exc)
+        return uri
+    out = f"{prefix}{ip}"
+    if port:
+        out += f":{port}"
+    if sep:
+        out += f";{params}"
+    return out
+
+
 def _pjsip_upsert(row, password):
     """Write the four ps_* rows so Asterisk picks the trunk up on reload."""
     if not _db_enabled():
@@ -234,6 +288,11 @@ def _pjsip_upsert(row, password):
     has_auth = bool(password) and bool(row.get("username"))
     auth_id = _auth_id_for(row["id"]) if has_auth else None
     server_uri = row["server_uri"]
+    # Pre-resolve the carrier hostname so pjlib's DNS resolver (which
+    # mis-handles NAPTR/SRV NODATA) isn't in the qualify/REGISTER path.
+    # client_uri keeps the hostname so the SIP From: header still
+    # advertises the carrier's domain.
+    target_uri = _rewrite_uri_to_ip(server_uri)
     transport = _pick_transport(server_uri, row.get("transport"))
     context = row.get("context") or DEFAULT_INBOUND_CONTEXT
     allow = row.get("allow") or DEFAULT_CODEC_ALLOW
@@ -252,18 +311,24 @@ def _pjsip_upsert(row, password):
                 ON CONFLICT (id) DO UPDATE SET
                     contact = EXCLUDED.contact,
                     qualify_frequency = EXCLUDED.qualify_frequency
-            """, (row["id"], server_uri))
+            """, (row["id"], target_uri))
 
-            # 2) AUTH — only when the trunk has credentials.
+            # 2) AUTH — only when the trunk has credentials. realm is
+            #    left NULL so Asterisk's outbound digest authenticator
+            #    matches whatever realm the carrier sends in its 401
+            #    challenge (carriers' challenge realm rarely matches
+            #    the hostname users type in the form — e.g. innocalls
+            #    challenges with realm `sip.innocalls.net` even though
+            #    the trunk talks to `cu622.sip.innocalls.net`).
             if has_auth:
                 cur.execute("""
                     INSERT INTO ps_auths (id, auth_type, username, password, realm)
-                    VALUES (%s, 'userpass', %s, %s, %s)
+                    VALUES (%s, 'userpass', %s, %s, NULL)
                     ON CONFLICT (id) DO UPDATE SET
                         username = EXCLUDED.username,
                         password = EXCLUDED.password,
                         realm    = EXCLUDED.realm
-                """, (auth_id, row["username"], password, row.get("from_domain")))
+                """, (auth_id, row["username"], password))
             else:
                 cur.execute("DELETE FROM ps_auths WHERE id = %s", (_auth_id_for(row["id"]),))
 
@@ -296,7 +361,7 @@ def _pjsip_upsert(row, password):
                         client_uri     = EXCLUDED.client_uri,
                         expiration     = EXCLUDED.expiration,
                         outbound_auth  = EXCLUDED.outbound_auth
-                """, (row["id"], transport, server_uri, client_uri, expiration, auth_id))
+                """, (row["id"], transport, target_uri, client_uri, expiration, auth_id))
             else:
                 cur.execute("DELETE FROM ps_registrations WHERE id = %s", (row["id"],))
     except psycopg2.Error as exc:
