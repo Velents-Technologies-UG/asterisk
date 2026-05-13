@@ -72,7 +72,7 @@ logging.basicConfig(
 log = logging.getLogger("control-api")
 
 
-# ── trunk validation + projection ────────────────────────────
+# ── trunk validation + projection ────────────────────────
 
 class _ValidationError(ValueError):
     pass
@@ -166,7 +166,7 @@ def _to_row(stored):
     return {k: v for k, v in stored.items() if not k.startswith("_")}
 
 
-# ── PJSIP realtime writer ────────────────────────────────────
+# ── PJSIP realtime writer ────────────────────────────
 #
 # These four tables are what Asterisk reads via sorcery_realtime +
 # extconfig (configs/samples/sorcery_realtime_agents.conf.sample,
@@ -196,16 +196,47 @@ def _auth_id_for(trunk_id):
     return f"{trunk_id}-auth"
 
 
+def _pick_transport(server_uri, explicit=None):
+    """Resolve the static PJSIP transport object name for a trunk.
+
+    The trunk form's `transport` field (if present) takes precedence and
+    arrives as one of the short names in _VALID_TRANSPORTS ("udp", "tcp",
+    "tls"), which we map to the static transport ids declared in
+    pjsip_transport_tls.conf / pjsip_wss_agents.conf.
+
+    When no transport is supplied, auto-pick: serverUri using scheme
+    "sips:" or port 5061 -> transport-tls, otherwise DEFAULT_TRANSPORT.
+    Carriers on :5061 are TLS-only in practice; sending UDP there gets
+    silently dropped and the AOR contact stays Unavail with nan RTT.
+    """
+    if explicit:
+        return f"transport-{explicit}"
+    s = (server_uri or "").strip()
+    if s.startswith("sips:"):
+        return "transport-tls"
+    rest = s.split("sip:", 1)[1] if s.startswith("sip:") else s
+    if "@" in rest:
+        rest = rest.split("@", 1)[1]
+    hostport = rest.split(";", 1)[0].split("/", 1)[0]
+    if ":" in hostport:
+        try:
+            if int(hostport.rsplit(":", 1)[1]) == 5061:
+                return "transport-tls"
+        except ValueError:
+            pass
+    return DEFAULT_TRANSPORT
+
+
 def _pjsip_upsert(row, password):
     """Write the four ps_* rows so Asterisk picks the trunk up on reload."""
     if not _db_enabled():
         return
     has_auth = bool(password) and bool(row.get("username"))
     auth_id = _auth_id_for(row["id"]) if has_auth else None
-    transport = row.get("transport") or DEFAULT_TRANSPORT
+    server_uri = row["server_uri"]
+    transport = _pick_transport(server_uri, row.get("transport"))
     context = row.get("context") or DEFAULT_INBOUND_CONTEXT
     allow = row.get("allow") or DEFAULT_CODEC_ALLOW
-    server_uri = row["server_uri"]
     expiration = row.get("expiration") or 3600
     client_uri = row.get("client_uri") or (
         f"sip:{row['username']}@{row.get('from_domain') or _server_uri_host(server_uri)}"
@@ -260,6 +291,7 @@ def _pjsip_upsert(row, password):
                          retry_interval, outbound_auth)
                     VALUES (%s, %s, %s, %s, %s, 60, %s)
                     ON CONFLICT (id) DO UPDATE SET
+                        transport      = EXCLUDED.transport,
                         server_uri     = EXCLUDED.server_uri,
                         client_uri     = EXCLUDED.client_uri,
                         expiration     = EXCLUDED.expiration,
@@ -294,7 +326,7 @@ def _server_uri_host(server_uri):
     return s.split(":", 1)[0].split(";", 1)[0]
 
 
-# ── route table ──────────────────────────────────────────────
+# ── route table ────────────────────────────────────
 
 _ROUTES = [
     ("GET",    re.compile(r"^/control/sip/trunks/?$"),       "list_trunks"),
@@ -344,7 +376,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_PATCH(self):
         self._dispatch("PATCH")
 
-    # ── routing ──────────────────────────────────────────────
+    # ── routing ─────────────────────────────────────
 
     def _dispatch(self, method):
         path = self.path.split("?", 1)[0]
@@ -382,7 +414,7 @@ class Handler(BaseHTTPRequestHandler):
             {"error": "not implemented in call-engine stub", "method": method, "path": path},
         )
 
-    # ── body helpers ─────────────────────────────────────────
+    # ── body helpers ──────────────────────────────────
 
     def _read_json_body(self):
         """Return parsed JSON dict, or None if a response was already sent."""
@@ -420,7 +452,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("content-length", "0")
         self.end_headers()
 
-    # ── /control/sip/trunks handlers ─────────────────────────
+    # ── /control/sip/trunks handlers ───────────────────────
 
     def list_trunks(self):
         with _lock:
@@ -499,7 +531,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         self._send_204()
 
-    # ── /control/asterisk/reload ─────────────────────────────
+    # ── /control/asterisk/reload ─────────────────────────
     #
     # Real reload via the asterisk CLI socket (which lives in
     # /var/run/asterisk and is owned by uid:gid 1000 — the same the
