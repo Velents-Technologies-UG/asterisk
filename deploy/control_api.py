@@ -471,6 +471,17 @@ def _server_uri_host(server_uri):
 # `pjsip show endpoints` every STATUS_FEEDER_INTERVAL seconds, derive
 # online/offline/unknown per endpoint id, and HSET the result.
 #
+# For IP-trunk endpoints (identify-based, no REGISTER) the qualify
+# contact-Avail/Unavail state is the wrong signal — many carriers do
+# not respond to OPTIONS even though they happily accept INVITEs from
+# the whitelisted source IP, so an ip-trunk would appear permanently
+# 'offline' or 'unknown' despite being fully operational. We therefore
+# also poll `pjsip show identifies`, build a set of endpoint ids that
+# have a ps_identify row, and mark those endpoints 'online' as long as
+# Asterisk has actually loaded them. Result: an ip-trunk turns green
+# the moment its row is persisted and module-reloaded — which matches
+# user intent ("if I saved it, it should be live").
+#
 # Parsing CLI output is fragile but avoids adding an ARI HTTP client
 # (which would also need credentials). The format is stable across
 # Asterisk 18/20/22 — if it ever changes we'll see endpoints stuck on
@@ -501,6 +512,33 @@ def _parse_pjsip_endpoints(output):
         state = parts[1].strip()
         if ep_id:
             yield ep_id, state
+
+
+def _parse_pjsip_identifies(output):
+    """Yield endpoint_ids that have an identify mapping.
+
+    `pjsip show identifies` output looks like:
+       Identify:  <identify-id>/<endpoint-id>
+              Match: 77.75.224.252/32
+    The 'Identify:' line is what we care about; the form is
+    '<identify-id>/<endpoint-id>'. We return the endpoint-id portion
+    so the feeder can flag those endpoints as ip-trunks.
+    """
+    for line in output.splitlines():
+        s = line.strip()
+        if not s.startswith("Identify:"):
+            continue
+        if "<Identify" in s:
+            continue
+        rest = s[len("Identify:"):].strip()
+        if "/" not in rest:
+            continue
+        endpoint_part = rest.rsplit("/", 1)[1].strip()
+        # The endpoint part may have trailing whitespace + extra columns;
+        # take everything up to the first whitespace run.
+        endpoint_id = re.split(r"\s+", endpoint_part, maxsplit=1)[0].strip()
+        if endpoint_id:
+            yield endpoint_id
 
 
 def _state_to_status(state):
@@ -537,13 +575,29 @@ def _status_feeder_loop(stop_event):
             if shutil.which(ASTERISK_BIN) is None:
                 stop_event.wait(STATUS_FEEDER_INTERVAL)
                 continue
-            proc = subprocess.run(
+            ep_proc = subprocess.run(
                 [ASTERISK_BIN, "-rx", "pjsip show endpoints"],
                 capture_output=True, text=True, timeout=5, check=False,
             )
-            if proc.returncode == 0:
-                updates = {ep_id: _state_to_status(state)
-                           for ep_id, state in _parse_pjsip_endpoints(proc.stdout)}
+            id_proc = subprocess.run(
+                [ASTERISK_BIN, "-rx", "pjsip show identifies"],
+                capture_output=True, text=True, timeout=5, check=False,
+            )
+            ip_trunk_endpoints = (
+                set(_parse_pjsip_identifies(id_proc.stdout))
+                if id_proc.returncode == 0 else set()
+            )
+            if ep_proc.returncode == 0:
+                updates = {}
+                for ep_id, state in _parse_pjsip_endpoints(ep_proc.stdout):
+                    if ep_id in ip_trunk_endpoints:
+                        # ip-trunk: presence of an identify row + the
+                        # endpoint being loaded by Asterisk means we'll
+                        # accept INVITEs from the matching IP. Qualify
+                        # state is irrelevant here.
+                        updates[ep_id] = "online"
+                    else:
+                        updates[ep_id] = _state_to_status(state)
                 if updates:
                     client.hset(STATUS_FEEDER_KEY, mapping=updates)
         except Exception as exc:
