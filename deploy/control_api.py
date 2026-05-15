@@ -70,6 +70,7 @@ DEFAULT_INBOUND_CONTEXT = os.environ.get("TRUNK_INBOUND_CONTEXT", "from-trunk")
 DEFAULT_CODEC_ALLOW = os.environ.get("TRUNK_DEFAULT_ALLOW", "ulaw,alaw")
 STATUS_FEEDER_INTERVAL = int(os.environ.get("STATUS_FEEDER_INTERVAL", "5"))
 STATUS_FEEDER_KEY = os.environ.get("STATUS_FEEDER_KEY", "cx:trunks:status")
+STATUS_FEEDER_AGENTS_KEY = os.environ.get("STATUS_FEEDER_AGENTS_KEY", "cx:agents:sip-status")
 MAX_BODY_BYTES = 64 * 1024  # 64 KiB — way more than a trunk row needs.
 
 # Behind-NAT mode is implied by ASTERISK_EXTERNAL_IP being set: when
@@ -482,6 +483,12 @@ def _server_uri_host(server_uri):
 # the moment its row is persisted and module-reloaded — which matches
 # user intent ("if I saved it, it should be live").
 #
+# We additionally poll `pjsip show aors` and write per-AOR registration
+# state to STATUS_FEEDER_AGENTS_KEY (default `cx:agents:sip-status`).
+# Each human agent's softphone registers a Contact under an AOR whose
+# id is the agent's sip username; the supervisor's "Live" view reads
+# this hash to render a per-agent connected/disconnected dot.
+#
 # Parsing CLI output is fragile but avoids adding an ARI HTTP client
 # (which would also need credentials). The format is stable across
 # Asterisk 18/20/22 — if it ever changes we'll see endpoints stuck on
@@ -541,6 +548,59 @@ def _parse_pjsip_identifies(output):
             yield endpoint_id
 
 
+def _parse_pjsip_aors(output):
+    """Yield (aor_id, status) tuples from `pjsip show aors` output.
+
+    Output shape (whitespace varies):
+           Aor:  <Aor................>  <MaxContact>
+       Contact:  <Aor/ContactUri.....>  <Hash>  <Status>  <RTT>
+     Endpoint:  <Endpoint/CID.......>  <State>  <Channels>
+    Empty Aors (no Contact line) → offline.
+
+    Status logic:
+      online  iff any Contact is Avail or NonQual (NonQual means the
+              Contact registered but qualify hasn't run yet — still a
+              positive sign).
+      offline otherwise (no Contact, or all Unavail/Removed).
+    """
+    aors = {}  # aor_id -> [contact_state, ...]
+    current = None
+    for line in output.splitlines():
+        s = line.strip()
+        if s.startswith("Aor:"):
+            rest = s[len("Aor:"):].strip()
+            if "<Aor" in rest:
+                current = None
+                continue
+            parts = re.split(r"\s+", rest, maxsplit=1)
+            if parts and parts[0]:
+                current = parts[0].strip()
+                aors.setdefault(current, [])
+        elif s.startswith("Contact:") and current:
+            rest = s[len("Contact:"):].strip()
+            if "<Aor/Contact" in rest or "<Contact" in rest:
+                continue
+            parts = re.split(r"\s{2,}", rest)
+            # Layout: [<aor>/<uri>, <hash>, <status>, <rtt>]
+            if len(parts) >= 3:
+                aors[current].append(parts[2].strip())
+        # 'Endpoint:' and other lines under the AOR are ignored.
+
+    for aor_id, states in aors.items():
+        if not states:
+            yield aor_id, "offline"
+            continue
+        good = False
+        for state in states:
+            sl = state.lower()
+            if "unavail" in sl or "removed" in sl:
+                continue
+            if "avail" in sl or "nonqual" in sl or "created" in sl:
+                good = True
+                break
+        yield aor_id, "online" if good else "offline"
+
+
 def _state_to_status(state):
     """Map Asterisk's free-text endpoint state to the agent-hub vocabulary."""
     s = (state or "").lower()
@@ -568,8 +628,10 @@ def _status_feeder_loop(stop_event):
     except Exception as exc:
         log.error("status feeder: cannot connect to %s: %s", REDIS_URL, exc)
         return
-    log.info("status feeder started: interval=%ds key=%s",
-             STATUS_FEEDER_INTERVAL, STATUS_FEEDER_KEY)
+    log.info(
+        "status feeder started: interval=%ds trunks_key=%s agents_key=%s",
+        STATUS_FEEDER_INTERVAL, STATUS_FEEDER_KEY, STATUS_FEEDER_AGENTS_KEY,
+    )
     while not stop_event.is_set():
         try:
             if shutil.which(ASTERISK_BIN) is None:
@@ -583,23 +645,43 @@ def _status_feeder_loop(stop_event):
                 [ASTERISK_BIN, "-rx", "pjsip show identifies"],
                 capture_output=True, text=True, timeout=5, check=False,
             )
+            aor_proc = subprocess.run(
+                [ASTERISK_BIN, "-rx", "pjsip show aors"],
+                capture_output=True, text=True, timeout=5, check=False,
+            )
             ip_trunk_endpoints = (
                 set(_parse_pjsip_identifies(id_proc.stdout))
                 if id_proc.returncode == 0 else set()
             )
+            # Trunk endpoint set — anything visible in the endpoints listing
+            # that we know is a trunk. ip-trunks are flagged via identifies;
+            # register trunks we can't trivially separate from agents at the
+            # CLI parse level, but their AOR id == trunk id, so the agents
+            # hash may double-include them. Consumers (agent-hub /api/cx/voip)
+            # look up by sip_username so trunk-id collisions are benign.
+            trunk_endpoints = set(ip_trunk_endpoints)
             if ep_proc.returncode == 0:
-                updates = {}
+                trunk_updates = {}
                 for ep_id, state in _parse_pjsip_endpoints(ep_proc.stdout):
                     if ep_id in ip_trunk_endpoints:
                         # ip-trunk: presence of an identify row + the
                         # endpoint being loaded by Asterisk means we'll
                         # accept INVITEs from the matching IP. Qualify
                         # state is irrelevant here.
-                        updates[ep_id] = "online"
+                        trunk_updates[ep_id] = "online"
                     else:
-                        updates[ep_id] = _state_to_status(state)
-                if updates:
-                    client.hset(STATUS_FEEDER_KEY, mapping=updates)
+                        trunk_updates[ep_id] = _state_to_status(state)
+                if trunk_updates:
+                    client.hset(STATUS_FEEDER_KEY, mapping=trunk_updates)
+
+            if aor_proc.returncode == 0:
+                agent_updates = {}
+                for aor_id, status in _parse_pjsip_aors(aor_proc.stdout):
+                    if aor_id in trunk_endpoints:
+                        continue  # already represented in the trunks hash
+                    agent_updates[aor_id] = status
+                if agent_updates:
+                    client.hset(STATUS_FEEDER_AGENTS_KEY, mapping=agent_updates)
         except Exception as exc:
             log.warning("status feeder iteration failed: %s", exc)
         stop_event.wait(STATUS_FEEDER_INTERVAL)
@@ -940,11 +1022,24 @@ class Handler(BaseHTTPRequestHandler):
 
     # ── /control/sip/originate ──────────────────────────
     #
-    # Trigger an outbound call through the named trunk. agent-hub's
-    # trunk page (or a future click-to-dial widget) POSTs here so it
-    # doesn't need ARI credentials of its own. Implementation shells
-    # to `asterisk -rx originate ...` — fire-and-forget; for
+    # Trigger an outbound call through the named trunk (external) or to
+    # a registered SIP endpoint (internal). agent-hub's dialpad POSTs
+    # here so it doesn't need ARI credentials of its own. Implementation
+    # shells to `asterisk -rx originate ...` — fire-and-forget; for
     # call-id / live state we'd need to swap to ARI HTTP later.
+    #
+    # Two shapes accepted:
+    #   { destination: <E.164>, trunkId: <trunk> }
+    #     → channel = PJSIP/<destination>@<trunkId>  (external via trunk)
+    #   { targetEndpoint: <sip-username> }
+    #     → channel = PJSIP/<sip-username>           (internal to a
+    #                                                 registered AOR;
+    #                                                 trunkId optional)
+    #
+    # Optional `fromAgent` is logged for now as a soft attribution. The
+    # CLI `originate` syntax doesn't accept CallerID directly; setting
+    # the channel variable CALLERID(num) at originate time requires AMI,
+    # which is a follow-up. v1 just records who initiated.
 
     def originate_call(self):
         body = self._read_json_body()
@@ -952,17 +1047,28 @@ class Handler(BaseHTTPRequestHandler):
             return
         destination = str(body.get("destination") or "").strip()
         trunk_id = str(body.get("trunkId") or "").strip()
+        target_endpoint = str(body.get("targetEndpoint") or "").strip()
         extension = str(body.get("extension") or "s").strip()
         context = str(body.get("context") or DEFAULT_INBOUND_CONTEXT).strip()
+        from_agent = str(body.get("fromAgent") or "").strip()
 
-        if not _DEST_RE.match(destination):
-            self._send_json(HTTPStatus.UNPROCESSABLE_ENTITY,
-                            {"error": "destination must be 1-64 chars: digits, + * #"})
-            return
-        if not _SAFE_ID.match(trunk_id):
-            self._send_json(HTTPStatus.UNPROCESSABLE_ENTITY,
-                            {"error": "trunkId must be 1-60 chars, alphanumerics + _ -"})
-            return
+        if target_endpoint:
+            if not _SAFE_ID.match(target_endpoint):
+                self._send_json(HTTPStatus.UNPROCESSABLE_ENTITY,
+                                {"error": "targetEndpoint must be 1-60 chars, alphanumerics + _ -"})
+                return
+            channel = f"PJSIP/{target_endpoint}"
+        else:
+            if not _DEST_RE.match(destination):
+                self._send_json(HTTPStatus.UNPROCESSABLE_ENTITY,
+                                {"error": "destination must be 1-64 chars: digits, + * #"})
+                return
+            if not _SAFE_ID.match(trunk_id):
+                self._send_json(HTTPStatus.UNPROCESSABLE_ENTITY,
+                                {"error": "trunkId must be 1-60 chars, alphanumerics + _ -"})
+                return
+            channel = f"PJSIP/{destination}@{trunk_id}"
+
         if not _EXT_RE.match(extension):
             self._send_json(HTTPStatus.UNPROCESSABLE_ENTITY,
                             {"error": "extension format invalid"})
@@ -970,6 +1076,10 @@ class Handler(BaseHTTPRequestHandler):
         if not _SAFE_ID.match(context):
             self._send_json(HTTPStatus.UNPROCESSABLE_ENTITY,
                             {"error": "context format invalid"})
+            return
+        if from_agent and not _SAFE_ID.match(from_agent):
+            self._send_json(HTTPStatus.UNPROCESSABLE_ENTITY,
+                            {"error": "fromAgent format invalid"})
             return
 
         if shutil.which(ASTERISK_BIN) is None:
@@ -979,7 +1089,6 @@ class Handler(BaseHTTPRequestHandler):
             })
             return
 
-        channel = f"PJSIP/{destination}@{trunk_id}"
         cli = f"originate {channel} extension {extension}@{context}"
 
         try:
@@ -999,14 +1108,17 @@ class Handler(BaseHTTPRequestHandler):
         ok = proc.returncode == 0
         out = (proc.stdout or "").strip()
         err = (proc.stderr or "").strip()
-        log.info("originate %s rc=%d stdout=%r stderr=%r",
-                 channel, proc.returncode, out[:200], err[:200])
+        log.info(
+            "originate %s rc=%d fromAgent=%r stdout=%r stderr=%r",
+            channel, proc.returncode, from_agent or "-", out[:200], err[:200],
+        )
         self._send_json(
             HTTPStatus.OK if ok else HTTPStatus.BAD_GATEWAY,
             {
                 "queued": ok,
                 "channel": channel,
                 "extension": f"{extension}@{context}",
+                "fromAgent": from_agent or None,
                 "rc": proc.returncode,
                 "stdout": out,
                 "stderr": err,
