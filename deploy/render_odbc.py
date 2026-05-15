@@ -5,23 +5,26 @@ Writes:
   /etc/odbc.ini
   /root/.odbc.ini
   /var/lib/asterisk/.odbc.ini    (chowned to asterisk:asterisk)
+  /etc/asterisk/res_odbc.conf
 
-All three carry the same [asterisk-pgsql] DSN with URL-decoded
-creds. unixODBC searches $ODBCINI, then $HOME/.odbc.ini, then
-/etc/odbc.ini — since Asterisk runs as user `asterisk` with
+The three odbc.ini paths carry the same [asterisk-pgsql] DSN with
+URL-decoded creds. unixODBC searches $ODBCINI, then $HOME/.odbc.ini,
+then /etc/odbc.ini — since Asterisk runs as user `asterisk` with
 HOME=/var/lib/asterisk, the home-file takes precedence. We populate
 all three so a stale or empty home-file never masks the real config.
 
-Also writes /etc/asterisk/res_odbc.conf with the dsn -> asterisk-pgsql
-link, intentionally WITHOUT username/password lines. We learned the
-hard way during debug that Asterisk's res_odbc config parser mangles
-literal `%` characters in the password field; routing creds through
-odbc.ini (which the unixODBC C parser handles correctly) sidesteps
-that bug. res_odbc.conf falls back to the DSN's stored creds when no
-username/password override is present — the documented behavior.
+res_odbc.conf carries inline `username` and `password` lines as well
+as the dsn link. The historical `%`-mangling concern (which made us
+strip creds from res_odbc.conf at one point) is moot here: `user`
+and `pwd_str` below are URL-decoded by p.unquote() before they ever
+reach the config file, so the literal `%` characters that confused
+Asterisk's config_options parser are no longer present.
 
-The Python ODBC driver doesn't URL-decode credentials the way libpq
-does implicitly for postgresql:// URLs, so we unquote() here.
+Defensive write: catches OSError, fsyncs each file, reads it back,
+and verifies the [DSN] section header is the first non-blank line.
+If a ConfigMap volume mount or any other layer is masking the file
+after we write, the verify step logs a WARNING with the actual
+first line so the symptom is obvious in kubectl logs.
 
 Stdlib only (no pip).
 """
@@ -79,18 +82,60 @@ BoolsAsChar = 0
 Padding = 0
 """
 
-for path in ODBC_INI_PATHS:
+EXPECTED_HEADER = f"[{DSN}]"
+
+
+def _write_and_verify(path, content, expected_first_line):
+    """Write content to path, fsync, then read back and check the header.
+
+    Returns True on success, False on any write or verification failure.
+    Logs progress to stderr so the symptom of a masked write is visible
+    in kubectl logs.
+    """
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
     except OSError:
         pass
-    with open(path, "w") as f:
-        f.write(odbc_ini)
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o640)
+        try:
+            os.write(fd, content.encode("utf-8"))
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    except OSError as exc:
+        print(f"render_odbc: FAILED to write {path}: {exc}", file=sys.stderr)
+        return False
     try:
         os.chmod(path, 0o640)
     except OSError:
         pass
-    print(f"render_odbc: wrote {path}", file=sys.stderr)
+    try:
+        with open(path) as f:
+            actual = f.read()
+    except OSError as exc:
+        print(f"render_odbc: WARNING cannot read back {path}: {exc}",
+              file=sys.stderr)
+        return False
+    # First non-blank line.
+    first = next((ln.strip() for ln in actual.splitlines() if ln.strip()), "")
+    size = len(actual)
+    if first != expected_first_line:
+        print(
+            f"render_odbc: WARNING {path} verification failed: "
+            f"first non-blank line is {first!r}, expected {expected_first_line!r}; "
+            f"size={size}. Something (ConfigMap mount? init container?) is "
+            f"masking the file.",
+            file=sys.stderr,
+        )
+        return False
+    print(f"render_odbc: wrote {path} ({size} bytes, header OK)",
+          file=sys.stderr)
+    return True
+
+
+for path in ODBC_INI_PATHS:
+    _write_and_verify(path, odbc_ini, EXPECTED_HEADER)
 
 # The asterisk-home copy needs to be readable by the asterisk user.
 # render_odbc runs early in entrypoint.sh as root; chown so the
@@ -103,27 +148,30 @@ except (KeyError, OSError) as exc:
     print(f"render_odbc: chown asterisk home odbc.ini skipped: {exc}",
           file=sys.stderr)
 
-# res_odbc.conf — minimal, no credentials. Letting res_odbc fall
-# through to the DSN's stored creds avoids the `%`-in-password
-# mangling we hit during the debug session.
+# res_odbc.conf — includes URL-decoded creds inline.
+#
+# WARNING about future-proofing: Asterisk's config_options parser
+# historically mangles literal `%` characters in `password =>` lines.
+# We avoid the hazard here because pwd_str is URL-decoded by
+# p.unquote() above (any %XX sequences from the DATABASE_URL form
+# have already become their literal chars by this point). If a future
+# deployment ever needs to inject a password with literal `%`
+# characters that are NOT URL-encoded in DATABASE_URL, this file
+# would need different escaping — but that's not a scenario we hit
+# today.
 res_odbc = f"""[general]
 
 [asterisk]
 enabled => yes
 dsn => {DSN}
+username => {user}
+password => {pwd_str}
 pre-connect => yes
 sanitysql => SELECT 1
 backslash_is_escape => yes
 max_connections => 5
 """
-with open(RES_ODBC_PATH, "w") as f:
-    f.write(res_odbc)
-try:
-    os.chmod(RES_ODBC_PATH, 0o640)
-except OSError:
-    pass
-print(f"render_odbc: wrote {RES_ODBC_PATH} (no inline creds; falls through to DSN)",
-      file=sys.stderr)
+_write_and_verify(RES_ODBC_PATH, res_odbc, "[general]")
 
 print(
     f"render_odbc: target={user}@{host}:{port}/{db} dsn={DSN} sslmode={sslmode}",
