@@ -74,6 +74,9 @@ FROM ${ASTERISK_RUNTIME_BASE}
 
 ENV DEBIAN_FRONTEND=noninteractive
 
+# python3-cryptography provides AESGCM, which the sidecar uses to
+# encrypt sip_trunk_accounts.password_enc at rest. Without it the
+# trunk-account write path returns 503 with a clear DevOps action item.
 RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
@@ -83,7 +86,7 @@ RUN set -eux; \
         libncurses6 libnewt0.52 libopus0 \
         libpopt0 libical3 libspeex1 libspeexdsp1 libogg0 libvorbis0a \
         libuuid1 ca-certificates gettext-base \
-        curl tini python3 python3-psycopg2 python3-redis ; \
+        curl tini python3 python3-psycopg2 python3-redis python3-cryptography ; \
     rm -rf /var/lib/apt/lists/*; \
     groupadd -r -g 1000 asterisk; \
     useradd  -r -u 1000 -g asterisk -d /var/lib/asterisk -s /sbin/nologin asterisk; \
@@ -141,6 +144,7 @@ RUN set -eux; \
 
 COPY deploy/entrypoint.sh   /entrypoint.sh
 COPY deploy/control_api.py  /usr/local/bin/control-api
+COPY deploy/sip_store.py    /usr/local/bin/sip_store.py
 COPY deploy/render_odbc.py  /usr/local/bin/render-odbc
 RUN chmod +x /entrypoint.sh /usr/local/bin/control-api /usr/local/bin/render-odbc
 

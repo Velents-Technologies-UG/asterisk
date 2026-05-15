@@ -3,10 +3,16 @@
 ;
 ; Realtime engine bindings. Merge into /etc/asterisk/extconfig.conf.
 ;
-; Maps the four PJSIP realtime tables (endpoint/auth/aor/registration)
-; to the ODBC connection named `asterisk` (defined in
+; Maps the five PJSIP realtime tables (endpoint/auth/aor/registration/
+; identify) to the ODBC connection named `asterisk` (defined in
 ; res_odbc_agents.conf.sample). The ps_* names on the right are the
 ; Postgres table names the call-engine writes to.
+;
+; ps_identify is required for IP-based trunks where the carrier is
+; identified by source IP rather than via REGISTER. The sidecar
+; populates a row in this table when a provider's mode is 'ip-trunk';
+; res_pjsip reads it via res_pjsip_endpoint_identifier_ip when an
+; endpoint's identify_by includes 'ip'.
 ;
 
 [settings]
@@ -14,3 +20,4 @@ ps_endpoints     => odbc,asterisk,ps_endpoints
 ps_auths         => odbc,asterisk,ps_auths
 ps_aors          => odbc,asterisk,ps_aors
 ps_registrations => odbc,asterisk,ps_registrations
+ps_identify      => odbc,asterisk,ps_identify
