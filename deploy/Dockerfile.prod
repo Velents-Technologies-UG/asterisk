@@ -15,12 +15,12 @@ FROM ${ASTERISK_BUILD_BASE} AS builder
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# libxml2-utils and xsltproc are needed for Asterisk's `make xmldoc`
-# step (it shells to `xmllint` to validate and to `xsltproc` to
-# transform the per-module <documentation> blocks into the merged
-# core-en_US.xml). Without these, configure's xmldoc detection
-# silently skips generation and we end up shipping a stale or
-# upstream-default core-en_US.xml that doesn't match the .so files
+# libxml2-utils and xsltproc are needed for Asterisk's XML doc
+# generation (the build shells to `xmllint` to validate and to
+# `xsltproc` to transform the per-module <documentation> blocks into
+# the merged core-en_US.xml). Without these, configure's xmldoc
+# detection silently skips generation and we end up shipping a stale
+# or upstream-default core-en_US.xml that doesn't match the .so files
 # this fork actually compiles. That mismatch manifests at runtime
 # as `aco_register_options` failing for types like `registration`,
 # with the warning:
@@ -43,11 +43,13 @@ RUN set -eux; \
 WORKDIR /usr/src/asterisk
 COPY . .
 
-# Build pipeline. Note `make xmldoc` is run EXPLICITLY between `make`
-# (which builds binaries / modules) and `make install` (which copies
-# everything to its install path). Relying on `install-xmldoc` as a
-# transitive dep was unreliable in our setup; an explicit invocation
-# guarantees the merged core-en_US.xml reflects the just-compiled
+# Build pipeline. The XML-doc step is invoked explicitly via
+# `make install-xmldoc` AFTER `make install`. This fork doesn't expose
+# a bare `make xmldoc` target — `install-xmldoc` is the single step
+# that both generates and installs the merged core-en_US.xml from
+# the just-compiled <documentation> blocks. Running it explicitly
+# (and only AFTER `make install` has prepared the install tree)
+# guarantees the merged core-en_US.xml reflects the actually-built
 # source rather than a stale tarball-shipped copy.
 RUN set -eux; \
     ./bootstrap.sh; \
@@ -63,8 +65,8 @@ RUN set -eux; \
         --enable MOH-OPSOUND-WAV \
         menuselect.makeopts; \
     make -j"$(nproc)"; \
-    make xmldoc; \
     make install; \
+    make install-xmldoc; \
     make install-headers; \
     make samples; \
     echo "--- post-build xmldoc check ---"; \
