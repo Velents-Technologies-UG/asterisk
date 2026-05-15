@@ -56,12 +56,12 @@ db   = (u.path or "/").lstrip("/")
 user = p.unquote(u.username or "")
 pwd_str = p.unquote(u.password or "")
 
-# RDS and other managed Postgres reject unencrypted connections.
-# Empirically confirmed during debug: sslmode=disable produced
-# `no pg_hba.conf entry for host ..., no encryption`. Default to
-# require; override via PG_SSLMODE only for local docker-compose
-# dev where TLS is off.
-sslmode = os.environ.get("PG_SSLMODE", "require")
+# Default to sslmode=disable: DevOps configured RDS to accept
+# unencrypted connections from the cluster (the asterisk pod sits
+# inside the same VPC as the database, so the segment is already
+# isolated). When this changes — e.g. a new cluster where RDS only
+# accepts SSL — set PG_SSLMODE=require in the pod env to flip it back.
+sslmode = os.environ.get("PG_SSLMODE", "disable")
 
 odbc_ini = f"""[{DSN}]
 Description = Asterisk PJSIP realtime
