@@ -53,11 +53,6 @@ FROM ${ASTERISK_RUNTIME_BASE}
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# python3 + python3-psycopg2 + python3-redis: the sidecar uses
-# psycopg2 to write the PJSIP realtime rows and redis to push trunk
-# status into the agent-hub `cx:trunks:status` hash. python3-minimal
-# would drop stdlib `json` (CrashLoopBackOff on prod-17); install the
-# full python3 metapackage instead. Apt-only — no pip in the image.
 RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
@@ -84,6 +79,10 @@ COPY --from=builder /var/lib/asterisk           /var/lib/asterisk
 COPY --from=builder /etc/asterisk               /etc/asterisk
 RUN ldconfig
 
+# Config overlays. res_odbc.conf is intentionally NOT copied here —
+# deploy/render_odbc.py writes it at container start with the DSN
+# pointing at the unixODBC-resolved [asterisk-pgsql] entry (no inline
+# username/password, which avoids the `%` mangling we hit in debug).
 COPY configs/samples/extensions_ai_runtime.conf.sample        /etc/asterisk/extensions_ai_runtime.conf
 COPY configs/samples/ari_call_engine.conf.sample              /etc/asterisk/ari.conf
 COPY configs/samples/http_wss.conf.sample                     /etc/asterisk/http.conf
@@ -92,13 +91,18 @@ COPY configs/samples/pjsip_trunks.conf.sample                 /etc/asterisk/pjsi
 COPY configs/samples/pjsip_transport_tls.conf.template        /etc/asterisk/pjsip_transport_tls.conf.template
 COPY configs/samples/sorcery_realtime_agents.conf.sample      /etc/asterisk/sorcery.conf
 COPY configs/samples/extconfig_realtime_agents.conf.sample    /etc/asterisk/extconfig.conf
-COPY configs/samples/res_odbc_agents.conf.template            /etc/asterisk/res_odbc.conf.template
 
+# Suppress noisy module that fails to initialize on systems without
+# libvorbisfile / Ogg-Vorbis support (we don't use Ogg recordings).
+# Appending a [modules] block re-opens that section; Asterisk
+# tolerates multiple section headers in the same conf file.
 RUN set -eux; \
     printf '[general]\nstatic=yes\nwriteprotect=no\n\n#include "extensions_ai_runtime.conf"\n' \
       > /etc/asterisk/extensions.conf; \
     printf '#include "pjsip_transport_tls.conf"\n#include "pjsip_wss_agents.conf"\n#include "pjsip_trunks.conf"\n' \
       > /etc/asterisk/pjsip.conf; \
+    printf '\n[modules]\nnoload => format_ogg_vorbis.so\n' \
+      >> /etc/asterisk/modules.conf; \
     chown -R asterisk:asterisk /etc/asterisk /var/spool/asterisk \
                                 /var/lib/asterisk /var/log/asterisk /var/run/asterisk
 
