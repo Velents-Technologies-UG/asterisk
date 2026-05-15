@@ -15,18 +15,11 @@ FROM ${ASTERISK_BUILD_BASE} AS builder
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# libxml2-utils and xsltproc are needed for Asterisk's XML doc
-# generation (the build shells to `xmllint` to validate and to
-# `xsltproc` to transform the per-module <documentation> blocks into
-# the merged core-en_US.xml). Without these, configure's xmldoc
-# detection silently skips generation and we end up shipping a stale
-# or upstream-default core-en_US.xml that doesn't match the .so files
-# this fork actually compiles. That mismatch manifests at runtime
-# as `aco_register_options` failing for types like `registration`,
-# with the warning:
-#   WARNING config_options.c: Could not update type 'registration'
-#       with values from config type registration
-# and the module then declines to load.
+# libxml2-utils provides `xmllint` and xsltproc provides `xsltproc`.
+# Asterisk's build can use them at configure-time to validate the
+# per-module <documentation> blocks. They're harmless to keep even
+# though our build doesn't explicitly invoke them — it gives configure
+# its best shot at picking the most thorough xmldoc validation path.
 RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
@@ -43,14 +36,14 @@ RUN set -eux; \
 WORKDIR /usr/src/asterisk
 COPY . .
 
-# Build pipeline. The XML-doc step is invoked explicitly via
-# `make install-xmldoc` AFTER `make install`. This fork doesn't expose
-# a bare `make xmldoc` target — `install-xmldoc` is the single step
-# that both generates and installs the merged core-en_US.xml from
-# the just-compiled <documentation> blocks. Running it explicitly
-# (and only AFTER `make install` has prepared the install tree)
-# guarantees the merged core-en_US.xml reflects the actually-built
-# source rather than a stale tarball-shipped copy.
+# Build pipeline. This fork's Makefile does NOT expose a separate
+# `xmldoc` or `install-xmldoc` target — the XML doc generation is
+# folded into `make` (you'll see "Building Documentation For: ..." in
+# the build output) and the install step is folded into `make install`
+# (which does `install -m 644 doc/core-*.xml "/var/lib/asterisk/documentation"`).
+# So we don't need any extra invocation; the post-build sanity dump
+# below just verifies the install landed and the registration type's
+# config block is present.
 RUN set -eux; \
     ./bootstrap.sh; \
     ./configure \
@@ -66,13 +59,15 @@ RUN set -eux; \
         menuselect.makeopts; \
     make -j"$(nproc)"; \
     make install; \
-    make install-xmldoc; \
     make install-headers; \
     make samples; \
     echo "--- post-build xmldoc check ---"; \
-    ls -la /var/lib/asterisk/documentation/ /usr/share/asterisk/documentation/ 2>&1 || true; \
+    ls -la /var/lib/asterisk/documentation/ 2>&1 || true; \
     grep -c '<configObject' /var/lib/asterisk/documentation/core-en_US.xml 2>&1 || true; \
-    grep -l 'name="registration"' /var/lib/asterisk/documentation/core-en_US.xml 2>&1 || true
+    grep -c '<configInfo' /var/lib/asterisk/documentation/core-en_US.xml 2>&1 || true; \
+    echo "--- does the doc describe res_pjsip_outbound_registration? ---"; \
+    grep -c 'name="res_pjsip_outbound_registration"' /var/lib/asterisk/documentation/core-en_US.xml 2>&1 || true; \
+    grep -A2 '<configObject name="registration"' /var/lib/asterisk/documentation/core-en_US.xml | head -20 2>&1 || true
 
 # ---------------------------------------------------------- runtime -------
 FROM ${ASTERISK_RUNTIME_BASE}
