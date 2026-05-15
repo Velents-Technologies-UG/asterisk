@@ -119,6 +119,22 @@ _INPUT_TO_ROW_NULLABLE = {
 }
 
 
+def _valid_ip_literal(value):
+    """True iff value parses as an IPv4 or IPv6 address literal."""
+    if not isinstance(value, str):
+        return False
+    s = value.strip()
+    if not s:
+        return False
+    for family in (socket.AF_INET, socket.AF_INET6):
+        try:
+            socket.inet_pton(family, s)
+            return True
+        except (OSError, ValueError):
+            continue
+    return False
+
+
 def _validate_trunk_input(body):
     """Return the canonical stored shape, or raise _ValidationError."""
     for required in ("id", "displayName", "serverUri", "username"):
@@ -158,16 +174,35 @@ def _validate_trunk_input(body):
     if not isinstance(enabled, bool):
         raise _ValidationError("enabled must be a boolean")
 
+    # IP-trunk vs register-based selector. Default to register so old
+    # agent-hub builds that don't send the field keep their behavior.
+    register_enabled = body.get("registerEnabled", True)
+    if not isinstance(register_enabled, bool):
+        raise _ValidationError("registerEnabled must be a boolean")
+
+    carrier_ip = body.get("carrierIp")
+    if carrier_ip is not None and carrier_ip != "":
+        if not _valid_ip_literal(carrier_ip):
+            raise _ValidationError("carrierIp must be a valid IPv4 or IPv6 literal")
+        carrier_ip = str(carrier_ip).strip()
+    else:
+        carrier_ip = None
+
+    if not register_enabled and not carrier_ip:
+        raise _ValidationError("carrierIp is required when registerEnabled is false")
+
     row = {
-        "id":            trunk_id,
-        "display_name":  str(body["displayName"]),
-        "server_uri":    str(body["serverUri"]),
-        "username":      str(body["username"]),
-        "channel_limit": channel_limit,
-        "enabled":       enabled,
-        "outbound_auth": None,    # reserved
-        "identify_by":   None,    # reserved
-        "allow":         None,    # reserved
+        "id":               trunk_id,
+        "display_name":     str(body["displayName"]),
+        "server_uri":       str(body["serverUri"]),
+        "username":         str(body["username"]),
+        "channel_limit":    channel_limit,
+        "enabled":          enabled,
+        "register_enabled": register_enabled,
+        "carrier_ip":       carrier_ip,
+        "outbound_auth":    None,    # reserved
+        "identify_by":      None,    # reserved
+        "allow":            None,    # reserved
     }
     for in_key, out_key in _INPUT_TO_ROW_NULLABLE.items():
         v = body.get(in_key)
@@ -202,6 +237,10 @@ def _db_conn():
 
 def _auth_id_for(trunk_id):
     return f"{trunk_id}-auth"
+
+
+def _identify_id_for(trunk_id):
+    return f"{trunk_id}-identify"
 
 
 def _pick_transport(server_uri, explicit=None):
@@ -263,11 +302,18 @@ def _rewrite_uri_to_ip(uri):
 
 
 def _pjsip_upsert(row, password):
-    """Write the four ps_* rows so Asterisk picks the trunk up on reload."""
+    """Write the four ps_* rows so Asterisk picks the trunk up on reload.
+
+    Branches on row['register_enabled']:
+      - True  → REGISTER-based: ps_registrations row, identify_by by username.
+      - False → IP-based: no ps_registrations row, ps_identify maps
+                row['carrier_ip']/32 to the endpoint, identify_by adds 'ip'.
+    """
     if not _db_enabled():
         return
     has_auth = bool(password) and bool(row.get("username"))
     auth_id = _auth_id_for(row["id"]) if has_auth else None
+    identify_id = _identify_id_for(row["id"])
     server_uri = row["server_uri"]
     target_uri = _rewrite_uri_to_ip(server_uri)
     transport = _pick_transport(server_uri, row.get("transport"))
@@ -278,6 +324,13 @@ def _pjsip_upsert(row, password):
         f"sip:{row['username']}@{row.get('from_domain') or _server_uri_host(server_uri)}"
         if row.get("username") else None
     )
+    register_enabled = bool(row.get("register_enabled", True))
+    carrier_ip = row.get("carrier_ip")
+    # When the provider is configured for IP-based trunking, Asterisk
+    # must additionally match on source IP. The 'ip' identifier reads
+    # ps_identify rows and needs the res_pjsip_endpoint_identifier_ip
+    # module loaded (autoloaded by default in Asterisk 22).
+    identify_by = "ip,username,auth_username" if not register_enabled else "username,auth_username"
 
     try:
         with _db_conn() as conn, conn.cursor() as cur:
@@ -308,7 +361,7 @@ def _pjsip_upsert(row, password):
                          identify_by, disallow, outbound_auth,
                          rtp_symmetric, force_rport, direct_media)
                     VALUES (%s, %s, %s, %s, %s, %s, 'rfc4733',
-                            'username,auth_username', 'all', %s,
+                            %s, 'all', %s,
                             'yes', 'yes', 'no')
                     ON CONFLICT (id) DO UPDATE SET
                         transport     = EXCLUDED.transport,
@@ -316,41 +369,65 @@ def _pjsip_upsert(row, password):
                         aors          = EXCLUDED.aors,
                         auth          = EXCLUDED.auth,
                         allow         = EXCLUDED.allow,
+                        identify_by   = EXCLUDED.identify_by,
                         outbound_auth = EXCLUDED.outbound_auth,
                         rtp_symmetric = EXCLUDED.rtp_symmetric,
                         force_rport   = EXCLUDED.force_rport,
                         direct_media  = EXCLUDED.direct_media
-                """, (row["id"], transport, context, row["id"], auth_id, allow, auth_id))
+                """, (row["id"], transport, context, row["id"], auth_id, allow,
+                      identify_by, auth_id))
             else:
                 cur.execute("""
                     INSERT INTO ps_endpoints
                         (id, transport, context, aors, auth, allow, dtmf_mode,
                          identify_by, disallow, outbound_auth)
-                    VALUES (%s, %s, %s, %s, %s, %s, 'rfc4733', 'username,auth_username', 'all', %s)
+                    VALUES (%s, %s, %s, %s, %s, %s, 'rfc4733', %s, 'all', %s)
                     ON CONFLICT (id) DO UPDATE SET
                         transport     = EXCLUDED.transport,
                         context       = EXCLUDED.context,
                         aors          = EXCLUDED.aors,
                         auth          = EXCLUDED.auth,
                         allow         = EXCLUDED.allow,
+                        identify_by   = EXCLUDED.identify_by,
                         outbound_auth = EXCLUDED.outbound_auth
-                """, (row["id"], transport, context, row["id"], auth_id, allow, auth_id))
+                """, (row["id"], transport, context, row["id"], auth_id, allow,
+                      identify_by, auth_id))
 
-            if row.get("enabled", True) and has_auth and client_uri:
-                cur.execute("""
-                    INSERT INTO ps_registrations
-                        (id, transport, server_uri, client_uri, expiration,
-                         retry_interval, outbound_auth)
-                    VALUES (%s, %s, %s, %s, %s, 60, %s)
-                    ON CONFLICT (id) DO UPDATE SET
-                        transport      = EXCLUDED.transport,
-                        server_uri     = EXCLUDED.server_uri,
-                        client_uri     = EXCLUDED.client_uri,
-                        expiration     = EXCLUDED.expiration,
-                        outbound_auth  = EXCLUDED.outbound_auth
-                """, (row["id"], transport, target_uri, client_uri, expiration, auth_id))
+            if register_enabled:
+                # REGISTER mode: write a ps_registrations row, drop any
+                # stale ps_identify row left over from a previous mode.
+                if row.get("enabled", True) and has_auth and client_uri:
+                    cur.execute("""
+                        INSERT INTO ps_registrations
+                            (id, transport, server_uri, client_uri, expiration,
+                             retry_interval, outbound_auth)
+                        VALUES (%s, %s, %s, %s, %s, 60, %s)
+                        ON CONFLICT (id) DO UPDATE SET
+                            transport      = EXCLUDED.transport,
+                            server_uri     = EXCLUDED.server_uri,
+                            client_uri     = EXCLUDED.client_uri,
+                            expiration     = EXCLUDED.expiration,
+                            outbound_auth  = EXCLUDED.outbound_auth
+                    """, (row["id"], transport, target_uri, client_uri,
+                          expiration, auth_id))
+                else:
+                    cur.execute("DELETE FROM ps_registrations WHERE id = %s",
+                                (row["id"],))
+                cur.execute("DELETE FROM ps_identify WHERE id = %s",
+                            (identify_id,))
             else:
-                cur.execute("DELETE FROM ps_registrations WHERE id = %s", (row["id"],))
+                # IP-trunk mode: no REGISTER. ps_identify maps the
+                # carrier's source IP to this endpoint so Asterisk
+                # accepts inbound INVITEs from it without auth.
+                cur.execute("DELETE FROM ps_registrations WHERE id = %s",
+                            (row["id"],))
+                cur.execute("""
+                    INSERT INTO ps_identify (id, endpoint, "match")
+                    VALUES (%s, %s, %s)
+                    ON CONFLICT (id) DO UPDATE SET
+                        endpoint = EXCLUDED.endpoint,
+                        "match"  = EXCLUDED."match"
+                """, (identify_id, row["id"], f"{carrier_ip}/32"))
     except psycopg2.Error as exc:
         raise _DbError(f"pjsip realtime write failed: {exc}") from exc
 
@@ -361,9 +438,10 @@ def _pjsip_delete(trunk_id):
     try:
         with _db_conn() as conn, conn.cursor() as cur:
             cur.execute("DELETE FROM ps_registrations WHERE id = %s", (trunk_id,))
-            cur.execute("DELETE FROM ps_endpoints    WHERE id = %s", (trunk_id,))
-            cur.execute("DELETE FROM ps_auths        WHERE id = %s", (_auth_id_for(trunk_id),))
-            cur.execute("DELETE FROM ps_aors         WHERE id = %s", (trunk_id,))
+            cur.execute("DELETE FROM ps_identify      WHERE id = %s", (_identify_id_for(trunk_id),))
+            cur.execute("DELETE FROM ps_endpoints     WHERE id = %s", (trunk_id,))
+            cur.execute("DELETE FROM ps_auths         WHERE id = %s", (_auth_id_for(trunk_id),))
+            cur.execute("DELETE FROM ps_aors          WHERE id = %s", (trunk_id,))
     except psycopg2.Error as exc:
         raise _DbError(f"pjsip realtime delete failed: {exc}") from exc
 
