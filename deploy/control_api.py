@@ -24,6 +24,7 @@ import sys
 import threading
 import time
 import logging
+import urllib.parse
 from datetime import datetime, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -63,6 +64,7 @@ except ImportError as _exc:
 PORT = int(os.environ.get("CONTROL_API_PORT", "8092"))
 SECRET = os.environ.get("CONTROL_API_SECRET", "").strip()
 DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
+DATABASE_SSLMODE = os.environ.get("DATABASE_SSLMODE", "disable").strip()
 REDIS_URL = os.environ.get("REDIS_URL", "").strip()
 ASTERISK_BIN = os.environ.get("ASTERISK_BIN", "asterisk")
 DEFAULT_TRANSPORT = os.environ.get("PJSIP_TRANSPORT_NAME", "transport-udp")
@@ -70,6 +72,7 @@ DEFAULT_INBOUND_CONTEXT = os.environ.get("TRUNK_INBOUND_CONTEXT", "from-trunk")
 DEFAULT_CODEC_ALLOW = os.environ.get("TRUNK_DEFAULT_ALLOW", "ulaw,alaw")
 STATUS_FEEDER_INTERVAL = int(os.environ.get("STATUS_FEEDER_INTERVAL", "5"))
 STATUS_FEEDER_KEY = os.environ.get("STATUS_FEEDER_KEY", "cx:trunks:status")
+STATUS_FEEDER_AGENTS_KEY = os.environ.get("STATUS_FEEDER_AGENTS_KEY", "cx:agents:sip-status")
 MAX_BODY_BYTES = 64 * 1024  # 64 KiB — way more than a trunk row needs.
 
 # Behind-NAT mode is implied by ASTERISK_EXTERNAL_IP being set: when
@@ -242,7 +245,25 @@ def _db_enabled():
 
 
 def _db_conn():
-    return psycopg2.connect(DATABASE_URL)
+    """Open a psycopg2 connection from DATABASE_URL.
+
+    We parse the URL with urllib and URL-decode the password before
+    handing it to psycopg2. This matches what render-odbc does for
+    /etc/odbc.ini so the realtime ODBC connection and the sidecar's
+    direct psycopg2 connection authenticate with identical credentials.
+    libpq alone passes the password through verbatim; without an
+    explicit unquote() here, accounts whose stored Postgres passwords
+    were URL-encoded at provision time fail authentication.
+    """
+    u = urllib.parse.urlparse(DATABASE_URL)
+    return psycopg2.connect(
+        host=u.hostname,
+        port=u.port,
+        dbname=(u.path or "").lstrip("/") or None,
+        user=urllib.parse.unquote(u.username) if u.username else None,
+        password=urllib.parse.unquote(u.password) if u.password else None,
+        sslmode=DATABASE_SSLMODE,
+    )
 
 
 def _auth_id_for(trunk_id):
@@ -311,6 +332,20 @@ def _rewrite_uri_to_ip(uri):
     return out
 
 
+def _build_client_uri(username, from_domain, server_uri):
+    """Build the ps_registrations client_uri.
+
+    Always returns 'sip:<username>@<domain>' when a username is known,
+    even if the caller-supplied client_uri lacks one. The legacy trunk
+    form sent the bare server URI as client_uri, which makes the
+    carrier reject our REGISTER because the From-header has no user.
+    """
+    if username:
+        domain = from_domain or _server_uri_host(server_uri)
+        return f"sip:{username}@{domain}"
+    return None
+
+
 def _pjsip_upsert(row, password):
     """Write the four ps_* rows so Asterisk picks the trunk up on reload.
 
@@ -330,10 +365,9 @@ def _pjsip_upsert(row, password):
     context = row.get("context") or DEFAULT_INBOUND_CONTEXT
     allow = row.get("allow") or DEFAULT_CODEC_ALLOW
     expiration = row.get("expiration") or 3600
-    client_uri = row.get("client_uri") or (
-        f"sip:{row['username']}@{row.get('from_domain') or _server_uri_host(server_uri)}"
-        if row.get("username") else None
-    )
+    client_uri = _build_client_uri(
+        row.get("username"), row.get("from_domain"), server_uri,
+    ) or row.get("client_uri") or None
     register_enabled = bool(row.get("register_enabled", True))
     carrier_ip = row.get("carrier_ip")
     # When the provider is configured for IP-based trunking, Asterisk
@@ -471,26 +505,34 @@ def _server_uri_host(server_uri):
 # `pjsip show endpoints` every STATUS_FEEDER_INTERVAL seconds, derive
 # online/offline/unknown per endpoint id, and HSET the result.
 #
+# For IP-trunk endpoints (identify-based, no REGISTER) the qualify
+# contact-Avail/Unavail state is the wrong signal — many carriers do
+# not respond to OPTIONS even though they happily accept INVITEs from
+# the whitelisted source IP, so an ip-trunk would appear permanently
+# 'offline' or 'unknown' despite being fully operational. We therefore
+# also poll `pjsip show identifies`, build a set of endpoint ids that
+# have a ps_identify row, and mark those endpoints 'online' as long as
+# Asterisk has actually loaded them. Result: an ip-trunk turns green
+# the moment its row is persisted and module-reloaded — which matches
+# user intent ("if I saved it, it should be live").
+#
+# We additionally poll `pjsip show aors` and write per-AOR registration
+# state to STATUS_FEEDER_AGENTS_KEY (default `cx:agents:sip-status`).
+# Each human agent's softphone registers a Contact under an AOR whose
+# id is the agent's sip username; the supervisor's "Live" view reads
+# this hash to render a per-agent connected/disconnected dot.
+#
 # Parsing CLI output is fragile but avoids adding an ARI HTTP client
 # (which would also need credentials). The format is stable across
 # Asterisk 18/20/22 — if it ever changes we'll see endpoints stuck on
 # 'unknown' which is the same as the current broken state.
 
 def _parse_pjsip_endpoints(output):
-    """Yield (endpoint_id, state) tuples from `pjsip show endpoints` output.
-
-    Lines we care about look like (variable whitespace):
-       Endpoint:  inno-calls                                Unavailable   0 of inf
-       Endpoint:  innocalls                                 Not in use    0 of inf
-       Endpoint:  some-id                                   In use        1 of inf
-    The first column is the id; the second whitespace-separated chunk
-    is the human-readable state.
-    """
+    """Yield (endpoint_id, state) tuples from `pjsip show endpoints` output."""
     for line in output.splitlines():
         s = line.strip()
         if not s.startswith("Endpoint:"):
             continue
-        # Skip the placeholder/header row.
         if "<Endpoint" in s:
             continue
         rest = s[len("Endpoint:"):].strip()
@@ -501,6 +543,61 @@ def _parse_pjsip_endpoints(output):
         state = parts[1].strip()
         if ep_id:
             yield ep_id, state
+
+
+def _parse_pjsip_identifies(output):
+    """Yield endpoint_ids that have an identify mapping."""
+    for line in output.splitlines():
+        s = line.strip()
+        if not s.startswith("Identify:"):
+            continue
+        if "<Identify" in s:
+            continue
+        rest = s[len("Identify:"):].strip()
+        if "/" not in rest:
+            continue
+        endpoint_part = rest.rsplit("/", 1)[1].strip()
+        endpoint_id = re.split(r"\s+", endpoint_part, maxsplit=1)[0].strip()
+        if endpoint_id:
+            yield endpoint_id
+
+
+def _parse_pjsip_aors(output):
+    """Yield (aor_id, status) tuples from `pjsip show aors` output."""
+    aors = {}
+    current = None
+    for line in output.splitlines():
+        s = line.strip()
+        if s.startswith("Aor:"):
+            rest = s[len("Aor:"):].strip()
+            if "<Aor" in rest:
+                current = None
+                continue
+            parts = re.split(r"\s+", rest, maxsplit=1)
+            if parts and parts[0]:
+                current = parts[0].strip()
+                aors.setdefault(current, [])
+        elif s.startswith("Contact:") and current:
+            rest = s[len("Contact:"):].strip()
+            if "<Aor/Contact" in rest or "<Contact" in rest:
+                continue
+            parts = re.split(r"\s{2,}", rest)
+            if len(parts) >= 3:
+                aors[current].append(parts[2].strip())
+
+    for aor_id, states in aors.items():
+        if not states:
+            yield aor_id, "offline"
+            continue
+        good = False
+        for state in states:
+            sl = state.lower()
+            if "unavail" in sl or "removed" in sl:
+                continue
+            if "avail" in sl or "nonqual" in sl or "created" in sl:
+                good = True
+                break
+        yield aor_id, "online" if good else "offline"
 
 
 def _state_to_status(state):
@@ -530,22 +627,50 @@ def _status_feeder_loop(stop_event):
     except Exception as exc:
         log.error("status feeder: cannot connect to %s: %s", REDIS_URL, exc)
         return
-    log.info("status feeder started: interval=%ds key=%s",
-             STATUS_FEEDER_INTERVAL, STATUS_FEEDER_KEY)
+    log.info(
+        "status feeder started: interval=%ds trunks_key=%s agents_key=%s",
+        STATUS_FEEDER_INTERVAL, STATUS_FEEDER_KEY, STATUS_FEEDER_AGENTS_KEY,
+    )
     while not stop_event.is_set():
         try:
             if shutil.which(ASTERISK_BIN) is None:
                 stop_event.wait(STATUS_FEEDER_INTERVAL)
                 continue
-            proc = subprocess.run(
+            ep_proc = subprocess.run(
                 [ASTERISK_BIN, "-rx", "pjsip show endpoints"],
                 capture_output=True, text=True, timeout=5, check=False,
             )
-            if proc.returncode == 0:
-                updates = {ep_id: _state_to_status(state)
-                           for ep_id, state in _parse_pjsip_endpoints(proc.stdout)}
-                if updates:
-                    client.hset(STATUS_FEEDER_KEY, mapping=updates)
+            id_proc = subprocess.run(
+                [ASTERISK_BIN, "-rx", "pjsip show identifies"],
+                capture_output=True, text=True, timeout=5, check=False,
+            )
+            aor_proc = subprocess.run(
+                [ASTERISK_BIN, "-rx", "pjsip show aors"],
+                capture_output=True, text=True, timeout=5, check=False,
+            )
+            ip_trunk_endpoints = (
+                set(_parse_pjsip_identifies(id_proc.stdout))
+                if id_proc.returncode == 0 else set()
+            )
+            trunk_endpoints = set(ip_trunk_endpoints)
+            if ep_proc.returncode == 0:
+                trunk_updates = {}
+                for ep_id, state in _parse_pjsip_endpoints(ep_proc.stdout):
+                    if ep_id in ip_trunk_endpoints:
+                        trunk_updates[ep_id] = "online"
+                    else:
+                        trunk_updates[ep_id] = _state_to_status(state)
+                if trunk_updates:
+                    client.hset(STATUS_FEEDER_KEY, mapping=trunk_updates)
+
+            if aor_proc.returncode == 0:
+                agent_updates = {}
+                for aor_id, status in _parse_pjsip_aors(aor_proc.stdout):
+                    if aor_id in trunk_endpoints:
+                        continue
+                    agent_updates[aor_id] = status
+                if agent_updates:
+                    client.hset(STATUS_FEEDER_AGENTS_KEY, mapping=agent_updates)
         except Exception as exc:
             log.warning("status feeder iteration failed: %s", exc)
         stop_event.wait(STATUS_FEEDER_INTERVAL)
@@ -554,14 +679,12 @@ def _status_feeder_loop(stop_event):
 # ── route table ────────────────────────────────────
 
 _ROUTES = [
-    # Legacy flat trunks (kept for back-compat; in-memory store).
     ("GET",    re.compile(r"^/control/sip/trunks/?$"),       "list_trunks"),
     ("POST",   re.compile(r"^/control/sip/trunks/?$"),       "create_trunk"),
     ("GET",    re.compile(r"^/control/sip/trunks/([^/]+)$"), "show_trunk"),
     ("POST",   re.compile(r"^/control/sip/trunks/([^/]+)$"), "upsert_trunk_by_id"),
     ("PUT",    re.compile(r"^/control/sip/trunks/([^/]+)$"), "upsert_trunk_by_id"),
     ("DELETE", re.compile(r"^/control/sip/trunks/([^/]+)$"), "delete_trunk"),
-    # New Provider+TrunkAccount routes (Postgres-backed).
     ("GET",    re.compile(r"^/control/sip/providers/?$"),       "list_providers"),
     ("POST",   re.compile(r"^/control/sip/providers/?$"),       "create_provider"),
     ("GET",    re.compile(r"^/control/sip/providers/([^/]+)$"), "show_provider"),
@@ -574,7 +697,6 @@ _ROUTES = [
     ("POST",   re.compile(r"^/control/sip/trunk-accounts/([^/]+)$"), "upsert_account_by_id"),
     ("PUT",    re.compile(r"^/control/sip/trunk-accounts/([^/]+)$"), "upsert_account_by_id"),
     ("DELETE", re.compile(r"^/control/sip/trunk-accounts/([^/]+)$"), "delete_account"),
-    # Misc.
     ("POST",   re.compile(r"^/control/sip/originate/?$"),    "originate_call"),
     ("POST",   re.compile(r"^/control/asterisk/reload/?$"),  "reload_asterisk"),
 ]
@@ -679,7 +801,6 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def _require_store(self):
-        """Guard for routes that depend on Postgres + sip_store."""
         if not HAS_SIP_STORE:
             self._send_json(HTTPStatus.SERVICE_UNAVAILABLE,
                             {"error": f"sip_store unavailable: {_sip_store_import_error}"})
@@ -691,7 +812,6 @@ class Handler(BaseHTTPRequestHandler):
         return True
 
     def _store_error(self, exc):
-        """Map sip_store.StoreError into an HTTP response."""
         status = HTTPStatus.UNPROCESSABLE_ENTITY
         msg = str(exc)
         if isinstance(exc, sip_store._NotFound):
@@ -885,12 +1005,6 @@ class Handler(BaseHTTPRequestHandler):
         self._send_204()
 
     # ── /control/sip/originate ──────────────────────────
-    #
-    # Trigger an outbound call through the named trunk. agent-hub's
-    # trunk page (or a future click-to-dial widget) POSTs here so it
-    # doesn't need ARI credentials of its own. Implementation shells
-    # to `asterisk -rx originate ...` — fire-and-forget; for
-    # call-id / live state we'd need to swap to ARI HTTP later.
 
     def originate_call(self):
         body = self._read_json_body()
@@ -898,17 +1012,28 @@ class Handler(BaseHTTPRequestHandler):
             return
         destination = str(body.get("destination") or "").strip()
         trunk_id = str(body.get("trunkId") or "").strip()
+        target_endpoint = str(body.get("targetEndpoint") or "").strip()
         extension = str(body.get("extension") or "s").strip()
         context = str(body.get("context") or DEFAULT_INBOUND_CONTEXT).strip()
+        from_agent = str(body.get("fromAgent") or "").strip()
 
-        if not _DEST_RE.match(destination):
-            self._send_json(HTTPStatus.UNPROCESSABLE_ENTITY,
-                            {"error": "destination must be 1-64 chars: digits, + * #"})
-            return
-        if not _SAFE_ID.match(trunk_id):
-            self._send_json(HTTPStatus.UNPROCESSABLE_ENTITY,
-                            {"error": "trunkId must be 1-60 chars, alphanumerics + _ -"})
-            return
+        if target_endpoint:
+            if not _SAFE_ID.match(target_endpoint):
+                self._send_json(HTTPStatus.UNPROCESSABLE_ENTITY,
+                                {"error": "targetEndpoint must be 1-60 chars, alphanumerics + _ -"})
+                return
+            channel = f"PJSIP/{target_endpoint}"
+        else:
+            if not _DEST_RE.match(destination):
+                self._send_json(HTTPStatus.UNPROCESSABLE_ENTITY,
+                                {"error": "destination must be 1-64 chars: digits, + * #"})
+                return
+            if not _SAFE_ID.match(trunk_id):
+                self._send_json(HTTPStatus.UNPROCESSABLE_ENTITY,
+                                {"error": "trunkId must be 1-60 chars, alphanumerics + _ -"})
+                return
+            channel = f"PJSIP/{destination}@{trunk_id}"
+
         if not _EXT_RE.match(extension):
             self._send_json(HTTPStatus.UNPROCESSABLE_ENTITY,
                             {"error": "extension format invalid"})
@@ -916,6 +1041,10 @@ class Handler(BaseHTTPRequestHandler):
         if not _SAFE_ID.match(context):
             self._send_json(HTTPStatus.UNPROCESSABLE_ENTITY,
                             {"error": "context format invalid"})
+            return
+        if from_agent and not _SAFE_ID.match(from_agent):
+            self._send_json(HTTPStatus.UNPROCESSABLE_ENTITY,
+                            {"error": "fromAgent format invalid"})
             return
 
         if shutil.which(ASTERISK_BIN) is None:
@@ -925,7 +1054,6 @@ class Handler(BaseHTTPRequestHandler):
             })
             return
 
-        channel = f"PJSIP/{destination}@{trunk_id}"
         cli = f"originate {channel} extension {extension}@{context}"
 
         try:
@@ -945,14 +1073,17 @@ class Handler(BaseHTTPRequestHandler):
         ok = proc.returncode == 0
         out = (proc.stdout or "").strip()
         err = (proc.stderr or "").strip()
-        log.info("originate %s rc=%d stdout=%r stderr=%r",
-                 channel, proc.returncode, out[:200], err[:200])
+        log.info(
+            "originate %s rc=%d fromAgent=%r stdout=%r stderr=%r",
+            channel, proc.returncode, from_agent or "-", out[:200], err[:200],
+        )
         self._send_json(
             HTTPStatus.OK if ok else HTTPStatus.BAD_GATEWAY,
             {
                 "queued": ok,
                 "channel": channel,
                 "extension": f"{extension}@{context}",
+                "fromAgent": from_agent or None,
                 "rc": proc.returncode,
                 "stdout": out,
                 "stderr": err,
@@ -1025,9 +1156,6 @@ def main():
     signal.signal(signal.SIGTERM, _graceful)
     signal.signal(signal.SIGINT, _graceful)
 
-    # Provision sip_providers + sip_trunk_accounts tables and seed the
-    # default provider if HAS_SIP_STORE and a DB is configured. Failures
-    # are logged but non-fatal — affected routes will return 503 later.
     if HAS_SIP_STORE and _db_enabled():
         sip_store.bootstrap(_db_conn)
     elif HAS_SIP_STORE and not _db_enabled():
@@ -1035,9 +1163,6 @@ def main():
     elif not HAS_SIP_STORE:
         log.warning("sip_store import failed: %s", _sip_store_import_error)
 
-    # Start the Redis status feeder in a daemon thread so the agent-hub
-    # trunk page's badge reflects PJSIP endpoint reality. Daemon=True
-    # means a python exit doesn't block on its termination.
     feeder_thread = threading.Thread(
         target=_status_feeder_loop, args=(stop_event,),
         name="status-feeder", daemon=True,
@@ -1051,13 +1176,14 @@ def main():
         )
     db_mode = "postgres" if _db_enabled() else "memory-only"
     log.info(
-        "listening on 0.0.0.0:%d (secret=%s store=%s nat=%s redis=%s sip_store=%s)",
+        "listening on 0.0.0.0:%d (secret=%s store=%s nat=%s redis=%s sip_store=%s sslmode=%s)",
         PORT,
         "set" if SECRET else "MISSING",
         db_mode,
         "yes" if BEHIND_NAT else "no",
         "yes" if (REDIS_URL and HAS_REDIS) else "no",
         "yes" if HAS_SIP_STORE else "no",
+        DATABASE_SSLMODE,
     )
     try:
         server.serve_forever()

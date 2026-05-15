@@ -10,18 +10,24 @@
 #    external IP) without committing real values to git.
 # 4. Ensure runtime dirs exist + are writable (PVC mounts may replace
 #    them empty).
-# 5. Bring up the call-engine control-api sidecar on :8092 BEFORE
+# 5. Generate a self-signed TLS keypair at /etc/asterisk/keys/asterisk.pem
+#    if one isn't already present. The TLS transport (port 5062) needs
+#    a cert at boot; without it pjsip refuses to bind the transport.
+#    A real CA cert (Let's Encrypt etc.) shipped via secret will mask
+#    this file at mount time, so this is a fallback for dev / first-
+#    boot only.
+# 6. Bring up the call-engine control-api sidecar on :8092 BEFORE
 #    asterisk. We pre-flight (python3 + script present), launch it
 #    under a supervisor that restarts on crash, then poll /healthz
 #    until it answers. If the sidecar can't bind we fail the whole
 #    container so k8s shows a clear startup error instead of letting
 #    asterisk run on its own and serving Connection refused on 8092.
-# 6. Mirror the entire /var/lib/asterisk/documentation/ directory into
+# 7. Mirror the entire /var/lib/asterisk/documentation/ directory into
 #    /usr/share/asterisk/documentation/ so res_pjsip and other modules
 #    find core-en_US.xml plus its sibling _common.xml / DTD when they
 #    register option XSDs at startup. Per-file ln -sf so we don't
 #    depend on directory-target symlinks.
-# 7. exec Asterisk in foreground, dropping to the `asterisk` user when
+# 8. exec Asterisk in foreground, dropping to the `asterisk` user when
 #    started as root (the standard non-K8s path). When already running
 #    as non-root (e.g. K8s securityContext.runAsUser=1000), skip the
 #    -U/-G drop because Asterisk rejects those flags off-root.
@@ -32,6 +38,8 @@ CONTROL_API_PORT="${CONTROL_API_PORT:-8092}"
 CONTROL_API_BIN=/usr/local/bin/control-api
 CONTROL_API_READY_TIMEOUT="${CONTROL_API_READY_TIMEOUT:-10}"
 RENDER_ODBC_BIN=/usr/local/bin/render-odbc
+TLS_CERT_PATH="${ASTERISK_TLS_CERT_PATH:-/etc/asterisk/keys/asterisk.pem}"
+TLS_CERT_CN="${ASTERISK_TLS_CERT_CN:-asterisk.velents.ai}"
 
 log() { echo "entrypoint: $*"; }
 
@@ -105,7 +113,37 @@ do
   chown asterisk:asterisk "$d" 2>/dev/null || true
 done
 
-# 5. Control API sidecar.
+# 5. TLS cert (self-signed fallback).
+#
+# pjsip's TLS transport requires a cert file at boot; if it's missing
+# Asterisk refuses to bind the transport and trunks on port 5061
+# silently fall back to UDP (or fail outright). DevOps will normally
+# mount a real cert into /etc/asterisk/keys/asterisk.pem via a
+# Kubernetes Secret + volumeMount, which masks any file generated
+# here. For dev/first-boot when no such secret exists, generate a
+# 10-year self-signed cert so the transport at least binds and the
+# pod can come up. Subject CN is configurable via env so DevOps can
+# point it at the real hostname if needed.
+if [ ! -s "$TLS_CERT_PATH" ]; then
+  if command -v openssl >/dev/null 2>&1; then
+    log "generating self-signed TLS cert at $TLS_CERT_PATH (CN=$TLS_CERT_CN)"
+    openssl req -x509 -newkey rsa:2048 \
+      -keyout "$TLS_CERT_PATH" \
+      -out "$TLS_CERT_PATH" \
+      -days 3650 -nodes \
+      -subj "/CN=$TLS_CERT_CN" 2>&1 \
+      | sed 's/^/[openssl] /' \
+      || log "WARNING: openssl returned non-zero; TLS transport may fail to bind"
+    chown asterisk:asterisk "$TLS_CERT_PATH" 2>/dev/null || true
+    chmod 600 "$TLS_CERT_PATH" 2>/dev/null || true
+  else
+    log "WARNING: openssl missing and $TLS_CERT_PATH absent; TLS transport will fail to bind"
+  fi
+else
+  log "TLS cert present at $TLS_CERT_PATH (size $(wc -c < "$TLS_CERT_PATH") bytes)"
+fi
+
+# 6. Control API sidecar.
 #
 # Pre-flight checks fail the container with a clear message rather
 # than silently starting asterisk only — DevOps's prior debug session
@@ -166,7 +204,7 @@ if [ "$ready" -ne 1 ]; then
 fi
 log "control-api ready on :$CONTROL_API_PORT"
 
-# 6. XML doc mirror.
+# 7. XML doc mirror.
 #
 # Asterisk's xmldoc loader parses core-en_US.xml against appdocsxml.dtd
 # and pulls sibling files (_common.xml, *.xsd, and any per-module XML)
@@ -189,7 +227,7 @@ for f in /var/lib/asterisk/documentation/*.xml \
 done
 log "stitched $doc_count XML doc files into /usr/share/asterisk/documentation/"
 
-# 7. Run asterisk in the foreground.
+# 8. Run asterisk in the foreground.
 if [ "$(id -u)" = 0 ]; then
   exec /usr/sbin/asterisk -f -U asterisk -G asterisk -vvv "$@"
 else
