@@ -16,7 +16,9 @@
 #    until it answers. If the sidecar can't bind we fail the whole
 #    container so k8s shows a clear startup error instead of letting
 #    asterisk run on its own and serving Connection refused on 8092.
-# 6. exec Asterisk in foreground, dropping to the `asterisk` user when
+# 6. Stitch any missing XML doc symlinks so res_pjsip's startup XSD
+#    parser finds core-en_US.xml at the path it expects.
+# 7. exec Asterisk in foreground, dropping to the `asterisk` user when
 #    started as root (the standard non-K8s path). When already running
 #    as non-root (e.g. K8s securityContext.runAsUser=1000), skip the
 #    -U/-G drop because Asterisk rejects those flags off-root.
@@ -161,7 +163,20 @@ if [ "$ready" -ne 1 ]; then
 fi
 log "control-api ready on :$CONTROL_API_PORT"
 
-# 6. Run asterisk in the foreground.
+# 6. XML doc symlink. Asterisk modules register their option XSDs at
+# startup and look up the core documentation at
+# /usr/share/asterisk/documentation/core-en_US.xml; when the build
+# layout puts the file under /var/lib/asterisk/documentation instead
+# (which `make install` does on a sysconfdir=/etc localstatedir=/var
+# build), res_pjsip's option parser logs WARNINGs and silently drops
+# some realtime fields. Stitching the symlink at startup keeps that
+# from polluting the log without invasive Dockerfile-time changes.
+# Idempotent and tolerant of either source or target being absent.
+mkdir -p /usr/share/asterisk/documentation
+ln -sf /var/lib/asterisk/documentation/core-en_US.xml \
+    /usr/share/asterisk/documentation/core-en_US.xml 2>/dev/null || true
+
+# 7. Run asterisk in the foreground.
 if [ "$(id -u)" = 0 ]; then
   exec /usr/sbin/asterisk -f -U asterisk -G asterisk -vvv "$@"
 else

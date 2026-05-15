@@ -80,9 +80,9 @@ COPY --from=builder /etc/asterisk               /etc/asterisk
 RUN ldconfig
 
 # Config overlays. res_odbc.conf is intentionally NOT copied here —
-# deploy/render_odbc.py writes it at container start with the DSN
-# pointing at the unixODBC-resolved [asterisk-pgsql] entry (no inline
-# username/password, which avoids the `%` mangling we hit in debug).
+# deploy/render_odbc.py writes it at container start with URL-decoded
+# username/password inline (the `%`-mangling concern is neutralised
+# by Python's unquote() before the value hits the file).
 COPY configs/samples/extensions_ai_runtime.conf.sample        /etc/asterisk/extensions_ai_runtime.conf
 COPY configs/samples/ari_call_engine.conf.sample              /etc/asterisk/ari.conf
 COPY configs/samples/http_wss.conf.sample                     /etc/asterisk/http.conf
@@ -94,15 +94,18 @@ COPY configs/samples/extconfig_realtime_agents.conf.sample    /etc/asterisk/extc
 
 # Suppress noisy module that fails to initialize on systems without
 # libvorbisfile / Ogg-Vorbis support (we don't use Ogg recordings).
-# Appending a [modules] block re-opens that section; Asterisk
-# tolerates multiple section headers in the same conf file.
+# Insert the noload line INTO the existing [modules] section right
+# after `autoload=yes`, rather than appending a second [modules]
+# block at the end of the file. Asterisk technically tolerates
+# multiple section headers, but a single canonical [modules] block
+# is what DevOps and tooling expect to see in modules.conf.
 RUN set -eux; \
     printf '[general]\nstatic=yes\nwriteprotect=no\n\n#include "extensions_ai_runtime.conf"\n' \
       > /etc/asterisk/extensions.conf; \
     printf '#include "pjsip_transport_tls.conf"\n#include "pjsip_wss_agents.conf"\n#include "pjsip_trunks.conf"\n' \
       > /etc/asterisk/pjsip.conf; \
-    printf '\n[modules]\nnoload => format_ogg_vorbis.so\n' \
-      >> /etc/asterisk/modules.conf; \
+    sed -i '/^autoload[[:space:]]*=[[:space:]]*yes/a noload => format_ogg_vorbis.so' \
+      /etc/asterisk/modules.conf; \
     chown -R asterisk:asterisk /etc/asterisk /var/spool/asterisk \
                                 /var/lib/asterisk /var/log/asterisk /var/run/asterisk
 
