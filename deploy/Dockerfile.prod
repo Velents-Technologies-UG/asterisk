@@ -93,12 +93,13 @@ COPY configs/samples/sorcery_realtime_agents.conf.sample      /etc/asterisk/sorc
 COPY configs/samples/extconfig_realtime_agents.conf.sample    /etc/asterisk/extconfig.conf
 
 # Suppress noisy module that fails to initialize on systems without
-# libvorbisfile / Ogg-Vorbis support (we don't use Ogg recordings).
-# Insert the noload line INTO the existing [modules] section right
-# after `autoload=yes`, rather than appending a second [modules]
-# block at the end of the file. Asterisk technically tolerates
-# multiple section headers, but a single canonical [modules] block
-# is what DevOps and tooling expect to see in modules.conf.
+# libvorbisfile / Ogg-Vorbis support, then mirror Asterisk's XML
+# documentation from /var/lib/asterisk/documentation/ (where `make
+# install` drops it on a --localstatedir=/var build) into
+# /usr/share/asterisk/documentation/ where modules look for it at
+# startup. Mirroring every relevant file (xml/xsd/dtd) rather than
+# just core-en_US.xml is necessary because xmldoc loader resolves
+# the DTD reference from the SAME directory as core-en_US.xml.
 RUN set -eux; \
     printf '[general]\nstatic=yes\nwriteprotect=no\n\n#include "extensions_ai_runtime.conf"\n' \
       > /etc/asterisk/extensions.conf; \
@@ -106,6 +107,14 @@ RUN set -eux; \
       > /etc/asterisk/pjsip.conf; \
     sed -i '/^autoload[[:space:]]*=[[:space:]]*yes/a noload => format_ogg_vorbis.so' \
       /etc/asterisk/modules.conf; \
+    mkdir -p /usr/share/asterisk/documentation; \
+    for f in /var/lib/asterisk/documentation/*.xml \
+             /var/lib/asterisk/documentation/*.xsd \
+             /var/lib/asterisk/documentation/*.dtd; do \
+      [ -e "$f" ] || continue; \
+      ln -sf "$f" "/usr/share/asterisk/documentation/$(basename "$f")"; \
+    done; \
+    ls -la /usr/share/asterisk/documentation/; \
     chown -R asterisk:asterisk /etc/asterisk /var/spool/asterisk \
                                 /var/lib/asterisk /var/log/asterisk /var/run/asterisk
 
