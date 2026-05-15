@@ -16,8 +16,11 @@
 #    until it answers. If the sidecar can't bind we fail the whole
 #    container so k8s shows a clear startup error instead of letting
 #    asterisk run on its own and serving Connection refused on 8092.
-# 6. Stitch any missing XML doc symlinks so res_pjsip's startup XSD
-#    parser finds core-en_US.xml at the path it expects.
+# 6. Mirror the entire /var/lib/asterisk/documentation/ directory into
+#    /usr/share/asterisk/documentation/ so res_pjsip and other modules
+#    find core-en_US.xml plus its sibling _common.xml / DTD when they
+#    register option XSDs at startup. Per-file ln -sf so we don't
+#    depend on directory-target symlinks.
 # 7. exec Asterisk in foreground, dropping to the `asterisk` user when
 #    started as root (the standard non-K8s path). When already running
 #    as non-root (e.g. K8s securityContext.runAsUser=1000), skip the
@@ -163,18 +166,28 @@ if [ "$ready" -ne 1 ]; then
 fi
 log "control-api ready on :$CONTROL_API_PORT"
 
-# 6. XML doc symlink. Asterisk modules register their option XSDs at
-# startup and look up the core documentation at
-# /usr/share/asterisk/documentation/core-en_US.xml; when the build
-# layout puts the file under /var/lib/asterisk/documentation instead
-# (which `make install` does on a sysconfdir=/etc localstatedir=/var
-# build), res_pjsip's option parser logs WARNINGs and silently drops
-# some realtime fields. Stitching the symlink at startup keeps that
-# from polluting the log without invasive Dockerfile-time changes.
-# Idempotent and tolerant of either source or target being absent.
+# 6. XML doc mirror.
+#
+# Asterisk's xmldoc loader parses core-en_US.xml against appdocsxml.dtd
+# and pulls sibling files (_common.xml, *.xsd, and any per-module XML)
+# from the SAME directory. With our build flags (sysconfdir=/etc
+# localstatedir=/var --prefix=/usr) `make install` drops the files
+# under /var/lib/asterisk/documentation/, but res_pjsip et al. read
+# from /usr/share/asterisk/documentation/. Symlinking only
+# core-en_US.xml (the previous fix) wasn't enough because the DTD ref
+# failed to resolve, which made res_pjsip_outbound_registration abort
+# at sorcery type registration init. Mirror every relevant file.
 mkdir -p /usr/share/asterisk/documentation
-ln -sf /var/lib/asterisk/documentation/core-en_US.xml \
-    /usr/share/asterisk/documentation/core-en_US.xml 2>/dev/null || true
+doc_count=0
+for f in /var/lib/asterisk/documentation/*.xml \
+         /var/lib/asterisk/documentation/*.xsd \
+         /var/lib/asterisk/documentation/*.dtd; do
+  [ -e "$f" ] || continue
+  if ln -sf "$f" "/usr/share/asterisk/documentation/$(basename "$f")" 2>/dev/null; then
+    doc_count=$((doc_count + 1))
+  fi
+done
+log "stitched $doc_count XML doc files into /usr/share/asterisk/documentation/"
 
 # 7. Run asterisk in the foreground.
 if [ "$(id -u)" = 0 ]; then
