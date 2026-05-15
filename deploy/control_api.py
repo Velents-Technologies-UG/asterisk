@@ -7,11 +7,11 @@
 # agent-hub's `lib/cx/trunks.ts::upsertTrunk` already sends (camelCase
 # input, snake_case TrunkRow output, `items` envelope on list).
 #
-# Storage is intentionally process-local — a pod restart wipes it.
-# When the call-engine team takes over this surface, replace the
-# in-memory dict with PJSIP realtime writes (ps_endpoints / ps_aors /
-# ps_auths) and keep the same wire contract so agent-hub doesn't need
-# to change.
+# Storage is intentionally process-local for the legacy /trunks routes
+# — they predate the Provider+TrunkAccount refactor and are kept here
+# for backward compatibility with deployments that haven't migrated.
+# The new /control/sip/providers and /control/sip/trunk-accounts
+# routes persist to Postgres via deploy/sip_store.py.
 
 import json
 import os
@@ -49,6 +49,16 @@ try:
     HAS_REDIS = True
 except ImportError:
     HAS_REDIS = False
+
+# sip_store is the Provider+TrunkAccount persistence + crypto layer.
+# Lives next to this script in /usr/local/bin/ inside the runtime image;
+# Python adds the script directory to sys.path automatically.
+try:
+    import sip_store
+    HAS_SIP_STORE = True
+except ImportError as _exc:
+    HAS_SIP_STORE = False
+    _sip_store_import_error = str(_exc)
 
 PORT = int(os.environ.get("CONTROL_API_PORT", "8092"))
 SECRET = os.environ.get("CONTROL_API_SECRET", "").strip()
@@ -544,12 +554,27 @@ def _status_feeder_loop(stop_event):
 # ── route table ────────────────────────────────────
 
 _ROUTES = [
+    # Legacy flat trunks (kept for back-compat; in-memory store).
     ("GET",    re.compile(r"^/control/sip/trunks/?$"),       "list_trunks"),
     ("POST",   re.compile(r"^/control/sip/trunks/?$"),       "create_trunk"),
     ("GET",    re.compile(r"^/control/sip/trunks/([^/]+)$"), "show_trunk"),
     ("POST",   re.compile(r"^/control/sip/trunks/([^/]+)$"), "upsert_trunk_by_id"),
     ("PUT",    re.compile(r"^/control/sip/trunks/([^/]+)$"), "upsert_trunk_by_id"),
     ("DELETE", re.compile(r"^/control/sip/trunks/([^/]+)$"), "delete_trunk"),
+    # New Provider+TrunkAccount routes (Postgres-backed).
+    ("GET",    re.compile(r"^/control/sip/providers/?$"),       "list_providers"),
+    ("POST",   re.compile(r"^/control/sip/providers/?$"),       "create_provider"),
+    ("GET",    re.compile(r"^/control/sip/providers/([^/]+)$"), "show_provider"),
+    ("POST",   re.compile(r"^/control/sip/providers/([^/]+)$"), "upsert_provider_by_id"),
+    ("PUT",    re.compile(r"^/control/sip/providers/([^/]+)$"), "upsert_provider_by_id"),
+    ("DELETE", re.compile(r"^/control/sip/providers/([^/]+)$"), "delete_provider"),
+    ("GET",    re.compile(r"^/control/sip/trunk-accounts/?$"),       "list_accounts"),
+    ("POST",   re.compile(r"^/control/sip/trunk-accounts/?$"),       "create_account"),
+    ("GET",    re.compile(r"^/control/sip/trunk-accounts/([^/]+)$"), "show_account"),
+    ("POST",   re.compile(r"^/control/sip/trunk-accounts/([^/]+)$"), "upsert_account_by_id"),
+    ("PUT",    re.compile(r"^/control/sip/trunk-accounts/([^/]+)$"), "upsert_account_by_id"),
+    ("DELETE", re.compile(r"^/control/sip/trunk-accounts/([^/]+)$"), "delete_account"),
+    # Misc.
     ("POST",   re.compile(r"^/control/sip/originate/?$"),    "originate_call"),
     ("POST",   re.compile(r"^/control/asterisk/reload/?$"),  "reload_asterisk"),
 ]
@@ -653,7 +678,29 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("content-length", "0")
         self.end_headers()
 
-    # ── /control/sip/trunks handlers ───────────────────────
+    def _require_store(self):
+        """Guard for routes that depend on Postgres + sip_store."""
+        if not HAS_SIP_STORE:
+            self._send_json(HTTPStatus.SERVICE_UNAVAILABLE,
+                            {"error": f"sip_store unavailable: {_sip_store_import_error}"})
+            return False
+        if not _db_enabled():
+            self._send_json(HTTPStatus.SERVICE_UNAVAILABLE,
+                            {"error": "DATABASE_URL not configured"})
+            return False
+        return True
+
+    def _store_error(self, exc):
+        """Map sip_store.StoreError into an HTTP response."""
+        status = HTTPStatus.UNPROCESSABLE_ENTITY
+        msg = str(exc)
+        if isinstance(exc, sip_store._NotFound):
+            status = HTTPStatus.NOT_FOUND
+        elif "TRUNK_SECRET_KEY" in msg or "cryptography" in msg:
+            status = HTTPStatus.SERVICE_UNAVAILABLE
+        self._send_json(status, {"error": msg})
+
+    # ── /control/sip/trunks handlers (legacy) ──────────────
 
     def list_trunks(self):
         with _lock:
@@ -721,6 +768,119 @@ class Handler(BaseHTTPRequestHandler):
             return
         if removed is None and not _db_enabled():
             self._send_json(HTTPStatus.NOT_FOUND, {"error": "trunk not found"})
+            return
+        self._send_204()
+
+    # ── /control/sip/providers handlers ────────────────────
+
+    def list_providers(self):
+        if not self._require_store():
+            return
+        try:
+            items = sip_store.list_providers(_db_conn)
+        except sip_store.StoreError as exc:
+            self._store_error(exc); return
+        self._send_json(HTTPStatus.OK, {"items": items})
+
+    def show_provider(self, provider_id):
+        if not self._require_store():
+            return
+        try:
+            self._send_json(HTTPStatus.OK, sip_store.get_provider(_db_conn, provider_id))
+        except sip_store.StoreError as exc:
+            self._store_error(exc)
+
+    def create_provider(self):
+        self._provider_upsert_common(None)
+
+    def upsert_provider_by_id(self, provider_id):
+        self._provider_upsert_common(provider_id)
+
+    def _provider_upsert_common(self, url_id):
+        if not self._require_store():
+            return
+        body = self._read_json_body()
+        if body is None:
+            return
+        if url_id is not None and body.get("id") and str(body["id"]) != url_id:
+            self._send_json(HTTPStatus.UNPROCESSABLE_ENTITY,
+                            {"error": "id in URL and body must match"})
+            return
+        try:
+            out = sip_store.upsert_provider(_db_conn, body, url_id=url_id)
+        except sip_store.StoreError as exc:
+            self._store_error(exc); return
+        self._send_json(HTTPStatus.OK, out)
+
+    def delete_provider(self, provider_id):
+        if not self._require_store():
+            return
+        try:
+            sip_store.delete_provider(_db_conn, provider_id)
+        except sip_store.StoreError as exc:
+            self._store_error(exc); return
+        except psycopg2.errors.ForeignKeyViolation:
+            self._send_json(HTTPStatus.CONFLICT,
+                            {"error": "provider has trunk accounts; delete those first"})
+            return
+        except psycopg2.Error as exc:
+            self._send_json(HTTPStatus.BAD_GATEWAY, {"error": f"db error: {exc}"})
+            return
+        self._send_204()
+
+    # ── /control/sip/trunk-accounts handlers ───────────────
+
+    def list_accounts(self):
+        if not self._require_store():
+            return
+        try:
+            items = sip_store.list_accounts(_db_conn)
+        except sip_store.StoreError as exc:
+            self._store_error(exc); return
+        self._send_json(HTTPStatus.OK, {"items": items})
+
+    def show_account(self, account_id):
+        if not self._require_store():
+            return
+        try:
+            self._send_json(HTTPStatus.OK, sip_store.get_account(_db_conn, account_id))
+        except sip_store.StoreError as exc:
+            self._store_error(exc)
+
+    def create_account(self):
+        self._account_upsert_common(None)
+
+    def upsert_account_by_id(self, account_id):
+        self._account_upsert_common(account_id)
+
+    def _account_upsert_common(self, url_id):
+        if not self._require_store():
+            return
+        body = self._read_json_body()
+        if body is None:
+            return
+        if url_id is not None and body.get("id") and str(body["id"]) != url_id:
+            self._send_json(HTTPStatus.UNPROCESSABLE_ENTITY,
+                            {"error": "id in URL and body must match"})
+            return
+        try:
+            out = sip_store.upsert_account(_db_conn, body, _pjsip_upsert, url_id=url_id)
+        except sip_store.StoreError as exc:
+            self._store_error(exc); return
+        except _DbError as exc:
+            self._send_json(HTTPStatus.BAD_GATEWAY, {"error": str(exc)})
+            return
+        self._send_json(HTTPStatus.OK, out)
+
+    def delete_account(self, account_id):
+        if not self._require_store():
+            return
+        try:
+            sip_store.delete_account(_db_conn, account_id, _pjsip_delete)
+        except sip_store.StoreError as exc:
+            self._store_error(exc); return
+        except _DbError as exc:
+            self._send_json(HTTPStatus.BAD_GATEWAY, {"error": str(exc)})
             return
         self._send_204()
 
@@ -865,6 +1025,16 @@ def main():
     signal.signal(signal.SIGTERM, _graceful)
     signal.signal(signal.SIGINT, _graceful)
 
+    # Provision sip_providers + sip_trunk_accounts tables and seed the
+    # default provider if HAS_SIP_STORE and a DB is configured. Failures
+    # are logged but non-fatal — affected routes will return 503 later.
+    if HAS_SIP_STORE and _db_enabled():
+        sip_store.bootstrap(_db_conn)
+    elif HAS_SIP_STORE and not _db_enabled():
+        log.info("sip_store: DATABASE_URL unset; provider routes will 503")
+    elif not HAS_SIP_STORE:
+        log.warning("sip_store import failed: %s", _sip_store_import_error)
+
     # Start the Redis status feeder in a daemon thread so the agent-hub
     # trunk page's badge reflects PJSIP endpoint reality. Daemon=True
     # means a python exit doesn't block on its termination.
@@ -881,12 +1051,13 @@ def main():
         )
     db_mode = "postgres" if _db_enabled() else "memory-only"
     log.info(
-        "listening on 0.0.0.0:%d (secret=%s store=%s nat=%s redis=%s)",
+        "listening on 0.0.0.0:%d (secret=%s store=%s nat=%s redis=%s sip_store=%s)",
         PORT,
         "set" if SECRET else "MISSING",
         db_mode,
         "yes" if BEHIND_NAT else "no",
         "yes" if (REDIS_URL and HAS_REDIS) else "no",
+        "yes" if HAS_SIP_STORE else "no",
     )
     try:
         server.serve_forever()
