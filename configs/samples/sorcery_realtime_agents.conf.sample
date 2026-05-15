@@ -1,20 +1,30 @@
 ;
 ; sorcery_realtime_agents.conf.sample
 ;
-; Tells res_pjsip to look up endpoints / auths / aors / registrations via
-; the realtime backend (mapped to ODBC -> Postgres in extconfig + res_odbc).
+; Tells Asterisk's PJSIP modules to look up their realtime objects via
+; the unixODBC backend (mapped to Postgres in extconfig + res_odbc).
 ; Merge into /etc/asterisk/sorcery.conf.
 ;
-; With this in place the agenthub-call-engine + agent-hub Trunks tab can
-; insert rows into ps_endpoints / ps_auths / ps_aors / ps_registrations
-; / trunks_meta and Asterisk picks them up on the next request (no
-; pjsip reload needed for endpoint / auth / aor changes; registrations
-; require a reload, which the call-engine triggers via
-; POST /control/asterisk/reload).
+; SECTION HEADERS MATTER. Asterisk's sorcery_realtime loader keys each
+; type lookup on the section header, which must equal the name of the
+; module that registered the sorcery type via ast_sorcery_open():
+;
+;   res_pjsip.c                       -> system, global, endpoint, auth,
+;                                        aor, contact, domain_alias,
+;                                        transport, identify
+;   res_pjsip_outbound_registration.c -> registration
+;
+; If `registration` is placed under [res_pjsip] (as it was before this
+; revision), sorcery_realtime logs:
+;   Cannot update type 'registration' in module 'res_pjsip'
+; ...and silently drops the mapping, so res_pjsip_outbound_registration
+; can't find its rows via realtime.
 ;
 
 [res_pjsip]
 endpoint=realtime,ps_endpoints
 auth=realtime,ps_auths
 aor=realtime,ps_aors
+
+[res_pjsip_outbound_registration]
 registration=realtime,ps_registrations

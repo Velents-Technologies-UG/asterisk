@@ -15,11 +15,24 @@ FROM ${ASTERISK_BUILD_BASE} AS builder
 
 ENV DEBIAN_FRONTEND=noninteractive
 
+# libxml2-utils and xsltproc are needed for Asterisk's `make xmldoc`
+# step (it shells to `xmllint` to validate and to `xsltproc` to
+# transform the per-module <documentation> blocks into the merged
+# core-en_US.xml). Without these, configure's xmldoc detection
+# silently skips generation and we end up shipping a stale or
+# upstream-default core-en_US.xml that doesn't match the .so files
+# this fork actually compiles. That mismatch manifests at runtime
+# as `aco_register_options` failing for types like `registration`,
+# with the warning:
+#   WARNING config_options.c: Could not update type 'registration'
+#       with values from config type registration
+# and the module then declines to load.
 RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
         build-essential autoconf automake libtool pkg-config m4 \
         libssl-dev libsrtp2-dev libxml2-dev libxslt1-dev libsqlite3-dev \
+        libxml2-utils xsltproc \
         libjansson-dev libedit-dev libcurl4-openssl-dev libpq-dev \
         uuid-dev unixodbc-dev odbc-postgresql \
         libncurses-dev libnewt-dev libopus-dev \
@@ -30,6 +43,12 @@ RUN set -eux; \
 WORKDIR /usr/src/asterisk
 COPY . .
 
+# Build pipeline. Note `make xmldoc` is run EXPLICITLY between `make`
+# (which builds binaries / modules) and `make install` (which copies
+# everything to its install path). Relying on `install-xmldoc` as a
+# transitive dep was unreliable in our setup; an explicit invocation
+# guarantees the merged core-en_US.xml reflects the just-compiled
+# source rather than a stale tarball-shipped copy.
 RUN set -eux; \
     ./bootstrap.sh; \
     ./configure \
@@ -44,9 +63,14 @@ RUN set -eux; \
         --enable MOH-OPSOUND-WAV \
         menuselect.makeopts; \
     make -j"$(nproc)"; \
+    make xmldoc; \
     make install; \
     make install-headers; \
-    make samples
+    make samples; \
+    echo "--- post-build xmldoc check ---"; \
+    ls -la /var/lib/asterisk/documentation/ /usr/share/asterisk/documentation/ 2>&1 || true; \
+    grep -c '<configObject' /var/lib/asterisk/documentation/core-en_US.xml 2>&1 || true; \
+    grep -l 'name="registration"' /var/lib/asterisk/documentation/core-en_US.xml 2>&1 || true
 
 # ---------------------------------------------------------- runtime -------
 FROM ${ASTERISK_RUNTIME_BASE}
