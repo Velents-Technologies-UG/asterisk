@@ -144,17 +144,39 @@ CREATE INDEX IF NOT EXISTS sip_trunk_accounts_provider_id_idx
 # our sidecar writes but some deployments don't ship. ADD COLUMN IF NOT
 # EXISTS so this is idempotent on a fresh contrib schema or a hand-
 # rolled subset. Asterisk's full ps_endpoints schema in contrib has
-# >40 columns; the three below are the ones we actively populate from
+# >40 columns; the columns below are the ones we actively populate from
 # trunk-account fields and were missing on the velents tenant DB.
+#
+# trust_id_outbound + send_pai + send_rpid + direct_media were added
+# after we hit a 403 stalemate on innocalls. Wholesale carriers reject
+# the INVITE when:
+#   - trust_id_outbound is unset (Asterisk anonymises the From display
+#     name to "Anonymous", which the carrier reads as policy violation).
+#   - send_pai is unset (no P-Asserted-Identity header for the carrier
+#     to validate the caller-ID against the registered account).
+#   - direct_media is unset/yes (RTP tries to go peer-to-peer between
+#     the carrier and the WebRTC agent, which can't happen — call
+#     answers but has no audio).
+# Setting these via ALTER TABLE means a stripped-schema deployment can
+# still receive the working values from TrunkStore.upsert() without
+# a hand-patched migration.
 _DDL_PS_ENDPOINTS_PATCH = r"""
-ALTER TABLE ps_endpoints ADD COLUMN IF NOT EXISTS from_user   VARCHAR(40);
-ALTER TABLE ps_endpoints ADD COLUMN IF NOT EXISTS from_domain VARCHAR(190);
-ALTER TABLE ps_endpoints ADD COLUMN IF NOT EXISTS callerid    VARCHAR(40);
+ALTER TABLE ps_endpoints ADD COLUMN IF NOT EXISTS from_user         VARCHAR(40);
+ALTER TABLE ps_endpoints ADD COLUMN IF NOT EXISTS from_domain       VARCHAR(190);
+ALTER TABLE ps_endpoints ADD COLUMN IF NOT EXISTS callerid          VARCHAR(40);
+ALTER TABLE ps_endpoints ADD COLUMN IF NOT EXISTS trust_id_outbound VARCHAR(3);
+ALTER TABLE ps_endpoints ADD COLUMN IF NOT EXISTS send_pai          VARCHAR(3);
+ALTER TABLE ps_endpoints ADD COLUMN IF NOT EXISTS send_rpid         VARCHAR(3);
+ALTER TABLE ps_endpoints ADD COLUMN IF NOT EXISTS direct_media      VARCHAR(3);
 """
 
 # Seed the one provider we actively need so the UI has a selectable
 # carrier on first boot. ON CONFLICT keeps re-seeding idempotent and
 # preserves any operator edits.
+#
+# Server URI / transport reflect the spec the carrier accepts in
+# production (TCP:50760, register mode). Earlier seed used TLS:5061
+# which the carrier 403s on outbound INVITE.
 _SEED_INNOCALLS = r"""
 INSERT INTO sip_providers
     (id, display_name, description, server_uri, transport, mode,
@@ -162,8 +184,8 @@ INSERT INTO sip_providers
 VALUES
     ('innocalls', 'innocalls',
      'innocalls wholesale termination',
-     'sip:cu622.sip.innocalls.net:5061', 'tls', 'ip-trunk',
-     '77.75.224.252', 'cu622.sip.innocalls.net')
+     'sip:cu622.sip.innocalls.net:50760', 'tcp', 'register',
+     NULL, 'cu622.sip.innocalls.net')
 ON CONFLICT (id) DO NOTHING;
 """
 
@@ -197,11 +219,14 @@ def bootstrap(db_conn_factory) -> None:
     try:
         with db_conn_factory() as conn, conn.cursor() as cur:
             cur.execute(_DDL_PS_ENDPOINTS_PATCH)
-        log.info("sip_store.bootstrap: ps_endpoints from_user/from_domain/callerid columns ensured")
+        log.info(
+            "sip_store.bootstrap: ps_endpoints from_user/from_domain/callerid/"
+            "trust_id_outbound/send_pai/send_rpid/direct_media columns ensured"
+        )
     except Exception as exc:
         log.warning(
             "sip_store.bootstrap (ps_endpoints patch) failed: %s — "
-            "outbound INVITEs may go out as anonymous if these columns are missing",
+            "outbound INVITEs may be 403'd by carriers if these columns are missing",
             exc,
         )
 
