@@ -23,6 +23,14 @@ ps_*. The IP-trunk branch (registerEnabled=False + carrierIp) was
 added in the parent commit and is the reason this refactor exists:
 mode is now a per-provider attribute, not a per-account flag.
 
+Bootstrap also patches the ps_endpoints schema if columns we depend on
+are missing — see _DDL_PS_ENDPOINTS_PATCH. This guards against the
+"stripped-down realtime schema" deployments out there (Asterisk 22's
+contrib/realtime ships >40 ps_endpoints columns; many tenants
+provisioned only a subset and lose from_user / from_domain / callerid
+on the trunk side, causing every outbound INVITE to go out
+`From: "Anonymous" <sip:anonymous@anonymous.invalid>`).
+
 Passwords are stored ciphertext-only. AES-GCM-256 with a 32-byte key
 derived from $TRUNK_SECRET_KEY (base64 OR raw hex OR raw bytes — we
 detect). Ciphertext format: 'v1$<nonce-b64>$<ct+tag-b64>'. Versioned
@@ -132,6 +140,18 @@ CREATE INDEX IF NOT EXISTS sip_trunk_accounts_provider_id_idx
     ON sip_trunk_accounts (provider_id);
 """
 
+# Patches the standard PJSIP realtime ps_endpoints table to add columns
+# our sidecar writes but some deployments don't ship. ADD COLUMN IF NOT
+# EXISTS so this is idempotent on a fresh contrib schema or a hand-
+# rolled subset. Asterisk's full ps_endpoints schema in contrib has
+# >40 columns; the three below are the ones we actively populate from
+# trunk-account fields and were missing on the velents tenant DB.
+_DDL_PS_ENDPOINTS_PATCH = r"""
+ALTER TABLE ps_endpoints ADD COLUMN IF NOT EXISTS from_user   VARCHAR(40);
+ALTER TABLE ps_endpoints ADD COLUMN IF NOT EXISTS from_domain VARCHAR(190);
+ALTER TABLE ps_endpoints ADD COLUMN IF NOT EXISTS callerid    VARCHAR(40);
+"""
+
 # Seed the one provider we actively need so the UI has a selectable
 # carrier on first boot. ON CONFLICT keeps re-seeding idempotent and
 # preserves any operator edits.
@@ -155,6 +175,12 @@ def bootstrap(db_conn_factory) -> None:
     Logs and swallows failures so a transient DB issue doesn't crash
     the sidecar — the routes that depend on these tables will surface
     the error on first request.
+
+    The ps_endpoints ALTER is wrapped in its own try/except because
+    ALTER TABLE on a table the sidecar doesn't own (it's the standard
+    PJSIP realtime table) could in theory fail under a stricter RBAC
+    setup. We still want sip_providers / sip_trunk_accounts to come up
+    even if the patch can't be applied.
     """
     if not HAS_PSYCOPG2:
         log.warning("sip_store.bootstrap: psycopg2 unavailable; skipping")
@@ -164,9 +190,20 @@ def bootstrap(db_conn_factory) -> None:
             cur.execute(_DDL_PROVIDERS)
             cur.execute(_DDL_ACCOUNTS)
             cur.execute(_SEED_INNOCALLS)
-        log.info("sip_store.bootstrap: tables ensured + seeds applied")
+        log.info("sip_store.bootstrap: provider+account tables ensured + seeded")
     except Exception as exc:
-        log.error("sip_store.bootstrap failed: %s", exc)
+        log.error("sip_store.bootstrap (providers/accounts) failed: %s", exc)
+
+    try:
+        with db_conn_factory() as conn, conn.cursor() as cur:
+            cur.execute(_DDL_PS_ENDPOINTS_PATCH)
+        log.info("sip_store.bootstrap: ps_endpoints from_user/from_domain/callerid columns ensured")
+    except Exception as exc:
+        log.warning(
+            "sip_store.bootstrap (ps_endpoints patch) failed: %s — "
+            "outbound INVITEs may go out as anonymous if these columns are missing",
+            exc,
+        )
 
 
 # ── crypto ───────────────────────────────────────────
