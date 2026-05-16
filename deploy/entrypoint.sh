@@ -46,12 +46,16 @@ log() { echo "entrypoint: $*"; }
 # 1. NAT-aware transport block.
 #
 # DevOps sets ASTERISK_EXTERNAL_IP to the public address the carrier
-# sees when this pod opens an outbound TLS connection (i.e. the
-# cluster's NAT-egress IP, or the LoadBalancer's external IP). When
-# present, the rendered transport-tls block tells Asterisk to rewrite
-# its outbound SIP Contact / Via headers and SDP c= lines to that IP
-# instead of the pod's internal 10.x.x.x. Without it, the carrier
-# accepts our REGISTER but cannot route inbound INVITEs or RTP back.
+# sees when this pod opens an outbound TLS connection. It accepts
+# either an IP literal (cluster NAT-egress IP / LoadBalancer IP) OR
+# a DNS name (AWS ELB hostnames like
+# `k8s-ingressn-...elb.eu-central-1.amazonaws.com` are typical) —
+# PJSIP's external_media_address / external_signaling_address resolve
+# DNS at config-load. When present, the rendered transport-tls block
+# tells Asterisk to rewrite its outbound SIP Contact / Via headers
+# and SDP c= lines to that address instead of the pod's internal
+# 10.x.x.x. Without it, the carrier accepts our REGISTER but cannot
+# route inbound INVITEs or RTP back.
 #
 # ASTERISK_LOCAL_NET (default RFC1918) tells Asterisk NOT to apply
 # the NAT rewrite when talking to peers on the LAN — important for
@@ -117,25 +121,84 @@ done
 #
 # pjsip's TLS transport requires a cert file at boot; if it's missing
 # Asterisk refuses to bind the transport and trunks on port 5061
-# silently fall back to UDP (or fail outright). DevOps will normally
-# mount a real cert into /etc/asterisk/keys/asterisk.pem via a
+# silently fall back to UDP (or fail outright). The WSS transport
+# (port 8089) also reuses this cert for browser softphone WebSocket
+# upgrades — without a cert browsers reject the connection upfront.
+#
+# Two pre-existing bugs in the old generator we fix here:
+#
+# a) `-keyout $PATH -out $PATH` against the same file is openssl-
+#    version-dependent. Some versions write the key first, then
+#    overwrite with the cert (losing the key); others append (giving
+#    a combined PEM). We've seen both behaviours in CI vs prod. The
+#    safe pattern is separate `-keyout asterisk.key` + `-out
+#    asterisk.crt` then a deterministic `cat` to produce the
+#    combined .pem.
+#
+# b) No Subject Alternative Name. Chrome (since M58, 2017) and
+#    Firefox (since 66, 2019) REQUIRE certificates to have a SAN
+#    that matches the host being connected to — they ignore CN
+#    entirely. Without a SAN, browsers reject the WSS upgrade with
+#    NET::ERR_CERT_COMMON_NAME_INVALID, JsSIP's UA emits an opaque
+#    "WebSocket closed" error, and the softphone never registers.
+#    The dialpad button is visible, but Call does nothing.
+#
+# We build the SAN list from the CN plus, if set, the external
+# hostname/IP DevOps points the cluster at. ELB hostnames are
+# treated as DNS:; IPv4 literals are treated as IP:. localhost +
+# 127.0.0.1 are always included so in-pod curl works.
+#
+# DevOps will normally mount a real CA-signed cert (Let's Encrypt
+# via cert-manager) into /etc/asterisk/keys/asterisk.pem via a
 # Kubernetes Secret + volumeMount, which masks any file generated
-# here. For dev/first-boot when no such secret exists, generate a
-# 10-year self-signed cert so the transport at least binds and the
-# pod can come up. Subject CN is configurable via env so DevOps can
-# point it at the real hostname if needed.
+# here. This whole block is fallback for dev / first-boot only.
 if [ ! -s "$TLS_CERT_PATH" ]; then
   if command -v openssl >/dev/null 2>&1; then
-    log "generating self-signed TLS cert at $TLS_CERT_PATH (CN=$TLS_CERT_CN)"
-    openssl req -x509 -newkey rsa:2048 \
-      -keyout "$TLS_CERT_PATH" \
-      -out "$TLS_CERT_PATH" \
-      -days 3650 -nodes \
-      -subj "/CN=$TLS_CERT_CN" 2>&1 \
-      | sed 's/^/[openssl] /' \
-      || log "WARNING: openssl returned non-zero; TLS transport may fail to bind"
-    chown asterisk:asterisk "$TLS_CERT_PATH" 2>/dev/null || true
-    chmod 600 "$TLS_CERT_PATH" 2>/dev/null || true
+    KEY_PATH="${TLS_CERT_PATH%.pem}.key"
+    CRT_PATH="${TLS_CERT_PATH%.pem}.crt"
+
+    # Build SAN list. Always cover the CN, localhost, and 127.0.0.1.
+    # If ASTERISK_EXTERNAL_IP is set, add it — as DNS: if it looks like
+    # a hostname (AWS ELB / Ingress), as IP: if it parses as IPv4.
+    SAN_LIST="DNS:${TLS_CERT_CN},DNS:localhost,IP:127.0.0.1"
+    if [ -n "${ASTERISK_EXTERNAL_IP:-}" ]; then
+      if echo "$ASTERISK_EXTERNAL_IP" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'; then
+        SAN_LIST="${SAN_LIST},IP:${ASTERISK_EXTERNAL_IP}"
+      else
+        SAN_LIST="${SAN_LIST},DNS:${ASTERISK_EXTERNAL_IP}"
+      fi
+    fi
+    if [ -n "${ASTERISK_TLS_EXTRA_SAN:-}" ]; then
+      SAN_LIST="${SAN_LIST},${ASTERISK_TLS_EXTRA_SAN}"
+    fi
+
+    log "generating self-signed TLS cert (CN=$TLS_CERT_CN, SAN=$SAN_LIST)"
+    if openssl req -x509 -newkey rsa:2048 \
+        -keyout "$KEY_PATH" \
+        -out "$CRT_PATH" \
+        -days 3650 -nodes \
+        -subj "/CN=$TLS_CERT_CN" \
+        -addext "subjectAltName=$SAN_LIST" 2>&1 \
+        | sed 's/^/[openssl] /'
+    then
+      :
+    else
+      log "WARNING: openssl returned non-zero; TLS transport may fail to bind"
+    fi
+
+    # Asterisk's pjsip transport-tls accepts a single combined PEM via
+    # `cert_file`, OR separate `cert_file` + `priv_key_file`. We produce
+    # the combined .pem for legacy config AND keep the separate .key +
+    # .crt so a Helm chart can point at whichever it prefers.
+    if [ -s "$KEY_PATH" ] && [ -s "$CRT_PATH" ]; then
+      cat "$KEY_PATH" "$CRT_PATH" > "$TLS_CERT_PATH"
+    else
+      log "WARNING: key/cert files not produced; $TLS_CERT_PATH stays empty"
+    fi
+
+    chown asterisk:asterisk "$TLS_CERT_PATH" "$KEY_PATH" "$CRT_PATH" 2>/dev/null || true
+    chmod 600 "$TLS_CERT_PATH" "$KEY_PATH" 2>/dev/null || true
+    chmod 644 "$CRT_PATH" 2>/dev/null || true
   else
     log "WARNING: openssl missing and $TLS_CERT_PATH absent; TLS transport will fail to bind"
   fi
