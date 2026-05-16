@@ -118,6 +118,7 @@ COPY configs/samples/pjsip_trunks.conf.sample                 /etc/asterisk/pjsi
 COPY configs/samples/pjsip_transport_tls.conf.template        /etc/asterisk/pjsip_transport_tls.conf.template
 COPY configs/samples/sorcery_realtime_agents.conf.sample      /etc/asterisk/sorcery.conf
 COPY configs/samples/extconfig_realtime_agents.conf.sample    /etc/asterisk/extconfig.conf
+COPY configs/samples/rtp.conf.sample                          /etc/asterisk/rtp.conf
 
 # Suppress noisy module that fails to initialize on systems without
 # libvorbisfile / Ogg-Vorbis support, then mirror Asterisk's XML
