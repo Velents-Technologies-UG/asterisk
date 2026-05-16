@@ -1,13 +1,18 @@
 ;
 ; pjsip_trunks.conf.sample
 ;
-; PJSIP transport for outbound trunks. The trunk endpoints / auths / aors
-; / registrations themselves are provisioned at runtime via the realtime
-; backend (see configs/samples/sorcery_realtime_agents.conf.sample), so
-; this file only defines the UDP transport they bind to.
+; PJSIP transports for outbound trunks. The trunk endpoints / auths /
+; aors / registrations themselves are provisioned at runtime via the
+; realtime backend (see configs/samples/sorcery_realtime_agents.conf.sample),
+; so this file only defines the transports they bind to.
 ;
-; Append to /etc/asterisk/pjsip.conf alongside the WSS transport from
-; pjsip_wss_agents.conf.sample.
+; Generic: declare every transport the UI's transport dropdown can
+; produce (udp/tcp). TLS lives in pjsip_transport_tls.conf so the
+; cert path stays grouped with the rest of the TLS config.
+;
+; Appended into /etc/asterisk/pjsip.conf alongside the WSS transport
+; from pjsip_wss_agents.conf.sample and the TLS transport from
+; pjsip_transport_tls.conf.template.
 ;
 
 [transport-udp]
@@ -18,3 +23,13 @@ bind=0.0.0.0:5060
 ; signalling IPs - put them in a deny/permit pair below.
 ; deny=0.0.0.0/0
 ; permit=54.172.60.0/23   ; example: Twilio US East
+
+[transport-tcp]
+type=transport
+protocol=tcp
+bind=0.0.0.0:5060
+; Same deny/permit guidance as transport-udp above. Carriers that
+; only accept TCP (e.g. innocalls cu622.sip.innocalls.net:50760) use
+; this transport; the source port the kernel picks for outbound is
+; ephemeral, but binding here gives the transport a stable name that
+; the realtime ps_endpoints.transport column can reference.
