@@ -278,6 +278,38 @@ def _build_client_uri(username, from_domain, server_uri):
     return None
 
 
+def _reload_res_pjsip_async():
+    """Fire-and-forget reload of res_pjsip.so after a trunk write.
+
+    Without this, the row lands in ps_endpoints but the running endpoint
+    keeps its old config (transport, from_user, callerid, …) until the
+    next registration interval (~3600s by default). A UI save would
+    appear to succeed and the trunk would stay "unknown" for the better
+    part of an hour. Reloading is cheap enough to do on every write.
+
+    Runs in a background thread so the HTTP response isn't blocked on
+    Asterisk's reload time. Failures are logged but don't propagate;
+    the DB write is what's durable.
+    """
+    def _do_reload():
+        try:
+            if shutil.which(ASTERISK_BIN) is None:
+                return
+            proc = subprocess.run(
+                [ASTERISK_BIN, "-rx", "module reload res_pjsip.so"],
+                capture_output=True, text=True, timeout=10, check=False,
+            )
+            if proc.returncode != 0:
+                log.warning(
+                    "post-trunk-write res_pjsip reload rc=%d stderr=%r",
+                    proc.returncode, (proc.stderr or "").strip()[:200],
+                )
+        except Exception as exc:
+            log.warning("post-trunk-write res_pjsip reload failed: %s", exc)
+
+    threading.Thread(target=_do_reload, name="post-write-reload", daemon=True).start()
+
+
 def _pjsip_upsert(row, password):
     """Write the four ps_* rows so Asterisk picks the trunk up on reload."""
     if not _db_enabled():
@@ -298,17 +330,41 @@ def _pjsip_upsert(row, password):
     carrier_ip = row.get("carrier_ip")
     identify_by = "ip,username,auth_username" if not register_enabled else "username,auth_username"
 
-    # From identity for outbound INVITEs. Without these PJSIP defaults to
-    # `From: "Anonymous" <sip:anonymous@anonymous.invalid>` which most
-    # carriers (innocalls included) reject with 403 Forbidden because
-    # they expect a billing-account caller-ID. Fall back to the SIP auth
-    # username if no explicit from_user was configured — that's at least
-    # *some* identity rather than anonymous.
-    from_user_value = row.get("from_user") or row.get("username") or ""
+    # Carrier compatibility, proven against innocalls:
+    #
+    #   - From URI user MUST match the SIP auth username. The trunk admin
+    #     form labels its "FROM USER" field as "caller-id user the
+    #     carrier expects" — that's the DID, NOT the From URI user.
+    #     Wholesale carriers 403 the INVITE when From != auth identity.
+    #     We always write `from_user = username` to ps_endpoints; the
+    #     form's `fromUser` value drives `callerid` instead. Operators
+    #     that genuinely need From != auth can pass `fromSipUser` in
+    #     the trunk body.
+    #
+    #   - callerid carries the DID as `"X" <X>`. PJSIP parses this for
+    #     both CALLERID(name|num) and the P-Asserted-Identity header.
+    #
+    #   - trust_id_outbound = yes stops Asterisk from rewriting the
+    #     From display name to "Anonymous" when no CALLERID(name) is
+    #     set. Carriers read Anonymous as a policy violation.
+    #
+    #   - send_pai = yes emits a P-Asserted-Identity header with the
+    #     DID. Carriers validate this against the registered account.
+    #
+    #   - direct_media = no keeps RTP relayed through Asterisk. With
+    #     direct_media = yes the carrier and the WebRTC agent try to
+    #     exchange RTP peer-to-peer; the call answers but has no audio.
+    from_sip_user = (
+        row.get("from_sip_user")
+        or row.get("from_user_override")
+        or row.get("username")
+        or ""
+    )
     from_domain_value = row.get("from_domain") or _server_uri_host(server_uri) or ""
-    # callerid is "Name" <number> shape; some carriers also check P-Asserted-Identity
-    # which Asterisk derives from this field when send_pai is enabled.
-    callerid_value = f"<{from_user_value}>" if from_user_value else ""
+    callerid_source = row.get("from_user") or row.get("username") or ""
+    callerid_value = (
+        f'"{callerid_source}" <{callerid_source}>' if callerid_source else ""
+    )
 
     try:
         with _db_conn() as conn, conn.cursor() as cur:
@@ -338,51 +394,61 @@ def _pjsip_upsert(row, password):
                         (id, transport, context, aors, auth, allow, dtmf_mode,
                          identify_by, disallow, outbound_auth,
                          from_user, from_domain, callerid,
-                         rtp_symmetric, force_rport, direct_media)
+                         rtp_symmetric, force_rport, direct_media,
+                         trust_id_outbound, send_pai)
                     VALUES (%s, %s, %s, %s, %s, %s, 'rfc4733',
                             %s, 'all', %s,
                             %s, %s, %s,
-                            'yes', 'yes', 'no')
+                            'yes', 'yes', 'no',
+                            'yes', 'yes')
                     ON CONFLICT (id) DO UPDATE SET
-                        transport     = EXCLUDED.transport,
-                        context       = EXCLUDED.context,
-                        aors          = EXCLUDED.aors,
-                        auth          = EXCLUDED.auth,
-                        allow         = EXCLUDED.allow,
-                        identify_by   = EXCLUDED.identify_by,
-                        outbound_auth = EXCLUDED.outbound_auth,
-                        from_user     = EXCLUDED.from_user,
-                        from_domain   = EXCLUDED.from_domain,
-                        callerid      = EXCLUDED.callerid,
-                        rtp_symmetric = EXCLUDED.rtp_symmetric,
-                        force_rport   = EXCLUDED.force_rport,
-                        direct_media  = EXCLUDED.direct_media
+                        transport         = EXCLUDED.transport,
+                        context           = EXCLUDED.context,
+                        aors              = EXCLUDED.aors,
+                        auth              = EXCLUDED.auth,
+                        allow             = EXCLUDED.allow,
+                        identify_by       = EXCLUDED.identify_by,
+                        outbound_auth     = EXCLUDED.outbound_auth,
+                        from_user         = EXCLUDED.from_user,
+                        from_domain       = EXCLUDED.from_domain,
+                        callerid          = EXCLUDED.callerid,
+                        rtp_symmetric     = EXCLUDED.rtp_symmetric,
+                        force_rport       = EXCLUDED.force_rport,
+                        direct_media      = EXCLUDED.direct_media,
+                        trust_id_outbound = EXCLUDED.trust_id_outbound,
+                        send_pai          = EXCLUDED.send_pai
                 """, (row["id"], transport, context, row["id"], auth_id, allow,
                       identify_by, auth_id,
-                      from_user_value or None, from_domain_value or None,
+                      from_sip_user or None, from_domain_value or None,
                       callerid_value or None))
             else:
                 cur.execute("""
                     INSERT INTO ps_endpoints
                         (id, transport, context, aors, auth, allow, dtmf_mode,
                          identify_by, disallow, outbound_auth,
-                         from_user, from_domain, callerid)
-                    VALUES (%s, %s, %s, %s, %s, %s, 'rfc4733', %s, 'all', %s,
-                            %s, %s, %s)
+                         from_user, from_domain, callerid,
+                         direct_media, trust_id_outbound, send_pai)
+                    VALUES (%s, %s, %s, %s, %s, %s, 'rfc4733',
+                            %s, 'all', %s,
+                            %s, %s, %s,
+                            'no', 'yes', 'yes')
                     ON CONFLICT (id) DO UPDATE SET
-                        transport     = EXCLUDED.transport,
-                        context       = EXCLUDED.context,
-                        aors          = EXCLUDED.aors,
-                        auth          = EXCLUDED.auth,
-                        allow         = EXCLUDED.allow,
-                        identify_by   = EXCLUDED.identify_by,
-                        outbound_auth = EXCLUDED.outbound_auth,
-                        from_user     = EXCLUDED.from_user,
-                        from_domain   = EXCLUDED.from_domain,
-                        callerid      = EXCLUDED.callerid
+                        transport         = EXCLUDED.transport,
+                        context           = EXCLUDED.context,
+                        aors              = EXCLUDED.aors,
+                        auth              = EXCLUDED.auth,
+                        allow             = EXCLUDED.allow,
+                        identify_by       = EXCLUDED.identify_by,
+                        outbound_auth     = EXCLUDED.outbound_auth,
+                        from_user         = EXCLUDED.from_user,
+                        from_domain       = EXCLUDED.from_domain,
+                        callerid          = EXCLUDED.callerid,
+                        direct_media      = EXCLUDED.direct_media,
+                        trust_id_outbound = EXCLUDED.trust_id_outbound,
+                        send_pai          = EXCLUDED.send_pai
                 """, (row["id"], transport, context, row["id"], auth_id, allow,
                       identify_by, auth_id,
-                      from_user_value or None, from_domain_value or None,
+                      from_sip_user or None, from_domain_value or None,
                       callerid_value or None))
 
             if register_enabled:
@@ -418,6 +484,10 @@ def _pjsip_upsert(row, password):
     except psycopg2.Error as exc:
         raise _DbError(f"pjsip realtime write failed: {exc}") from exc
 
+    # Kick a res_pjsip reload so the new endpoint config takes effect now,
+    # not on the next periodic registration cycle.
+    _reload_res_pjsip_async()
+
 
 def _pjsip_delete(trunk_id):
     if not _db_enabled():
@@ -431,6 +501,8 @@ def _pjsip_delete(trunk_id):
             cur.execute("DELETE FROM ps_aors          WHERE id = %s", (trunk_id,))
     except psycopg2.Error as exc:
         raise _DbError(f"pjsip realtime delete failed: {exc}") from exc
+
+    _reload_res_pjsip_async()
 
 
 def _server_uri_host(server_uri):
