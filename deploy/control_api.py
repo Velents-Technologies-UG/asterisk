@@ -279,6 +279,7 @@ def _build_client_uri(username, from_domain, server_uri):
 
 
 def _pjsip_upsert(row, password):
+    """Write the four ps_* rows so Asterisk picks the trunk up on reload."""
     if not _db_enabled():
         return
     has_auth = bool(password) and bool(row.get("username"))
@@ -296,6 +297,18 @@ def _pjsip_upsert(row, password):
     register_enabled = bool(row.get("register_enabled", True))
     carrier_ip = row.get("carrier_ip")
     identify_by = "ip,username,auth_username" if not register_enabled else "username,auth_username"
+
+    # From identity for outbound INVITEs. Without these PJSIP defaults to
+    # `From: "Anonymous" <sip:anonymous@anonymous.invalid>` which most
+    # carriers (innocalls included) reject with 403 Forbidden because
+    # they expect a billing-account caller-ID. Fall back to the SIP auth
+    # username if no explicit from_user was configured — that's at least
+    # *some* identity rather than anonymous.
+    from_user_value = row.get("from_user") or row.get("username") or ""
+    from_domain_value = row.get("from_domain") or _server_uri_host(server_uri) or ""
+    # callerid is "Name" <number> shape; some carriers also check P-Asserted-Identity
+    # which Asterisk derives from this field when send_pai is enabled.
+    callerid_value = f"<{from_user_value}>" if from_user_value else ""
 
     try:
         with _db_conn() as conn, conn.cursor() as cur:
@@ -324,9 +337,11 @@ def _pjsip_upsert(row, password):
                     INSERT INTO ps_endpoints
                         (id, transport, context, aors, auth, allow, dtmf_mode,
                          identify_by, disallow, outbound_auth,
+                         from_user, from_domain, callerid,
                          rtp_symmetric, force_rport, direct_media)
                     VALUES (%s, %s, %s, %s, %s, %s, 'rfc4733',
                             %s, 'all', %s,
+                            %s, %s, %s,
                             'yes', 'yes', 'no')
                     ON CONFLICT (id) DO UPDATE SET
                         transport     = EXCLUDED.transport,
@@ -336,17 +351,24 @@ def _pjsip_upsert(row, password):
                         allow         = EXCLUDED.allow,
                         identify_by   = EXCLUDED.identify_by,
                         outbound_auth = EXCLUDED.outbound_auth,
+                        from_user     = EXCLUDED.from_user,
+                        from_domain   = EXCLUDED.from_domain,
+                        callerid      = EXCLUDED.callerid,
                         rtp_symmetric = EXCLUDED.rtp_symmetric,
                         force_rport   = EXCLUDED.force_rport,
                         direct_media  = EXCLUDED.direct_media
                 """, (row["id"], transport, context, row["id"], auth_id, allow,
-                      identify_by, auth_id))
+                      identify_by, auth_id,
+                      from_user_value or None, from_domain_value or None,
+                      callerid_value or None))
             else:
                 cur.execute("""
                     INSERT INTO ps_endpoints
                         (id, transport, context, aors, auth, allow, dtmf_mode,
-                         identify_by, disallow, outbound_auth)
-                    VALUES (%s, %s, %s, %s, %s, %s, 'rfc4733', %s, 'all', %s)
+                         identify_by, disallow, outbound_auth,
+                         from_user, from_domain, callerid)
+                    VALUES (%s, %s, %s, %s, %s, %s, 'rfc4733', %s, 'all', %s,
+                            %s, %s, %s)
                     ON CONFLICT (id) DO UPDATE SET
                         transport     = EXCLUDED.transport,
                         context       = EXCLUDED.context,
@@ -354,9 +376,14 @@ def _pjsip_upsert(row, password):
                         auth          = EXCLUDED.auth,
                         allow         = EXCLUDED.allow,
                         identify_by   = EXCLUDED.identify_by,
-                        outbound_auth = EXCLUDED.outbound_auth
+                        outbound_auth = EXCLUDED.outbound_auth,
+                        from_user     = EXCLUDED.from_user,
+                        from_domain   = EXCLUDED.from_domain,
+                        callerid      = EXCLUDED.callerid
                 """, (row["id"], transport, context, row["id"], auth_id, allow,
-                      identify_by, auth_id))
+                      identify_by, auth_id,
+                      from_user_value or None, from_domain_value or None,
+                      callerid_value or None))
 
             if register_enabled:
                 if row.get("enabled", True) and has_auth and client_uri:
@@ -886,30 +913,6 @@ class Handler(BaseHTTPRequestHandler):
         self._send_204()
 
     def originate_call(self):
-        """Originate a call. Three shapes accepted:
-
-          A. Click-to-dial (the agent-hub dialpad's primary path):
-             { fromAgent, destination, trunkId }
-             → CLI: originate PJSIP/<fromAgent> application Dial \
-                    PJSIP/<destination>@<trunkId>,<timeout>,t
-             Asterisk rings the agent's PJSIP endpoint first; when they
-             answer, Dial(...) places the outbound leg through the
-             chosen trunk and bridges the two channels. The agent IS on
-             the call — this is the behaviour the dialpad UI promises.
-
-          B. Peer-to-peer (agent → agent):
-             { targetEndpoint }
-             → CLI: originate PJSIP/<targetEndpoint> extension <ext>@<ctx>
-             Rings the named endpoint, then drops the channel into the
-             extension/context.
-
-          C. Probe (no agent on the call; tests a trunk's reachability):
-             { destination, trunkId } without fromAgent
-             → CLI: originate PJSIP/<destination>@<trunkId> extension <ext>@<ctx>
-             Asterisk dials the destination via the trunk and lands the
-             answered leg in extension/context. Pre-existing behaviour;
-             kept for backwards compatibility.
-        """
         body = self._read_json_body()
         if body is None:
             return
@@ -920,8 +923,6 @@ class Handler(BaseHTTPRequestHandler):
         context = str(body.get("context") or DEFAULT_INBOUND_CONTEXT).strip()
         from_agent = str(body.get("fromAgent") or "").strip()
 
-        # Shape A: click-to-dial. Highest priority because the dialpad
-        # supplies all three of (fromAgent, destination, trunkId).
         click_to_dial = bool(from_agent and destination and trunk_id and not target_endpoint)
 
         if click_to_dial:
@@ -940,7 +941,6 @@ class Handler(BaseHTTPRequestHandler):
             channel = f"PJSIP/{from_agent}"
             mode = "click-to-dial"
         elif target_endpoint:
-            # Shape B: peer-to-peer.
             if not _SAFE_ID.match(target_endpoint):
                 self._send_json(HTTPStatus.UNPROCESSABLE_ENTITY,
                                 {"error": "targetEndpoint must be 1-60 chars, alphanumerics + _ -"})
@@ -948,7 +948,6 @@ class Handler(BaseHTTPRequestHandler):
             channel = f"PJSIP/{target_endpoint}"
             mode = "peer"
         else:
-            # Shape C: trunk probe (legacy / power-user).
             if not _DEST_RE.match(destination):
                 self._send_json(HTTPStatus.UNPROCESSABLE_ENTITY,
                                 {"error": "destination must be 1-64 chars: digits, + * #"})
@@ -982,10 +981,6 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if mode == "click-to-dial":
-            # Application form of `originate` so we can run Dial(...)
-            # against the trunk without needing channel variables (the
-            # CLI doesn't let us set those). 't' allows the callee to
-            # transfer.
             dial_args = f"PJSIP/{destination}@{trunk_id},{CLICK_TO_DIAL_TIMEOUT},t"
             cli = f"originate {channel} application Dial {dial_args}"
             extension_reported = f"Dial({dial_args})"
