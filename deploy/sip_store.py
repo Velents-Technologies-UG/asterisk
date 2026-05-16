@@ -141,33 +141,54 @@ CREATE INDEX IF NOT EXISTS sip_trunk_accounts_provider_id_idx
 """
 
 # Patches the standard PJSIP realtime ps_endpoints table to add columns
-# our sidecar writes but some deployments don't ship. ADD COLUMN IF NOT
-# EXISTS so this is idempotent on a fresh contrib schema or a hand-
-# rolled subset. Asterisk's full ps_endpoints schema in contrib has
-# >40 columns; the columns below are the ones we actively populate from
-# trunk-account fields and were missing on the velents tenant DB.
+# our two writers (control_api._pjsip_upsert for trunks, call-engine
+# AgentSipStore.provisionAgent for per-agent WebRTC endpoints) populate.
+# ADD COLUMN IF NOT EXISTS is idempotent on a fresh contrib schema or
+# a hand-rolled subset. Asterisk's full ps_endpoints schema ships >40
+# columns; the ones below cover both the trunk-side fields and the
+# per-agent WebRTC fields. Without this patch, a stripped-schema deploy
+# fails silently:
 #
-# trust_id_outbound + send_pai + send_rpid + direct_media were added
-# after we hit a 403 stalemate on innocalls. Wholesale carriers reject
-# the INVITE when:
-#   - trust_id_outbound is unset (Asterisk anonymises the From display
-#     name to "Anonymous", which the carrier reads as policy violation).
-#   - send_pai is unset (no P-Asserted-Identity header for the carrier
-#     to validate the caller-ID against the registered account).
-#   - direct_media is unset/yes (RTP tries to go peer-to-peer between
-#     the carrier and the WebRTC agent, which can't happen — call
-#     answers but has no audio).
-# Setting these via ALTER TABLE means a stripped-schema deployment can
-# still receive the working values from TrunkStore.upsert() without
-# a hand-patched migration.
+#   - Trunk side: outbound INVITEs go out anonymous / no PAI, carrier
+#     returns 403 Forbidden.
+#   - Agent side: AgentSipStore.provisionAgent throws "column XXX does
+#     not exist", the /api/agents/<id>/sip-credentials endpoint 500s,
+#     the browser softphone never registers, the dialpad does nothing.
+#
+# Setting ALL these columns to nullable VARCHAR(3) (for yes/no flags)
+# or VARCHAR(40) (for short ids) is consistent with Asterisk's stock
+# alembic migrations.
 _DDL_PS_ENDPOINTS_PATCH = r"""
-ALTER TABLE ps_endpoints ADD COLUMN IF NOT EXISTS from_user         VARCHAR(40);
-ALTER TABLE ps_endpoints ADD COLUMN IF NOT EXISTS from_domain       VARCHAR(190);
-ALTER TABLE ps_endpoints ADD COLUMN IF NOT EXISTS callerid          VARCHAR(40);
-ALTER TABLE ps_endpoints ADD COLUMN IF NOT EXISTS trust_id_outbound VARCHAR(3);
-ALTER TABLE ps_endpoints ADD COLUMN IF NOT EXISTS send_pai          VARCHAR(3);
-ALTER TABLE ps_endpoints ADD COLUMN IF NOT EXISTS send_rpid         VARCHAR(3);
-ALTER TABLE ps_endpoints ADD COLUMN IF NOT EXISTS direct_media      VARCHAR(3);
+-- Trunk-side carrier-compat columns
+ALTER TABLE ps_endpoints ADD COLUMN IF NOT EXISTS from_user                VARCHAR(40);
+ALTER TABLE ps_endpoints ADD COLUMN IF NOT EXISTS from_domain              VARCHAR(190);
+ALTER TABLE ps_endpoints ADD COLUMN IF NOT EXISTS callerid                 VARCHAR(40);
+ALTER TABLE ps_endpoints ADD COLUMN IF NOT EXISTS trust_id_outbound        VARCHAR(3);
+ALTER TABLE ps_endpoints ADD COLUMN IF NOT EXISTS send_pai                 VARCHAR(3);
+ALTER TABLE ps_endpoints ADD COLUMN IF NOT EXISTS send_rpid                VARCHAR(3);
+ALTER TABLE ps_endpoints ADD COLUMN IF NOT EXISTS direct_media             VARCHAR(3);
+ALTER TABLE ps_endpoints ADD COLUMN IF NOT EXISTS rewrite_contact          VARCHAR(3);
+ALTER TABLE ps_endpoints ADD COLUMN IF NOT EXISTS rtp_symmetric            VARCHAR(3);
+ALTER TABLE ps_endpoints ADD COLUMN IF NOT EXISTS force_rport              VARCHAR(3);
+
+-- Per-agent WebRTC columns (AgentSipStore.provisionAgent writes these)
+ALTER TABLE ps_endpoints ADD COLUMN IF NOT EXISTS ice_support              VARCHAR(3);
+ALTER TABLE ps_endpoints ADD COLUMN IF NOT EXISTS use_avpf                 VARCHAR(3);
+ALTER TABLE ps_endpoints ADD COLUMN IF NOT EXISTS rtcp_mux                 VARCHAR(3);
+ALTER TABLE ps_endpoints ADD COLUMN IF NOT EXISTS media_encryption         VARCHAR(40);
+ALTER TABLE ps_endpoints ADD COLUMN IF NOT EXISTS dtls_verify              VARCHAR(40);
+ALTER TABLE ps_endpoints ADD COLUMN IF NOT EXISTS dtls_setup               VARCHAR(40);
+ALTER TABLE ps_endpoints ADD COLUMN IF NOT EXISTS dtls_auto_generate_cert  VARCHAR(3);
+ALTER TABLE ps_endpoints ADD COLUMN IF NOT EXISTS webrtc                   VARCHAR(3);
+ALTER TABLE ps_endpoints ADD COLUMN IF NOT EXISTS allow_subscribe          VARCHAR(3);
+
+-- Custom column we tag agent endpoints with so the status feeder /
+-- queue dispatcher can find them. Not a stock Asterisk column.
+ALTER TABLE ps_endpoints ADD COLUMN IF NOT EXISTS agent_id                 VARCHAR(60);
+
+-- Updated_at is used by both writers' ON CONFLICT clauses. Asterisk
+-- doesn't care about it but realtime won't error if it exists.
+ALTER TABLE ps_endpoints ADD COLUMN IF NOT EXISTS updated_at               TIMESTAMPTZ;
 """
 
 # Seed the one provider we actively need so the UI has a selectable
@@ -203,6 +224,11 @@ def bootstrap(db_conn_factory) -> None:
     PJSIP realtime table) could in theory fail under a stricter RBAC
     setup. We still want sip_providers / sip_trunk_accounts to come up
     even if the patch can't be applied.
+
+    Schema patch uses autocommit so each ALTER persists even if a
+    later one fails — the earlier version wrapped them all in a
+    single transaction and one missing column rolled the whole patch
+    back.
     """
     if not HAS_PSYCOPG2:
         log.warning("sip_store.bootstrap: psycopg2 unavailable; skipping")
@@ -216,17 +242,35 @@ def bootstrap(db_conn_factory) -> None:
     except Exception as exc:
         log.error("sip_store.bootstrap (providers/accounts) failed: %s", exc)
 
+    # Apply each ALTER independently with autocommit so a single
+    # already-present column (or a permission glitch) can't roll back
+    # the entire patch.
     try:
-        with db_conn_factory() as conn, conn.cursor() as cur:
-            cur.execute(_DDL_PS_ENDPOINTS_PATCH)
+        conn = db_conn_factory()
+        try:
+            conn.autocommit = True
+            with conn.cursor() as cur:
+                for stmt in _DDL_PS_ENDPOINTS_PATCH.split(";"):
+                    s = stmt.strip()
+                    if not s or s.startswith("--"):
+                        continue
+                    try:
+                        cur.execute(s)
+                    except Exception as inner_exc:
+                        log.warning(
+                            "sip_store.bootstrap (ps_endpoints patch stmt %r): %s",
+                            s[:80], inner_exc,
+                        )
+        finally:
+            conn.close()
         log.info(
-            "sip_store.bootstrap: ps_endpoints from_user/from_domain/callerid/"
-            "trust_id_outbound/send_pai/send_rpid/direct_media columns ensured"
+            "sip_store.bootstrap: ps_endpoints schema patched (carrier-compat + WebRTC columns)"
         )
     except Exception as exc:
         log.warning(
             "sip_store.bootstrap (ps_endpoints patch) failed: %s — "
-            "outbound INVITEs may be 403'd by carriers if these columns are missing",
+            "outbound INVITEs may be 403'd by carriers AND agent softphones "
+            "may fail to register if the WebRTC columns are missing",
             exc,
         )
 
