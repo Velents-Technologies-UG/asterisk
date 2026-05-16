@@ -46,6 +46,7 @@ ASTERISK_BIN = os.environ.get("ASTERISK_BIN", "asterisk")
 DEFAULT_TRANSPORT = os.environ.get("PJSIP_TRANSPORT_NAME", "transport-udp")
 DEFAULT_INBOUND_CONTEXT = os.environ.get("TRUNK_INBOUND_CONTEXT", "from-trunk")
 DEFAULT_CODEC_ALLOW = os.environ.get("TRUNK_DEFAULT_ALLOW", "ulaw,alaw")
+CLICK_TO_DIAL_TIMEOUT = int(os.environ.get("CLICK_TO_DIAL_TIMEOUT", "30"))
 STATUS_FEEDER_INTERVAL = int(os.environ.get("STATUS_FEEDER_INTERVAL", "5"))
 STATUS_FEEDER_KEY = os.environ.get("STATUS_FEEDER_KEY", "cx:trunks:status")
 STATUS_FEEDER_AGENTS_KEY = os.environ.get("STATUS_FEEDER_AGENTS_KEY", "cx:agents:sip-status")
@@ -412,15 +413,12 @@ def _server_uri_host(server_uri):
     return s.split(":", 1)[0].split(";", 1)[0]
 
 
-# Known PJSIP contact states. Used by _parse_pjsip_aors to pick the
-# right column even when the formatter pads with a single space.
 _CONTACT_STATE_PREFIXES = (
     "avail", "unavail", "nonqual", "removed", "created", "rejected", "unknown",
 )
 
 
 def _parse_pjsip_endpoints(output):
-    """Yield (endpoint_id, state) tuples from `pjsip show endpoints` output."""
     for line in output.splitlines():
         s = line.strip()
         if not s.startswith("Endpoint:"):
@@ -438,7 +436,6 @@ def _parse_pjsip_endpoints(output):
 
 
 def _parse_pjsip_identifies(output):
-    """Yield endpoint_ids that have an identify mapping."""
     for line in output.splitlines():
         s = line.strip()
         if not s.startswith("Identify:"):
@@ -455,20 +452,6 @@ def _parse_pjsip_identifies(output):
 
 
 def _parse_pjsip_aors(output):
-    """Yield (aor_id, status) tuples from `pjsip show aors` output.
-
-    Layout of a Contact line under an Aor:
-
-        Contact:  <aor>/<uri>   <hash> <Status>     <RTT>
-
-    There is ONE space between <hash> and <Status>, then ≥2 spaces
-    before <RTT>. Splitting on `\\s{2,}` previously fused <hash> and
-    <Status> into a single token, putting <RTT> at index 2 — so we
-    read the RTT number as the status and every contact came back
-    `offline`. The fix scans tokens for the first one matching a
-    known PJSIP contact-state prefix, which is robust to either
-    spacing.
-    """
     aors = {}
     current = None
     for line in output.splitlines():
@@ -487,9 +470,6 @@ def _parse_pjsip_aors(output):
             if "<Aor/Contact" in rest or "<Contact" in rest:
                 continue
             tokens = rest.split()
-            # Skip the first token (it's <aor>/<uri> and may contain
-            # subtokens like "avail" by coincidence — e.g. an IP that
-            # contains "245" wouldn't, but hostnames could).
             for tok in tokens[1:]:
                 tl = tok.lower()
                 for prefix in _CONTACT_STATE_PREFIXES:
@@ -565,13 +545,6 @@ def _status_feeder_loop(stop_event):
                 set(_parse_pjsip_identifies(id_proc.stdout))
                 if id_proc.returncode == 0 else set()
             )
-            # Build a broader "this AOR id is a trunk" set so the agents
-            # hash doesn't get polluted. We treat any AOR whose id also
-            # appears as a ps_endpoints id as a trunk (the agent-side
-            # AORs come from the WSS softphone registration path and
-            # typically have id == sip-username with no matching
-            # endpoint of the same id created by us; our trunks have
-            # id == endpoint id == aor id by construction).
             endpoint_ids = (
                 {ep for ep, _ in _parse_pjsip_endpoints(ep_proc.stdout)}
                 if ep_proc.returncode == 0 else set()
@@ -913,6 +886,30 @@ class Handler(BaseHTTPRequestHandler):
         self._send_204()
 
     def originate_call(self):
+        """Originate a call. Three shapes accepted:
+
+          A. Click-to-dial (the agent-hub dialpad's primary path):
+             { fromAgent, destination, trunkId }
+             → CLI: originate PJSIP/<fromAgent> application Dial \
+                    PJSIP/<destination>@<trunkId>,<timeout>,t
+             Asterisk rings the agent's PJSIP endpoint first; when they
+             answer, Dial(...) places the outbound leg through the
+             chosen trunk and bridges the two channels. The agent IS on
+             the call — this is the behaviour the dialpad UI promises.
+
+          B. Peer-to-peer (agent → agent):
+             { targetEndpoint }
+             → CLI: originate PJSIP/<targetEndpoint> extension <ext>@<ctx>
+             Rings the named endpoint, then drops the channel into the
+             extension/context.
+
+          C. Probe (no agent on the call; tests a trunk's reachability):
+             { destination, trunkId } without fromAgent
+             → CLI: originate PJSIP/<destination>@<trunkId> extension <ext>@<ctx>
+             Asterisk dials the destination via the trunk and lands the
+             answered leg in extension/context. Pre-existing behaviour;
+             kept for backwards compatibility.
+        """
         body = self._read_json_body()
         if body is None:
             return
@@ -923,13 +920,35 @@ class Handler(BaseHTTPRequestHandler):
         context = str(body.get("context") or DEFAULT_INBOUND_CONTEXT).strip()
         from_agent = str(body.get("fromAgent") or "").strip()
 
-        if target_endpoint:
+        # Shape A: click-to-dial. Highest priority because the dialpad
+        # supplies all three of (fromAgent, destination, trunkId).
+        click_to_dial = bool(from_agent and destination and trunk_id and not target_endpoint)
+
+        if click_to_dial:
+            if not _SAFE_ID.match(from_agent):
+                self._send_json(HTTPStatus.UNPROCESSABLE_ENTITY,
+                                {"error": "fromAgent format invalid"})
+                return
+            if not _DEST_RE.match(destination):
+                self._send_json(HTTPStatus.UNPROCESSABLE_ENTITY,
+                                {"error": "destination must be 1-64 chars: digits, + * #"})
+                return
+            if not _SAFE_ID.match(trunk_id):
+                self._send_json(HTTPStatus.UNPROCESSABLE_ENTITY,
+                                {"error": "trunkId must be 1-60 chars, alphanumerics + _ -"})
+                return
+            channel = f"PJSIP/{from_agent}"
+            mode = "click-to-dial"
+        elif target_endpoint:
+            # Shape B: peer-to-peer.
             if not _SAFE_ID.match(target_endpoint):
                 self._send_json(HTTPStatus.UNPROCESSABLE_ENTITY,
                                 {"error": "targetEndpoint must be 1-60 chars, alphanumerics + _ -"})
                 return
             channel = f"PJSIP/{target_endpoint}"
+            mode = "peer"
         else:
+            # Shape C: trunk probe (legacy / power-user).
             if not _DEST_RE.match(destination):
                 self._send_json(HTTPStatus.UNPROCESSABLE_ENTITY,
                                 {"error": "destination must be 1-64 chars: digits, + * #"})
@@ -939,15 +958,17 @@ class Handler(BaseHTTPRequestHandler):
                                 {"error": "trunkId must be 1-60 chars, alphanumerics + _ -"})
                 return
             channel = f"PJSIP/{destination}@{trunk_id}"
+            mode = "probe"
 
-        if not _EXT_RE.match(extension):
-            self._send_json(HTTPStatus.UNPROCESSABLE_ENTITY,
-                            {"error": "extension format invalid"})
-            return
-        if not _SAFE_ID.match(context):
-            self._send_json(HTTPStatus.UNPROCESSABLE_ENTITY,
-                            {"error": "context format invalid"})
-            return
+        if mode in ("peer", "probe"):
+            if not _EXT_RE.match(extension):
+                self._send_json(HTTPStatus.UNPROCESSABLE_ENTITY,
+                                {"error": "extension format invalid"})
+                return
+            if not _SAFE_ID.match(context):
+                self._send_json(HTTPStatus.UNPROCESSABLE_ENTITY,
+                                {"error": "context format invalid"})
+                return
         if from_agent and not _SAFE_ID.match(from_agent):
             self._send_json(HTTPStatus.UNPROCESSABLE_ENTITY,
                             {"error": "fromAgent format invalid"})
@@ -960,7 +981,17 @@ class Handler(BaseHTTPRequestHandler):
             })
             return
 
-        cli = f"originate {channel} extension {extension}@{context}"
+        if mode == "click-to-dial":
+            # Application form of `originate` so we can run Dial(...)
+            # against the trunk without needing channel variables (the
+            # CLI doesn't let us set those). 't' allows the callee to
+            # transfer.
+            dial_args = f"PJSIP/{destination}@{trunk_id},{CLICK_TO_DIAL_TIMEOUT},t"
+            cli = f"originate {channel} application Dial {dial_args}"
+            extension_reported = f"Dial({dial_args})"
+        else:
+            cli = f"originate {channel} extension {extension}@{context}"
+            extension_reported = f"{extension}@{context}"
 
         try:
             proc = subprocess.run(
@@ -980,15 +1011,16 @@ class Handler(BaseHTTPRequestHandler):
         out = (proc.stdout or "").strip()
         err = (proc.stderr or "").strip()
         log.info(
-            "originate %s rc=%d fromAgent=%r stdout=%r stderr=%r",
-            channel, proc.returncode, from_agent or "-", out[:200], err[:200],
+            "originate %s mode=%s rc=%d fromAgent=%r stdout=%r stderr=%r",
+            channel, mode, proc.returncode, from_agent or "-", out[:200], err[:200],
         )
         self._send_json(
             HTTPStatus.OK if ok else HTTPStatus.BAD_GATEWAY,
             {
                 "queued": ok,
+                "mode": mode,
                 "channel": channel,
-                "extension": f"{extension}@{context}",
+                "extension": extension_reported,
                 "fromAgent": from_agent or None,
                 "rc": proc.returncode,
                 "stdout": out,
