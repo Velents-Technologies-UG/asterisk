@@ -56,6 +56,9 @@ MAX_BODY_BYTES = 64 * 1024
 BEHIND_NAT = bool(os.environ.get("ASTERISK_EXTERNAL_IP", "").strip()) or \
     os.environ.get("ASTERISK_BEHIND_NAT", "").strip().lower() in ("1", "yes", "true")
 
+# Legacy in-memory trunk dict — kept only as a fallback when the DB is
+# unreachable. The canonical store is the sip_trunks Postgres table
+# (sip_store.list_trunks / get_trunk / upsert_trunk / delete_trunk).
 _trunks: dict[str, dict] = {}
 _lock = threading.RLock()
 
@@ -384,6 +387,19 @@ def _pjsip_upsert(row, password):
         f'"{callerid_source}" <{callerid_source}>' if callerid_source else ""
     )
 
+    # Trunk-side media encryption. The canonical sip_trunks shape uses
+    # 'none' for plain RTP; Asterisk's media_encryption column expects
+    # 'no'. Translate here so the writer stays canonical-aware. Empty
+    # / unset → 'no' (carrier default for everything we've onboarded;
+    # SDES has to be opted into explicitly).
+    media_enc_raw = (row.get("media_encryption") or "no").strip().lower()
+    if media_enc_raw in ("none", "off", "disabled", ""):
+        media_encryption_value = "no"
+    elif media_enc_raw in ("no", "sdes", "dtls"):
+        media_encryption_value = media_enc_raw
+    else:
+        media_encryption_value = "no"
+
     try:
         with _db_conn() as conn, conn.cursor() as cur:
             cur.execute("""
@@ -422,12 +438,14 @@ def _pjsip_upsert(row, password):
                         (id, transport, context, aors, auth, allow, dtmf_mode,
                          identify_by, disallow, outbound_auth,
                          from_user, from_domain, callerid,
+                         media_encryption,
                          rtp_symmetric, force_rport, rewrite_contact,
                          direct_media,
                          trust_id_outbound, send_pai, send_rpid)
                     VALUES (%s, %s, %s, %s, %s, %s, 'rfc4733',
                             %s, 'all', %s,
                             %s, %s, %s,
+                            %s,
                             'yes', 'yes', 'yes',
                             'no',
                             'yes', 'yes', 'yes')
@@ -442,6 +460,7 @@ def _pjsip_upsert(row, password):
                         from_user         = EXCLUDED.from_user,
                         from_domain       = EXCLUDED.from_domain,
                         callerid          = EXCLUDED.callerid,
+                        media_encryption  = EXCLUDED.media_encryption,
                         rtp_symmetric     = EXCLUDED.rtp_symmetric,
                         force_rport       = EXCLUDED.force_rport,
                         rewrite_contact   = EXCLUDED.rewrite_contact,
@@ -452,19 +471,22 @@ def _pjsip_upsert(row, password):
                 """, (row["id"], transport, context, row["id"], auth_id, allow,
                       identify_by, auth_id,
                       from_sip_user or None, from_domain_value or None,
-                      callerid_value or None))
+                      callerid_value or None,
+                      media_encryption_value))
             else:
                 cur.execute("""
                     INSERT INTO ps_endpoints
                         (id, transport, context, aors, auth, allow, dtmf_mode,
                          identify_by, disallow, outbound_auth,
                          from_user, from_domain, callerid,
+                         media_encryption,
                          rtp_symmetric, force_rport, rewrite_contact,
                          direct_media,
                          trust_id_outbound, send_pai, send_rpid)
                     VALUES (%s, %s, %s, %s, %s, %s, 'rfc4733',
                             %s, 'all', %s,
                             %s, %s, %s,
+                            %s,
                             'yes', 'yes', 'yes',
                             'no',
                             'yes', 'yes', 'yes')
@@ -479,6 +501,7 @@ def _pjsip_upsert(row, password):
                         from_user         = EXCLUDED.from_user,
                         from_domain       = EXCLUDED.from_domain,
                         callerid          = EXCLUDED.callerid,
+                        media_encryption  = EXCLUDED.media_encryption,
                         rtp_symmetric     = EXCLUDED.rtp_symmetric,
                         force_rport       = EXCLUDED.force_rport,
                         rewrite_contact   = EXCLUDED.rewrite_contact,
@@ -489,7 +512,8 @@ def _pjsip_upsert(row, password):
                 """, (row["id"], transport, context, row["id"], auth_id, allow,
                       identify_by, auth_id,
                       from_sip_user or None, from_domain_value or None,
-                      callerid_value or None))
+                      callerid_value or None,
+                      media_encryption_value))
 
             if register_enabled:
                 if row.get("enabled", True) and has_auth and client_uri:
@@ -948,182 +972,89 @@ class Handler(BaseHTTPRequestHandler):
         self._send_json(status, {"error": msg})
 
     def list_trunks(self):
-        with _lock:
-            items = [_to_row(t) for t in _trunks.values()]
-        items.sort(key=lambda r: r["id"])
+        if not self._require_store():
+            return
+        try:
+            items = sip_store.list_trunks(_db_conn)
+        except sip_store.StoreError as exc:
+            self._store_error(exc); return
         self._send_json(HTTPStatus.OK, {"items": items})
 
     def show_trunk(self, trunk_id):
-        with _lock:
-            t = _trunks.get(trunk_id)
-        if t is None:
-            self._send_json(HTTPStatus.NOT_FOUND, {"error": "trunk not found"})
+        if not self._require_store():
             return
-        self._send_json(HTTPStatus.OK, _to_row(t))
+        try:
+            self._send_json(HTTPStatus.OK, sip_store.get_trunk(_db_conn, trunk_id))
+        except sip_store.StoreError as exc:
+            self._store_error(exc)
 
     def create_trunk(self):
-        self._upsert_common(url_id=None)
+        self._trunk_upsert_common(None)
 
     def upsert_trunk_by_id(self, trunk_id):
-        self._upsert_common(url_id=trunk_id)
+        self._trunk_upsert_common(trunk_id)
 
-    def _upsert_common(self, url_id):
+    def _trunk_upsert_common(self, url_id):
+        if not self._require_store():
+            return
         body = self._read_json_body()
         if body is None:
             return
-        if url_id is not None:
-            body_id = body.get("id")
-            if body_id is None or body_id == "":
-                body["id"] = url_id
-            elif str(body_id) != url_id:
-                self._send_json(HTTPStatus.UNPROCESSABLE_ENTITY,
-                                {"error": "id in URL and body must match"})
-                return
-        try:
-            normalized = _validate_trunk_input(body)
-        except _ValidationError as exc:
-            self._send_json(HTTPStatus.UNPROCESSABLE_ENTITY, {"error": str(exc)})
+        if url_id is not None and body.get("id") and str(body["id"]) != url_id:
+            self._send_json(HTTPStatus.UNPROCESSABLE_ENTITY,
+                            {"error": "id in URL and body must match"})
             return
-
-        now = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
-        with _lock:
-            existing = _trunks.get(normalized["id"])
-            normalized["created_at"] = (existing or {}).get("created_at", now)
-            normalized["updated_at"] = now
-            password = normalized.pop("_password", None)
-            try:
-                _pjsip_upsert({**normalized, "username": normalized.get("username")}, password)
-            except _DbError as exc:
-                log.error("trunk %s pjsip write failed: %s", normalized["id"], exc)
-                self._send_json(HTTPStatus.BAD_GATEWAY, {"error": str(exc)})
-                return
-            normalized["_password"] = password
-            _trunks[normalized["id"]] = normalized
-
-        self._send_json(HTTPStatus.OK, _to_row(normalized))
+        try:
+            out = sip_store.upsert_trunk(_db_conn, body, _pjsip_upsert, url_id=url_id)
+        except sip_store.StoreError as exc:
+            self._store_error(exc); return
+        except _DbError as exc:
+            self._send_json(HTTPStatus.BAD_GATEWAY, {"error": str(exc)})
+            return
+        self._send_json(HTTPStatus.OK, out)
 
     def delete_trunk(self, trunk_id):
-        with _lock:
-            removed = _trunks.pop(trunk_id, None)
-        try:
-            _pjsip_delete(trunk_id)
-        except _DbError as exc:
-            log.error("trunk %s pjsip delete failed: %s", trunk_id, exc)
-            self._send_json(HTTPStatus.BAD_GATEWAY, {"error": str(exc)})
-            return
-        if removed is None and not _db_enabled():
-            self._send_json(HTTPStatus.NOT_FOUND, {"error": "trunk not found"})
-            return
-        self._send_204()
-
-    def list_providers(self):
         if not self._require_store():
             return
         try:
-            items = sip_store.list_providers(_db_conn)
-        except sip_store.StoreError as exc:
-            self._store_error(exc); return
-        self._send_json(HTTPStatus.OK, {"items": items})
-
-    def show_provider(self, provider_id):
-        if not self._require_store():
-            return
-        try:
-            self._send_json(HTTPStatus.OK, sip_store.get_provider(_db_conn, provider_id))
-        except sip_store.StoreError as exc:
-            self._store_error(exc)
-
-    def create_provider(self):
-        self._provider_upsert_common(None)
-
-    def upsert_provider_by_id(self, provider_id):
-        self._provider_upsert_common(provider_id)
-
-    def _provider_upsert_common(self, url_id):
-        if not self._require_store():
-            return
-        body = self._read_json_body()
-        if body is None:
-            return
-        if url_id is not None and body.get("id") and str(body["id"]) != url_id:
-            self._send_json(HTTPStatus.UNPROCESSABLE_ENTITY,
-                            {"error": "id in URL and body must match"})
-            return
-        try:
-            out = sip_store.upsert_provider(_db_conn, body, url_id=url_id)
-        except sip_store.StoreError as exc:
-            self._store_error(exc); return
-        self._send_json(HTTPStatus.OK, out)
-
-    def delete_provider(self, provider_id):
-        if not self._require_store():
-            return
-        try:
-            sip_store.delete_provider(_db_conn, provider_id)
-        except sip_store.StoreError as exc:
-            self._store_error(exc); return
-        except psycopg2.errors.ForeignKeyViolation:
-            self._send_json(HTTPStatus.CONFLICT,
-                            {"error": "provider has trunk accounts; delete those first"})
-            return
-        except psycopg2.Error as exc:
-            self._send_json(HTTPStatus.BAD_GATEWAY, {"error": f"db error: {exc}"})
-            return
-        self._send_204()
-
-    def list_accounts(self):
-        if not self._require_store():
-            return
-        try:
-            items = sip_store.list_accounts(_db_conn)
-        except sip_store.StoreError as exc:
-            self._store_error(exc); return
-        self._send_json(HTTPStatus.OK, {"items": items})
-
-    def show_account(self, account_id):
-        if not self._require_store():
-            return
-        try:
-            self._send_json(HTTPStatus.OK, sip_store.get_account(_db_conn, account_id))
-        except sip_store.StoreError as exc:
-            self._store_error(exc)
-
-    def create_account(self):
-        self._account_upsert_common(None)
-
-    def upsert_account_by_id(self, account_id):
-        self._account_upsert_common(account_id)
-
-    def _account_upsert_common(self, url_id):
-        if not self._require_store():
-            return
-        body = self._read_json_body()
-        if body is None:
-            return
-        if url_id is not None and body.get("id") and str(body["id"]) != url_id:
-            self._send_json(HTTPStatus.UNPROCESSABLE_ENTITY,
-                            {"error": "id in URL and body must match"})
-            return
-        try:
-            out = sip_store.upsert_account(_db_conn, body, _pjsip_upsert, url_id=url_id)
-        except sip_store.StoreError as exc:
-            self._store_error(exc); return
-        except _DbError as exc:
-            self._send_json(HTTPStatus.BAD_GATEWAY, {"error": str(exc)})
-            return
-        self._send_json(HTTPStatus.OK, out)
-
-    def delete_account(self, account_id):
-        if not self._require_store():
-            return
-        try:
-            sip_store.delete_account(_db_conn, account_id, _pjsip_delete)
+            sip_store.delete_trunk(_db_conn, trunk_id, _pjsip_delete)
         except sip_store.StoreError as exc:
             self._store_error(exc); return
         except _DbError as exc:
             self._send_json(HTTPStatus.BAD_GATEWAY, {"error": str(exc)})
             return
         self._send_204()
+
+    # ── legacy routes, kept only to point operators at the new one ──
+    # The provider+account split is the bug class the trunk rebuild
+    # removes. These routes (list/show/upsert/delete) all return 410
+    # Gone for one release; the next deploy can drop them entirely.
+
+    def _gone(self, _arg=None, *_rest):
+        self._send_json(
+            HTTPStatus.GONE,
+            {
+                "error": "endpoint removed; use /control/sip/trunks",
+                "replacement": "/control/sip/trunks",
+                "note": (
+                    "SIP trunks are now modeled as one flat carrier-credential "
+                    "row (name + address + protocol + mediaEncryption + "
+                    "authUsername + authPassword + numbers). The "
+                    "provider/account split has been collapsed."
+                ),
+            },
+        )
+
+    list_providers           = _gone
+    show_provider            = _gone
+    create_provider          = _gone
+    upsert_provider_by_id    = _gone
+    delete_provider          = _gone
+    list_accounts            = _gone
+    show_account             = _gone
+    create_account           = _gone
+    upsert_account_by_id     = _gone
+    delete_account           = _gone
 
     def originate_call(self):
         body = self._read_json_body()
