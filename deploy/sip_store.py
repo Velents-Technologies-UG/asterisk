@@ -1,27 +1,42 @@
 #!/usr/bin/env python3
 """
-SIP provider + trunk-account store.
+SIP trunk store.
 
-Owns two Postgres tables that sit next to Asterisk's PJSIP realtime
-tables (ps_*) in the same database:
+Owns one canonical Postgres table that sits next to Asterisk's PJSIP
+realtime tables (ps_*) in the same database:
 
-  sip_providers       — one row per carrier (innocalls, twilio, …).
-                        Captures the carrier-side SIP coordinates
-                        (server URI, transport, mode, carrier IP) and
-                        the policy decision register vs ip-trunk.
+  sip_trunks  — one row per SIP credential set the carrier hands us.
+                Modeled on the flat object shape carriers actually
+                ship to operators, e.g. innocalls:
 
-  sip_trunk_accounts  — one row per account we hold on a provider.
-                        Captures our identity (username, encrypted
-                        password, from_user, channel limit, …) and
-                        references its provider via provider_id.
+                    {
+                      "name": "innov2",
+                      "address": "cu622.sip.innocalls.net:50760",
+                      "numbers": ["622101"],
+                      "authUsername": "622101",
+                      "authPassword": "************",
+                      "protocol": "udp",
+                      "mediaEncryption": "none"
+                    }
 
-The agent-hub UI talks to this via the sidecar's /control/sip/providers
-and /control/sip/trunk-accounts routes. On account upsert, the sidecar
-joins provider + account and feeds the flat record to _pjsip_upsert
-from control_api.py, which is the same writer that has always handled
-ps_*. The IP-trunk branch (registerEnabled=False + carrierIp) was
-added in the parent commit and is the reason this refactor exists:
-mode is now a per-provider attribute, not a per-account flag.
+                One object = one usable SIP. Operators that hold
+                multiple SIPs (whether at the same carrier or different
+                carriers) get one row per SIP — there is no shared
+                "provider" parent. The earlier provider/account split
+                turned out to be a leaky abstraction: two SIPs at the
+                same carrier can live on different endpoints, different
+                transports, different media policies, so the "shared
+                parent" assumption silently routed REGISTERs at the
+                wrong endpoint for days.
+
+The agent-hub UI talks to this via the sidecar's /control/sip/trunks
+route. On upsert, the sidecar feeds the row to _pjsip_upsert from
+control_api.py — the same writer that has always handled ps_*.
+
+The old sip_providers / sip_trunk_accounts tables are kept on disk for
+one release as a migration source: bootstrap() reads them, collapses
+each (provider, account) pair into the new flat shape, and inserts
+into sip_trunks. After one deploy the old tables can be dropped.
 
 Bootstrap also patches the ps_endpoints schema if columns we depend on
 are missing — see _DDL_PS_ENDPOINTS_PATCH. This guards against the
@@ -75,8 +90,14 @@ _SAFE_PROVIDER_ID = re.compile(r"^[a-z0-9-]{1,40}$")
 # so users can call them 'inno-calls-saudi', 'TwilioMain', etc.
 _SAFE_ACCOUNT_ID = re.compile(r"^[a-zA-Z0-9_-]{1,60}$")
 
-_VALID_TRANSPORTS = {"udp", "tcp", "tls"}
-_VALID_MODES      = {"register", "ip-trunk"}
+_VALID_TRANSPORTS  = {"udp", "tcp", "tls"}
+_VALID_MEDIA       = {"none", "sdes"}
+_VALID_MODES       = {"register", "ip-trunk"}  # legacy provider table
+
+# Trunk ids slug from `name`. Permissive on case + underscore so users
+# can paste a carrier-given name like "InnoCalls_Saudi" or "innov2"
+# without trial-and-error renaming.
+_SAFE_TRUNK_ID = re.compile(r"^[a-zA-Z0-9_-]{1,60}$")
 
 
 class StoreError(RuntimeError):
@@ -88,6 +109,50 @@ class _NotFound(StoreError):
 
 
 # ── schema ─────────────────────────────────────
+
+# sip_trunks: canonical carrier-credential row. One row = one usable
+# SIP. `address` carries the host (and optional :port) the carrier told
+# us to talk to; `protocol` selects the PJSIP transport; `numbers` is
+# the DID list the carrier assigned to this account. `register=true`
+# means we authenticate with REGISTER; `register=false` means the
+# carrier identifies us by IP (carrier_ip becomes the match for
+# ps_identify). `media_encryption` defaults to 'none' because every
+# carrier we've onboarded ships SRTP off by default; SDES is opt-in.
+_DDL_TRUNKS = r"""
+CREATE TABLE IF NOT EXISTS sip_trunks (
+    id                     TEXT PRIMARY KEY,
+    name                   TEXT NOT NULL,
+    address                TEXT NOT NULL,
+    protocol               TEXT NOT NULL DEFAULT 'udp',
+    media_encryption       TEXT NOT NULL DEFAULT 'none',
+    auth_username          TEXT NOT NULL,
+    auth_password_enc      TEXT NOT NULL DEFAULT '',
+    numbers                TEXT[] NOT NULL DEFAULT '{}',
+    from_user              TEXT,
+    from_domain            TEXT,
+    realm                  TEXT,
+    register_enabled       BOOLEAN NOT NULL DEFAULT TRUE,
+    carrier_ip             INET,
+    channel_limit          INTEGER NOT NULL DEFAULT 50,
+    expiration_seconds     INTEGER NOT NULL DEFAULT 3600,
+    description            TEXT,
+    enabled                BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at             TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at             TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT sip_trunks_id_format
+        CHECK (id ~ '^[a-zA-Z0-9_-]{1,60}$'),
+    CONSTRAINT sip_trunks_protocol_valid
+        CHECK (protocol IN ('udp','tcp','tls')),
+    CONSTRAINT sip_trunks_media_valid
+        CHECK (media_encryption IN ('none','sdes')),
+    CONSTRAINT sip_trunks_channel_limit_range
+        CHECK (channel_limit BETWEEN 1 AND 1000),
+    CONSTRAINT sip_trunks_expiration_range
+        CHECK (expiration_seconds BETWEEN 60 AND 86400),
+    CONSTRAINT sip_trunks_ip_required_for_ip_trunk
+        CHECK (register_enabled OR carrier_ip IS NOT NULL)
+);
+"""
 
 _DDL_PROVIDERS = r"""
 CREATE TABLE IF NOT EXISTS sip_providers (
@@ -248,12 +313,34 @@ def bootstrap(db_conn_factory) -> None:
         return
     try:
         with db_conn_factory() as conn, conn.cursor() as cur:
+            # Legacy provider+account tables are kept for one release as
+            # a migration source. CREATE IF NOT EXISTS is idempotent;
+            # they're read-only from here on.
             cur.execute(_DDL_PROVIDERS)
             cur.execute(_DDL_ACCOUNTS)
+            # Canonical carrier-credential table.
+            cur.execute(_DDL_TRUNKS)
             cur.execute(_SEED_INNOCALLS)
-        log.info("sip_store.bootstrap: provider+account tables ensured + seeded")
+        log.info(
+            "sip_store.bootstrap: sip_trunks ensured + legacy provider/account "
+            "tables kept (read-only migration source)"
+        )
     except Exception as exc:
-        log.error("sip_store.bootstrap (providers/accounts) failed: %s", exc)
+        log.error("sip_store.bootstrap (trunks/providers/accounts) failed: %s", exc)
+
+    # Copy any (provider, account) pairs that haven't been migrated yet
+    # into sip_trunks. Idempotent: ON CONFLICT (id) DO NOTHING keeps
+    # operator edits made via the new API from being clobbered on
+    # restart. Logged separately so a migration error doesn't keep the
+    # ps_endpoints patch from running.
+    try:
+        n = migrate_legacy_to_trunks(db_conn_factory)
+        if n:
+            log.info(
+                "sip_store.bootstrap: migrated %d legacy account(s) into sip_trunks", n
+            )
+    except Exception as exc:
+        log.warning("sip_store.bootstrap (legacy→trunks migration) failed: %s", exc)
 
     # Apply each ALTER independently with autocommit so a single
     # already-present column (or a permission glitch) can't roll back
@@ -889,11 +976,474 @@ def delete_account(db_conn_factory, account_id: str, pjsip_delete) -> None:
         raise _NotFound(f"account {account_id!r} not found")
 
 
+# ── CRUD: sip_trunks (canonical) ─────────────────────
+
+# The single normalize+validate pass over a carrier-JSON-shaped body.
+# Accepts both the carrier-native keys (authUsername, authPassword,
+# mediaEncryption) and the UI-friendly snake_case the older legacy
+# routes used (auth_username, …) so a paste-from-JSON button can dump
+# the raw object straight through.
+def validate_trunk_input(body: dict, partial: bool = False) -> tuple[dict, Optional[str]]:
+    """Return (column->value, plaintext_password_or_None).
+
+    Same contract as validate_account_input: the password is returned
+    separately so we encrypt at write-time. partial=True relaxes the
+    'required' checks for PATCH-style updates.
+    """
+    def pick(*keys):
+        for k in keys:
+            if k in body:
+                return body.get(k)
+        return None
+
+    out: dict = {}
+
+    if not partial or pick("id", "name") is not None:
+        raw_id = _str_or_none(body.get("id")) or _str_or_none(body.get("name"))
+        if not raw_id:
+            raise StoreError("id (or name) is required")
+        slug = re.sub(r"[^a-zA-Z0-9_-]+", "-", raw_id).strip("-")
+        if not slug or not _SAFE_TRUNK_ID.match(slug):
+            raise StoreError(
+                "id slug must be 1-60 chars of a-z, A-Z, 0-9, '_' or '-'"
+            )
+        out["id"] = slug
+
+    if not partial or "name" in body:
+        name = _str_or_none(body.get("name")) or out.get("id")
+        if not name:
+            raise StoreError("name is required")
+        out["name"] = name
+
+    if not partial or "address" in body:
+        addr = _str_or_none(body.get("address"))
+        if not addr:
+            raise StoreError("address is required (host or host:port)")
+        # Strip a leading "sip:" / "sips:" if the operator pasted one —
+        # the carrier JSON ships bare host[:port], but UI / legacy
+        # surfaces may pass a full URI.
+        if addr.startswith("sip:") or addr.startswith("sips:"):
+            addr = addr.split(":", 1)[1]
+        out["address"] = addr
+
+    if not partial or "protocol" in body:
+        proto = (pick("protocol", "transport") or "udp").lower()
+        if proto not in _VALID_TRANSPORTS:
+            raise StoreError(
+                f"protocol must be one of: {sorted(_VALID_TRANSPORTS)}"
+            )
+        out["protocol"] = proto
+
+    if "mediaEncryption" in body or "media_encryption" in body or not partial:
+        me = (pick("mediaEncryption", "media_encryption") or "none").lower()
+        # Asterisk accepts "no" as a synonym for "none" on the
+        # media_encryption column; normalize here so DB stays canonical.
+        if me in ("no", "off", "disabled"):
+            me = "none"
+        if me not in _VALID_MEDIA:
+            raise StoreError(
+                f"mediaEncryption must be one of: {sorted(_VALID_MEDIA)}"
+            )
+        out["media_encryption"] = me
+
+    if not partial or pick("authUsername", "auth_username", "username") is not None:
+        au = _str_or_none(pick("authUsername", "auth_username", "username"))
+        if not au:
+            raise StoreError("authUsername is required")
+        out["auth_username"] = au
+
+    if "numbers" in body:
+        numbers = body.get("numbers")
+        if numbers is None:
+            numbers = []
+        if not isinstance(numbers, list):
+            raise StoreError("numbers must be an array of strings")
+        norm = []
+        for n in numbers:
+            s = _str_or_none(n)
+            if s:
+                norm.append(s)
+        out["numbers"] = norm
+
+    if "fromUser" in body or "from_user" in body:
+        out["from_user"] = _str_or_none(pick("fromUser", "from_user"))
+    if "fromDomain" in body or "from_domain" in body:
+        out["from_domain"] = _str_or_none(pick("fromDomain", "from_domain"))
+    if "realm" in body:
+        out["realm"] = _str_or_none(body.get("realm"))
+    if "description" in body:
+        out["description"] = _str_or_none(body.get("description"))
+
+    if "registerEnabled" in body or "register_enabled" in body or not partial:
+        v = pick("registerEnabled", "register_enabled")
+        if v is None:
+            v = True
+        if not isinstance(v, bool):
+            raise StoreError("registerEnabled must be a boolean")
+        out["register_enabled"] = v
+
+    if "carrierIp" in body or "carrier_ip" in body:
+        out["carrier_ip"] = _str_or_none(pick("carrierIp", "carrier_ip"))
+
+    if "channelLimit" in body or "channel_limit" in body or not partial:
+        try:
+            cl = int(pick("channelLimit", "channel_limit") or 50)
+        except (TypeError, ValueError):
+            raise StoreError("channelLimit must be an integer")
+        if not 1 <= cl <= 1000:
+            raise StoreError("channelLimit must be 1..1000")
+        out["channel_limit"] = cl
+
+    if "expirationSeconds" in body or "expiration_seconds" in body \
+            or "expiration" in body or not partial:
+        v = pick("expirationSeconds", "expiration_seconds", "expiration")
+        if v is None:
+            v = 3600
+        try:
+            es = int(v)
+        except (TypeError, ValueError):
+            raise StoreError("expirationSeconds must be an integer")
+        if not 60 <= es <= 86400:
+            raise StoreError("expirationSeconds must be 60..86400")
+        out["expiration_seconds"] = es
+
+    if "enabled" in body:
+        out["enabled"] = _bool_or_default(body.get("enabled"), True)
+
+    final_register = out.get("register_enabled", True)
+    final_ip = out.get("carrier_ip")
+    if not final_register and not final_ip and not partial:
+        raise StoreError("carrierIp is required when registerEnabled is false")
+
+    pw_field = pick("authPassword", "auth_password", "password")
+    plaintext: Optional[str] = None
+    if pw_field is not None:
+        plaintext = str(pw_field)
+        if not partial and not plaintext:
+            raise StoreError("authPassword is required for a new trunk")
+
+    return out, plaintext
+
+
+_TRUNK_COLUMNS = (
+    "id", "name", "address", "protocol", "media_encryption",
+    "auth_username", "auth_password_enc", "numbers",
+    "from_user", "from_domain", "realm",
+    "register_enabled", "carrier_ip",
+    "channel_limit", "expiration_seconds",
+    "description", "enabled", "created_at", "updated_at",
+)
+
+
+def _row_to_trunk(row) -> dict:
+    """Cast a DictRow into the API shape (carrier-JSON keys, no ciphertext)."""
+    carrier_ip = row["carrier_ip"]
+    return {
+        "id":               row["id"],
+        "name":             row["name"],
+        "address":          row["address"],
+        "protocol":         row["protocol"],
+        "mediaEncryption":  row["media_encryption"],
+        "authUsername":     row["auth_username"],
+        "hasPassword":      bool(row["auth_password_enc"]),
+        "numbers":          list(row["numbers"] or []),
+        "fromUser":         row["from_user"],
+        "fromDomain":       row["from_domain"],
+        "realm":            row["realm"],
+        "registerEnabled":  bool(row["register_enabled"]),
+        "carrierIp":        str(carrier_ip) if carrier_ip is not None else None,
+        "channelLimit":     row["channel_limit"],
+        "expirationSeconds": row["expiration_seconds"],
+        "description":      row["description"],
+        "enabled":          bool(row["enabled"]),
+        "createdAt":        row["created_at"].isoformat() if row["created_at"] else None,
+        "updatedAt":        row["updated_at"].isoformat() if row["updated_at"] else None,
+    }
+
+
+def list_trunks(db_conn_factory) -> list[dict]:
+    with db_conn_factory() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            cur.execute(
+                f"SELECT {', '.join(_TRUNK_COLUMNS)} "
+                "FROM sip_trunks ORDER BY name, id"
+            )
+            return [_row_to_trunk(r) for r in cur.fetchall()]
+
+
+def get_trunk(db_conn_factory, trunk_id: str) -> dict:
+    with db_conn_factory() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            cur.execute(
+                f"SELECT {', '.join(_TRUNK_COLUMNS)} "
+                "FROM sip_trunks WHERE id = %s",
+                (trunk_id,),
+            )
+            row = cur.fetchone()
+            if not row:
+                raise _NotFound(f"trunk {trunk_id!r} not found")
+            return _row_to_trunk(row)
+
+
+def _trunk_to_pjsip_row(trunk: dict, plaintext_password: str) -> dict:
+    """Project a canonical trunk into the flat row shape that
+    control_api._pjsip_upsert consumes. Defaults that depend on the
+    address (host, port, from_domain) are derived here so the writer
+    stays carrier-agnostic.
+    """
+    host = (trunk["address"] or "").split(":", 1)[0]
+    # Build the server URI from address + transport so _pick_transport
+    # in control_api falls through to the explicit transport we pass.
+    server_uri = f"sip:{trunk['address']}"
+    numbers = trunk.get("numbers") or []
+    # callerid is built by control_api from `from_user`; the carrier
+    # expects the DID. If the operator didn't override, the first
+    # assigned number is the DID; absent any number, fall back to the
+    # auth username so we at least don't go out "Anonymous".
+    from_user = trunk.get("from_user") or (numbers[0] if numbers else None) \
+        or trunk["auth_username"]
+    register_enabled = bool(trunk.get("register_enabled", True))
+    carrier_ip = trunk.get("carrier_ip")
+    return {
+        "id":               trunk["id"],
+        "display_name":     trunk["name"],
+        "server_uri":       server_uri,
+        "username":         trunk["auth_username"],
+        "channel_limit":    trunk["channel_limit"],
+        "enabled":          bool(trunk.get("enabled", True)),
+        "transport":        trunk["protocol"],
+        "context":          None,
+        "client_uri":       None,
+        "from_user":        from_user,
+        "from_domain":      trunk.get("from_domain") or host,
+        "expiration":       trunk["expiration_seconds"],
+        "allow":            None,
+        "outbound_auth":    None,
+        "identify_by":      None,
+        "register_enabled": register_enabled,
+        "carrier_ip":       carrier_ip if not register_enabled else None,
+        # Carried through to ps_endpoints.media_encryption. 'none' means
+        # plain RTP; 'sdes' means SDES-SRTP. _pjsip_upsert maps 'none'
+        # to the Asterisk-native 'no' on write.
+        "media_encryption": trunk.get("media_encryption", "none"),
+    }
+
+
+def upsert_trunk(
+    db_conn_factory,
+    body: dict,
+    pjsip_upsert,
+    url_id: Optional[str] = None,
+) -> dict:
+    """Validate + persist the trunk row, then push it through pjsip_upsert.
+
+    pjsip_upsert is a callable matching control_api._pjsip_upsert's
+    (flat_row_dict, plaintext_password) signature. Decoupled here so
+    this module is unit-testable without importing control_api.
+    """
+    if url_id and "id" not in body and "name" not in body:
+        body = {**body, "id": url_id}
+    cols, plaintext = validate_trunk_input(body, partial=False)
+
+    # If no password was supplied, reuse the existing ciphertext (PATCH
+    # semantics — the UI shouldn't have to re-enter the password to
+    # rename a trunk).
+    if plaintext is None:
+        try:
+            existing_view = get_trunk(db_conn_factory, cols["id"])
+        except _NotFound:
+            raise StoreError("authPassword is required for a new trunk")
+        with db_conn_factory() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT auth_password_enc FROM sip_trunks WHERE id = %s",
+                (cols["id"],),
+            )
+            r = cur.fetchone()
+            ciphertext = r[0] if r else ""
+        plaintext = decrypt_password(ciphertext)
+        _ = existing_view
+
+    ciphertext = encrypt_password(plaintext)
+
+    with db_conn_factory() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO sip_trunks
+                    (id, name, address, protocol, media_encryption,
+                     auth_username, auth_password_enc, numbers,
+                     from_user, from_domain, realm,
+                     register_enabled, carrier_ip,
+                     channel_limit, expiration_seconds,
+                     description, enabled, updated_at)
+                VALUES (%(id)s, %(name)s, %(address)s, %(protocol)s,
+                        %(media_encryption)s, %(auth_username)s,
+                        %(auth_password_enc)s, %(numbers)s,
+                        %(from_user)s, %(from_domain)s, %(realm)s,
+                        %(register_enabled)s, %(carrier_ip)s,
+                        %(channel_limit)s, %(expiration_seconds)s,
+                        %(description)s, %(enabled)s, NOW())
+                ON CONFLICT (id) DO UPDATE SET
+                    name               = EXCLUDED.name,
+                    address            = EXCLUDED.address,
+                    protocol           = EXCLUDED.protocol,
+                    media_encryption   = EXCLUDED.media_encryption,
+                    auth_username      = EXCLUDED.auth_username,
+                    auth_password_enc  = EXCLUDED.auth_password_enc,
+                    numbers            = EXCLUDED.numbers,
+                    from_user          = EXCLUDED.from_user,
+                    from_domain        = EXCLUDED.from_domain,
+                    realm              = EXCLUDED.realm,
+                    register_enabled   = EXCLUDED.register_enabled,
+                    carrier_ip         = EXCLUDED.carrier_ip,
+                    channel_limit      = EXCLUDED.channel_limit,
+                    expiration_seconds = EXCLUDED.expiration_seconds,
+                    description        = EXCLUDED.description,
+                    enabled            = EXCLUDED.enabled,
+                    updated_at         = NOW()
+                """,
+                {
+                    "id":                 cols["id"],
+                    "name":               cols["name"],
+                    "address":            cols["address"],
+                    "protocol":           cols["protocol"],
+                    "media_encryption":   cols["media_encryption"],
+                    "auth_username":      cols["auth_username"],
+                    "auth_password_enc":  ciphertext,
+                    "numbers":            cols.get("numbers", []),
+                    "from_user":          cols.get("from_user"),
+                    "from_domain":        cols.get("from_domain"),
+                    "realm":              cols.get("realm"),
+                    "register_enabled":   cols.get("register_enabled", True),
+                    "carrier_ip":         cols.get("carrier_ip"),
+                    "channel_limit":      cols["channel_limit"],
+                    "expiration_seconds": cols["expiration_seconds"],
+                    "description":        cols.get("description"),
+                    "enabled":            cols.get("enabled", True),
+                },
+            )
+
+    view = get_trunk(db_conn_factory, cols["id"])
+    pjsip_row = _trunk_to_pjsip_row(view, plaintext)
+    pjsip_upsert(pjsip_row, plaintext)
+    return view
+
+
+def delete_trunk(db_conn_factory, trunk_id: str, pjsip_delete) -> None:
+    with db_conn_factory() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM sip_trunks WHERE id = %s", (trunk_id,))
+            removed = cur.rowcount > 0
+    pjsip_delete(trunk_id)
+    if not removed:
+        raise _NotFound(f"trunk {trunk_id!r} not found")
+
+
+# ── one-shot migration: legacy provider+account → sip_trunks ─────
+
+def migrate_legacy_to_trunks(db_conn_factory) -> int:
+    """Copy any (provider, account) pairs not yet present in sip_trunks.
+
+    Returns the number of rows inserted. Idempotent: rows already in
+    sip_trunks are left untouched. Skips silently if the legacy tables
+    don't exist (fresh deploy on the new schema).
+    """
+    if not HAS_PSYCOPG2:
+        return 0
+    inserted = 0
+    with db_conn_factory() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            try:
+                cur.execute("""
+                    SELECT a.id                AS account_id,
+                           a.display_name      AS display_name,
+                           a.username          AS username,
+                           a.password_enc      AS password_enc,
+                           a.from_user         AS from_user,
+                           a.from_domain       AS from_domain,
+                           a.channel_limit     AS channel_limit,
+                           a.expiration_seconds AS expiration_seconds,
+                           a.description       AS description,
+                           a.enabled           AS account_enabled,
+                           p.server_uri        AS server_uri,
+                           p.transport         AS transport,
+                           p.mode              AS mode,
+                           p.carrier_ip        AS carrier_ip,
+                           p.default_from_domain AS default_from_domain,
+                           p.default_realm     AS default_realm,
+                           p.enabled           AS provider_enabled
+                    FROM sip_trunk_accounts a
+                    JOIN sip_providers p ON p.id = a.provider_id
+                """)
+                legacy = cur.fetchall()
+            except psycopg2.Error:
+                # Legacy tables don't exist — fresh deploy.
+                return 0
+
+            for r in legacy:
+                # The legacy server_uri may be sip:host[:port] or just
+                # host[:port]; strip the scheme for the new shape.
+                addr = (r["server_uri"] or "").strip()
+                if addr.startswith("sip:") or addr.startswith("sips:"):
+                    addr = addr.split(":", 1)[1]
+                if not addr:
+                    log.warning(
+                        "legacy account %s has no server_uri on its provider; skipping",
+                        r["account_id"],
+                    )
+                    continue
+                cur.execute(
+                    """
+                    INSERT INTO sip_trunks
+                        (id, name, address, protocol, media_encryption,
+                         auth_username, auth_password_enc, numbers,
+                         from_user, from_domain, realm,
+                         register_enabled, carrier_ip,
+                         channel_limit, expiration_seconds,
+                         description, enabled)
+                    VALUES (%s, %s, %s, %s, 'none',
+                            %s, %s, '{}',
+                            %s, %s, %s,
+                            %s, %s,
+                            %s, %s,
+                            %s, %s)
+                    ON CONFLICT (id) DO NOTHING
+                    """,
+                    (
+                        r["account_id"],
+                        r["display_name"] or r["account_id"],
+                        addr,
+                        r["transport"] or "udp",
+                        r["username"],
+                        r["password_enc"] or "",
+                        r["from_user"],
+                        r["from_domain"] or r["default_from_domain"],
+                        r["default_realm"],
+                        (r["mode"] or "register") == "register",
+                        str(r["carrier_ip"]) if r["carrier_ip"] is not None else None,
+                        r["channel_limit"] or 50,
+                        r["expiration_seconds"] or 3600,
+                        r["description"],
+                        bool(r["account_enabled"]) and bool(r["provider_enabled"]),
+                    ),
+                )
+                inserted += cur.rowcount
+    return inserted
+
+
 __all__ = [
     "StoreError",
     "bootstrap",
     "encrypt_password",
     "decrypt_password",
+    # canonical trunk API
+    "list_trunks",
+    "get_trunk",
+    "upsert_trunk",
+    "delete_trunk",
+    "validate_trunk_input",
+    "migrate_legacy_to_trunks",
+    # legacy (read-only, kept for migration window)
     "list_providers",
     "get_provider",
     "upsert_provider",
