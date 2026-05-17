@@ -4,6 +4,7 @@
 import json
 import os
 import re
+import secrets
 import shutil
 import signal
 import socket
@@ -505,6 +506,105 @@ def _pjsip_delete(trunk_id):
     _reload_res_pjsip_async()
 
 
+def _provision_agent(agent_id, display_name, context):
+    """Create or rotate a per-agent WebRTC PJSIP endpoint.
+
+    The deployed call-engine is this Python sidecar (Dockerfile.prod
+    COPYs deploy/control_api.py to /usr/local/bin/control-api). The
+    endpoint id is hard-coded to `staff_<agentId>` because:
+
+      - The [from-agents] dialplan dials PJSIP/staff_${EXTEN:6} when an
+        agent is queue-dispatched.
+      - The 'outbound_click' Stasis handler matches ^staff_(\\d+)$ on
+        CHANNEL(endpoint) to identify the calling staff member.
+
+    A divergence in the prefix would break click-to-dial silently. The
+    column set and defaults are ported from
+    agent-hub/services/agenthub-call-engine/src/sip-store.js
+    AgentSipStore.provisionAgent — the Node call-engine the team
+    pivoted away from.
+
+    Context defaults to `from-wss-agents-out` because that's the
+    dialplan context that runs the outbound rule pipeline (Stasis →
+    trunk leg) for every dialed number; `from-agents` only matched
+    queue-dispatched inbound and made softphone dial-out a no-op.
+    """
+    if not _db_enabled():
+        raise _DbError("DATABASE_URL not configured")
+    pjsip_id = f"staff_{agent_id}"
+    ctx = context or "from-wss-agents-out"
+    display = display_name or f"Staff {agent_id}"
+    # 24 random bytes → 32-char urlsafe base64 (no padding). Matches the
+    # Node version's crypto.randomBytes(24).toString('base64url').
+    password = secrets.token_urlsafe(24)
+    callerid = f'"{display}" <{pjsip_id}>'
+
+    try:
+        with _db_conn() as conn, conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO ps_aors
+                    (id, max_contacts, remove_existing, qualify_frequency, support_path)
+                VALUES (%s, 1, 'yes', 60, 'yes')
+                ON CONFLICT (id) DO UPDATE SET
+                    max_contacts      = EXCLUDED.max_contacts,
+                    remove_existing   = EXCLUDED.remove_existing,
+                    qualify_frequency = EXCLUDED.qualify_frequency,
+                    support_path      = EXCLUDED.support_path
+            """, (pjsip_id,))
+
+            cur.execute("""
+                INSERT INTO ps_auths
+                    (id, auth_type, username, password, realm)
+                VALUES (%s, 'userpass', %s, %s, %s)
+                ON CONFLICT (id) DO UPDATE SET
+                    auth_type = EXCLUDED.auth_type,
+                    username  = EXCLUDED.username,
+                    password  = EXCLUDED.password,
+                    realm     = EXCLUDED.realm
+            """, (pjsip_id, pjsip_id, password, display))
+
+            cur.execute("""
+                INSERT INTO ps_endpoints (
+                    id, transport, aors, auth, context,
+                    disallow, allow, callerid,
+                    direct_media, ice_support, use_avpf, rtcp_mux,
+                    media_encryption, dtls_verify, dtls_setup,
+                    dtls_auto_generate_cert,
+                    rtp_symmetric, force_rport, rewrite_contact,
+                    webrtc, allow_subscribe, send_pai,
+                    agent_id
+                )
+                VALUES (
+                    %s, 'transport-wss', %s, %s, %s,
+                    'all', 'opus,alaw', %s,
+                    'no', 'yes', 'yes', 'yes',
+                    'dtls', 'fingerprint', 'actpass',
+                    'yes',
+                    'yes', 'yes', 'yes',
+                    'yes', 'yes', 'yes',
+                    %s
+                )
+                ON CONFLICT (id) DO UPDATE SET
+                    transport = EXCLUDED.transport,
+                    aors      = EXCLUDED.aors,
+                    auth      = EXCLUDED.auth,
+                    context   = EXCLUDED.context,
+                    disallow  = EXCLUDED.disallow,
+                    allow     = EXCLUDED.allow,
+                    callerid  = EXCLUDED.callerid,
+                    agent_id  = EXCLUDED.agent_id
+            """, (pjsip_id, pjsip_id, pjsip_id, ctx, callerid, agent_id))
+    except psycopg2.Error as exc:
+        raise _DbError(f"agent provisioning failed: {exc}") from exc
+
+    # Make the rotated password / new endpoint visible to res_pjsip now
+    # rather than on the next registration cycle. The softphone widget
+    # immediately REGISTERs after the credentials response, so without
+    # this reload the first REGISTER would hit a stale auth row.
+    _reload_res_pjsip_async()
+    return {"username": pjsip_id, "password": password}
+
+
 def _server_uri_host(server_uri):
     s = server_uri.replace("sips:", "").replace("sip:", "")
     if "@" in s:
@@ -693,6 +793,8 @@ _ROUTES = [
     ("PUT",    re.compile(r"^/control/sip/trunk-accounts/([^/]+)$"), "upsert_account_by_id"),
     ("DELETE", re.compile(r"^/control/sip/trunk-accounts/([^/]+)$"), "delete_account"),
     ("POST",   re.compile(r"^/control/sip/originate/?$"),    "originate_call"),
+    ("POST",   re.compile(r"^/control/sip/agents/([^/]+)/credentials/?$"),
+                                                             "provision_agent_credentials"),
     ("POST",   re.compile(r"^/control/asterisk/reload/?$"),  "reload_asterisk"),
 ]
 
@@ -1094,6 +1196,33 @@ class Handler(BaseHTTPRequestHandler):
                 "stderr": err,
             },
         )
+
+    def provision_agent_credentials(self, agent_id):
+        body = self._read_json_body()
+        if body is None:
+            return
+        if not _SAFE_ID.match(agent_id):
+            self._send_json(HTTPStatus.UNPROCESSABLE_ENTITY,
+                            {"error": "agentId must be 1-60 chars, alphanumerics + _ -"})
+            return
+        if not _db_enabled():
+            self._send_json(HTTPStatus.SERVICE_UNAVAILABLE,
+                            {"error": "DATABASE_URL not configured"})
+            return
+        display_name = str(body.get("displayName") or "").strip()
+        context = str(body.get("context") or "").strip()
+        if context and not _SAFE_ID.match(context):
+            self._send_json(HTTPStatus.UNPROCESSABLE_ENTITY,
+                            {"error": "context format invalid"})
+            return
+        try:
+            result = _provision_agent(agent_id, display_name, context or None)
+        except _DbError as exc:
+            log.error("agent %s provision failed: %s", agent_id, exc)
+            self._send_json(HTTPStatus.BAD_GATEWAY, {"error": str(exc)})
+            return
+        log.info("agent %s provisioned: endpoint=%s", agent_id, result["username"])
+        self._send_json(HTTPStatus.OK, result)
 
     def reload_asterisk(self):
         body = self._read_json_body()

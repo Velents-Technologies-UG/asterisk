@@ -64,7 +64,7 @@ except ImportError:
 
 log = logging.getLogger("control-api.sip-store")
 
-# ── identifiers ────────────────────────────────────────
+# ── identifiers ──────────────────────────────────
 
 # Provider ids are lowercase + digits + dash (mirrors how we slug them
 # in UI URLs). 1-40 chars keeps room for things like 'innocalls-eu'.
@@ -87,7 +87,7 @@ class _NotFound(StoreError):
     pass
 
 
-# ── schema ────────────────────────────────────────────
+# ── schema ─────────────────────────────────────
 
 _DDL_PROVIDERS = r"""
 CREATE TABLE IF NOT EXISTS sip_providers (
@@ -141,8 +141,8 @@ CREATE INDEX IF NOT EXISTS sip_trunk_accounts_provider_id_idx
 """
 
 # Patches the standard PJSIP realtime ps_endpoints table to add columns
-# our two writers (control_api._pjsip_upsert for trunks, call-engine
-# AgentSipStore.provisionAgent for per-agent WebRTC endpoints) populate.
+# our two writers (control_api._pjsip_upsert for trunks, control_api.
+# _provision_agent for per-agent WebRTC endpoints) populate.
 # ADD COLUMN IF NOT EXISTS is idempotent on a fresh contrib schema or
 # a hand-rolled subset. Asterisk's full ps_endpoints schema ships >40
 # columns; the ones below cover both the trunk-side fields and the
@@ -151,8 +151,8 @@ CREATE INDEX IF NOT EXISTS sip_trunk_accounts_provider_id_idx
 #
 #   - Trunk side: outbound INVITEs go out anonymous / no PAI, carrier
 #     returns 403 Forbidden.
-#   - Agent side: AgentSipStore.provisionAgent throws "column XXX does
-#     not exist", the /api/agents/<id>/sip-credentials endpoint 500s,
+#   - Agent side: _provision_agent throws "column XXX does not exist",
+#     the /control/sip/agents/<id>/credentials endpoint 500s,
 #     the browser softphone never registers, the dialpad does nothing.
 #
 # Setting ALL these columns to nullable VARCHAR(3) (for yes/no flags)
@@ -171,7 +171,7 @@ ALTER TABLE ps_endpoints ADD COLUMN IF NOT EXISTS rewrite_contact          VARCH
 ALTER TABLE ps_endpoints ADD COLUMN IF NOT EXISTS rtp_symmetric            VARCHAR(3);
 ALTER TABLE ps_endpoints ADD COLUMN IF NOT EXISTS force_rport              VARCHAR(3);
 
--- Per-agent WebRTC columns (AgentSipStore.provisionAgent writes these)
+-- Per-agent WebRTC columns (control_api._provision_agent writes these)
 ALTER TABLE ps_endpoints ADD COLUMN IF NOT EXISTS ice_support              VARCHAR(3);
 ALTER TABLE ps_endpoints ADD COLUMN IF NOT EXISTS use_avpf                 VARCHAR(3);
 ALTER TABLE ps_endpoints ADD COLUMN IF NOT EXISTS rtcp_mux                 VARCHAR(3);
@@ -189,6 +189,19 @@ ALTER TABLE ps_endpoints ADD COLUMN IF NOT EXISTS agent_id                 VARCH
 -- Updated_at is used by both writers' ON CONFLICT clauses. Asterisk
 -- doesn't care about it but realtime won't error if it exists.
 ALTER TABLE ps_endpoints ADD COLUMN IF NOT EXISTS updated_at               TIMESTAMPTZ;
+"""
+
+# ps_aors columns the per-agent WebRTC provisioning path writes.
+# remove_existing makes a fresh REGISTER from a refreshed softphone
+# replace the stale contact instead of leaving two on the same AOR
+# (would otherwise cause click-to-dial to dial the wrong WebSocket).
+# support_path advertises the Path header so the softphone can
+# register through a proxy. Both are standard Asterisk 22 ps_aors
+# columns; the stripped-schema deploys that lack the ps_endpoints
+# carrier-compat columns generally also lack these.
+_DDL_PS_AORS_PATCH = r"""
+ALTER TABLE ps_aors ADD COLUMN IF NOT EXISTS remove_existing VARCHAR(3);
+ALTER TABLE ps_aors ADD COLUMN IF NOT EXISTS support_path    VARCHAR(3);
 """
 
 # Seed the one provider we actively need so the UI has a selectable
@@ -274,8 +287,42 @@ def bootstrap(db_conn_factory) -> None:
             exc,
         )
 
+    # Same idempotent / autocommit pattern, isolated so a ps_aors
+    # permission issue can't break the rest of bootstrap. Without
+    # remove_existing / support_path the agent-provisioning INSERT in
+    # control_api._provision_agent fails with "column does not exist"
+    # and the softphone never registers.
+    try:
+        conn = db_conn_factory()
+        try:
+            conn.autocommit = True
+            with conn.cursor() as cur:
+                for stmt in _DDL_PS_AORS_PATCH.split(";"):
+                    s = stmt.strip()
+                    if not s or s.startswith("--"):
+                        continue
+                    try:
+                        cur.execute(s)
+                    except Exception as inner_exc:
+                        log.warning(
+                            "sip_store.bootstrap (ps_aors patch stmt %r): %s",
+                            s[:80], inner_exc,
+                        )
+        finally:
+            conn.close()
+        log.info(
+            "sip_store.bootstrap: ps_aors schema patched (remove_existing + support_path)"
+        )
+    except Exception as exc:
+        log.warning(
+            "sip_store.bootstrap (ps_aors patch) failed: %s — "
+            "agent softphone provisioning may 500 until DevOps adds "
+            "remove_existing/support_path to ps_aors",
+            exc,
+        )
 
-# ── crypto ───────────────────────────────────────────
+
+# ── crypto ────────────────────────────────────
 
 def _key_bytes() -> bytes:
     """Resolve the 32-byte AES key from the TRUNK_SECRET_KEY env var.
@@ -362,7 +409,7 @@ def decrypt_password(ciphertext: str) -> str:
     return pt.decode("utf-8")
 
 
-# ── validation ────────────────────────────────────────
+# ── validation ──────────────────────────────────
 
 def _str_or_none(v) -> Optional[str]:
     if v is None:
@@ -528,7 +575,7 @@ def validate_account_input(body: dict, partial: bool = False) -> tuple[dict, Opt
     return out, plaintext
 
 
-# ── CRUD: providers ───────────────────────────────────
+# ── CRUD: providers ────────────────────────────────
 
 _PROVIDER_COLUMNS = (
     "id", "display_name", "description", "server_uri", "transport",
@@ -631,7 +678,7 @@ def delete_provider(db_conn_factory, provider_id: str) -> None:
             raise _NotFound(f"provider {provider_id!r} not found")
 
 
-# ── CRUD: trunk accounts ──────────────────────────────
+# ── CRUD: trunk accounts ─────────────────────────────
 
 _ACCOUNT_SELECT = """
 SELECT
