@@ -352,9 +352,26 @@ def _pjsip_upsert(row, password):
     #   - send_pai = yes emits a P-Asserted-Identity header with the
     #     DID. Carriers validate this against the registered account.
     #
+    #   - send_rpid = yes emits a Remote-Party-ID header in parallel
+    #     with PAI. Some wholesale SBCs (innocalls observed) don't honor
+    #     PAI on its own and 403 the INVITE — RPID is the legacy header
+    #     they fall back to. Cheap to send both; carriers ignore what
+    #     they don't recognise.
+    #
     #   - direct_media = no keeps RTP relayed through Asterisk. With
     #     direct_media = yes the carrier and the WebRTC agent try to
     #     exchange RTP peer-to-peer; the call answers but has no audio.
+    #
+    #   - rewrite_contact = yes makes asterisk rewrite the registered
+    #     Contact URI to whatever it actually saw on the wire (after
+    #     NAT). Without this the carrier sometimes routes dialog-internal
+    #     requests (re-INVITE, BYE) back to the pod's private IP and the
+    #     call appears to hang.
+    #
+    #   - rtp_symmetric / force_rport = yes are required whenever
+    #     asterisk is behind any NAT or load balancer — i.e. nearly
+    #     always in a Kubernetes deployment. No-op when there's truly
+    #     no NAT, so safe to set unconditionally.
     from_sip_user = (
         row.get("from_sip_user")
         or row.get("from_user_override")
@@ -389,19 +406,31 @@ def _pjsip_upsert(row, password):
             else:
                 cur.execute("DELETE FROM ps_auths WHERE id = %s", (_auth_id_for(row["id"]),))
 
+            # Both NAT / non-NAT branches now write the SAME column set
+            # for the carrier-compat flags. The two branches existed
+            # historically because rtp_symmetric/force_rport/rewrite_contact
+            # were thought of as NAT-only knobs — but in a Kubernetes pod
+            # the source IP advertised in SDP (10.0.x.x) is never the
+            # actual public IP the carrier sees (post-NLB / SNAT), so
+            # asterisk is effectively behind NAT regardless of the
+            # ASTERISK_BEHIND_NAT env flag. Setting these unconditionally
+            # is the safe default and matches what the runtime SQL fix
+            # already applied to the existing inno-calls endpoint.
             if BEHIND_NAT:
                 cur.execute("""
                     INSERT INTO ps_endpoints
                         (id, transport, context, aors, auth, allow, dtmf_mode,
                          identify_by, disallow, outbound_auth,
                          from_user, from_domain, callerid,
-                         rtp_symmetric, force_rport, direct_media,
-                         trust_id_outbound, send_pai)
+                         rtp_symmetric, force_rport, rewrite_contact,
+                         direct_media,
+                         trust_id_outbound, send_pai, send_rpid)
                     VALUES (%s, %s, %s, %s, %s, %s, 'rfc4733',
                             %s, 'all', %s,
                             %s, %s, %s,
-                            'yes', 'yes', 'no',
-                            'yes', 'yes')
+                            'yes', 'yes', 'yes',
+                            'no',
+                            'yes', 'yes', 'yes')
                     ON CONFLICT (id) DO UPDATE SET
                         transport         = EXCLUDED.transport,
                         context           = EXCLUDED.context,
@@ -415,9 +444,11 @@ def _pjsip_upsert(row, password):
                         callerid          = EXCLUDED.callerid,
                         rtp_symmetric     = EXCLUDED.rtp_symmetric,
                         force_rport       = EXCLUDED.force_rport,
+                        rewrite_contact   = EXCLUDED.rewrite_contact,
                         direct_media      = EXCLUDED.direct_media,
                         trust_id_outbound = EXCLUDED.trust_id_outbound,
-                        send_pai          = EXCLUDED.send_pai
+                        send_pai          = EXCLUDED.send_pai,
+                        send_rpid         = EXCLUDED.send_rpid
                 """, (row["id"], transport, context, row["id"], auth_id, allow,
                       identify_by, auth_id,
                       from_sip_user or None, from_domain_value or None,
@@ -428,11 +459,15 @@ def _pjsip_upsert(row, password):
                         (id, transport, context, aors, auth, allow, dtmf_mode,
                          identify_by, disallow, outbound_auth,
                          from_user, from_domain, callerid,
-                         direct_media, trust_id_outbound, send_pai)
+                         rtp_symmetric, force_rport, rewrite_contact,
+                         direct_media,
+                         trust_id_outbound, send_pai, send_rpid)
                     VALUES (%s, %s, %s, %s, %s, %s, 'rfc4733',
                             %s, 'all', %s,
                             %s, %s, %s,
-                            'no', 'yes', 'yes')
+                            'yes', 'yes', 'yes',
+                            'no',
+                            'yes', 'yes', 'yes')
                     ON CONFLICT (id) DO UPDATE SET
                         transport         = EXCLUDED.transport,
                         context           = EXCLUDED.context,
@@ -444,9 +479,13 @@ def _pjsip_upsert(row, password):
                         from_user         = EXCLUDED.from_user,
                         from_domain       = EXCLUDED.from_domain,
                         callerid          = EXCLUDED.callerid,
+                        rtp_symmetric     = EXCLUDED.rtp_symmetric,
+                        force_rport       = EXCLUDED.force_rport,
+                        rewrite_contact   = EXCLUDED.rewrite_contact,
                         direct_media      = EXCLUDED.direct_media,
                         trust_id_outbound = EXCLUDED.trust_id_outbound,
-                        send_pai          = EXCLUDED.send_pai
+                        send_pai          = EXCLUDED.send_pai,
+                        send_rpid         = EXCLUDED.send_rpid
                 """, (row["id"], transport, context, row["id"], auth_id, allow,
                       identify_by, auth_id,
                       from_sip_user or None, from_domain_value or None,
