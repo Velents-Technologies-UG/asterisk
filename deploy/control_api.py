@@ -639,7 +639,7 @@ def _provision_agent(agent_id, display_name, context):
                 )
                 VALUES (
                     %s, 'transport-wss', %s, %s, %s,
-                    'all', 'opus,alaw', %s,
+                    'all', 'ulaw,alaw', %s,
                     'no', 'yes', 'yes', 'yes',
                     'dtls', 'fingerprint', 'actpass',
                     'yes',
