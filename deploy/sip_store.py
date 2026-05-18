@@ -1190,6 +1190,10 @@ def _trunk_to_pjsip_row(trunk: dict, plaintext_password: str) -> dict:
     control_api._pjsip_upsert consumes. Defaults that depend on the
     address (host, port, from_domain) are derived here so the writer
     stays carrier-agnostic.
+
+    `trunk` is the camelCase API view returned by get_trunk / _row_to_trunk
+    — that's what upsert_trunk hands us. Read the camelCase keys; the
+    snake_case fields are only in the raw DB row.
     """
     host = (trunk["address"] or "").split(":", 1)[0]
     # Build the server URI from address + transport so _pick_transport
@@ -1200,23 +1204,23 @@ def _trunk_to_pjsip_row(trunk: dict, plaintext_password: str) -> dict:
     # expects the DID. If the operator didn't override, the first
     # assigned number is the DID; absent any number, fall back to the
     # auth username so we at least don't go out "Anonymous".
-    from_user = trunk.get("from_user") or (numbers[0] if numbers else None) \
-        or trunk["auth_username"]
-    register_enabled = bool(trunk.get("register_enabled", True))
-    carrier_ip = trunk.get("carrier_ip")
+    from_user = trunk.get("fromUser") or (numbers[0] if numbers else None) \
+        or trunk["authUsername"]
+    register_enabled = bool(trunk.get("registerEnabled", True))
+    carrier_ip = trunk.get("carrierIp")
     return {
         "id":               trunk["id"],
         "display_name":     trunk["name"],
         "server_uri":       server_uri,
-        "username":         trunk["auth_username"],
-        "channel_limit":    trunk["channel_limit"],
+        "username":         trunk["authUsername"],
+        "channel_limit":    trunk["channelLimit"],
         "enabled":          bool(trunk.get("enabled", True)),
         "transport":        trunk["protocol"],
         "context":          None,
         "client_uri":       None,
         "from_user":        from_user,
-        "from_domain":      trunk.get("from_domain") or host,
-        "expiration":       trunk["expiration_seconds"],
+        "from_domain":      trunk.get("fromDomain") or host,
+        "expiration":       trunk["expirationSeconds"],
         "allow":            None,
         "outbound_auth":    None,
         "identify_by":      None,
@@ -1225,7 +1229,7 @@ def _trunk_to_pjsip_row(trunk: dict, plaintext_password: str) -> dict:
         # Carried through to ps_endpoints.media_encryption. 'none' means
         # plain RTP; 'sdes' means SDES-SRTP. _pjsip_upsert maps 'none'
         # to the Asterisk-native 'no' on write.
-        "media_encryption": trunk.get("media_encryption", "none"),
+        "media_encryption": trunk.get("mediaEncryption", "none"),
     }
 
 
