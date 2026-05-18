@@ -99,6 +99,39 @@ for tmpl in /etc/asterisk/*.conf.template; do
   log "rendered $tmpl -> $out"
 done
 
+# 3b. Inject external_media_address / external_signaling_address into
+# each PJSIP transport section when ASTERISK_EXTERNAL_MEDIA_ADDRESS is
+# set. Needed when the pod sits behind a NAT/NLB: without this, the
+# SDP that Asterisk hands to the carrier carries the pod's internal
+# IP (10.x), the carrier RTPs there, packets get dropped, and the
+# call tears down with no audio. The IP belongs in env (not the
+# sample files) because it's deployment-specific — prod has a public
+# NLB; test/dev don't.
+#
+# Sorcery rejects duplicate object definitions across includes, so
+# the injection has to edit the transport's home file in-place rather
+# than append a second [transport-udp] block elsewhere. sed is
+# idempotent because we grep for the marker first.
+if [ -n "${ASTERISK_EXTERNAL_MEDIA_ADDRESS:-}" ]; then
+  EMA="$ASTERISK_EXTERNAL_MEDIA_ADDRESS"
+  ESA="${ASTERISK_EXTERNAL_SIGNALING_ADDRESS:-$EMA}"
+  for f in /etc/asterisk/pjsip_trunks.conf /etc/asterisk/pjsip_wss_agents.conf; do
+    [ -f "$f" ] || continue
+    if grep -q '^external_media_address=' "$f"; then
+      log "external_media_address already present in $f, skipping"
+      continue
+    fi
+    # One sed pass per transport header so the injection lands under
+    # the right section even if a file declares more than one.
+    for hdr in '[transport-udp]' '[transport-tcp]' '[transport-wss]'; do
+      grep -qF "$hdr" "$f" || continue
+      esc_hdr=$(printf '%s' "$hdr" | sed 's/[][\.*^$/]/\\&/g')
+      sed -i "/^${esc_hdr}\$/a external_media_address=${EMA}\nexternal_signaling_address=${ESA}" "$f"
+      log "injected external_media_address=${EMA} under ${hdr} in $f"
+    done
+  done
+fi
+
 # 4. Runtime dirs - idempotent. PVCs / emptyDirs may mask the image's
 # pre-created versions, so re-create on every start.
 for d in \

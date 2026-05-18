@@ -2,14 +2,19 @@
 ; rtp.conf
 ;
 ; Constrains Asterisk's RTP port allocator to the range our public
-; LoadBalancer Service forwards (UDP 10000-10099). Without this clamp
-; Asterisk picks any port in 10000-20000 and most RTP packets get
-; dropped at the NLB — symptom is "call connects, no audio one or
-; both ways".
+; LoadBalancer Service forwards. Without this clamp Asterisk picks
+; any port in 10000-20000 and most RTP packets get dropped at the
+; NLB — symptom is "call connects, no audio one or both ways".
 ;
-; Capacity: 100 ports = 50 concurrent calls (each call needs one
-; RTP + one RTCP port). To raise the ceiling, widen both this range
-; AND the NLB Service's port list together; the two must match.
+; Capacity: 4 ports = 1-2 concurrent calls (each call needs one
+; RTP + one RTCP port, RTCP-mux halves that). The range was trimmed
+; from 50 because AWS's default 60-rules-per-SG quota was hit when
+; the NLB tried to register 50 listeners (each listener => 1 SG
+; rule for health-check + 1 per pod-target). To raise the ceiling,
+; request a service-quota increase on EC2-VPC
+; "Inbound or outbound rules per security group" first, then widen
+; both this range AND the NLB Service's port list together; the two
+; MUST match or Asterisk allocates ports the NLB doesn't forward.
 ;
 ; strictrtp / icesupport / etc. fall through to Asterisk defaults
 ; (strictrtp=yes since 14, which is correct for a NAT'd deployment).
@@ -17,4 +22,4 @@
 
 [general]
 rtpstart=10000
-rtpend=10049
+rtpend=10003
