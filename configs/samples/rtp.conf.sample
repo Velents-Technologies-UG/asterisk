@@ -23,3 +23,28 @@
 [general]
 rtpstart=10000
 rtpend=10003
+
+; STUN server for WebRTC ICE candidate discovery. Without this,
+; ICE-enabled endpoints (ps_endpoints.ice_support=yes — every WSS
+; agent endpoint we provision) advertise only the pod's internal
+; 10.x host candidate in their SDP. The browser can't route to a
+; 10.x address over the public internet, no other candidate is
+; reachable, and audio fails silently — signalling completes, both
+; sides answer, but RTP never flows.
+;
+; Pointing PJSIP's RTP layer at a public STUN server makes it gather
+; a srflx (server-reflexive) candidate carrying the pod's
+; publicly-visible source IP. The browser picks that, sends RTP,
+; and rtp_symmetric=yes on the endpoint lets asterisk discover the
+; browser's public IP from the first incoming packet — bidirectional
+; audio comes up.
+;
+; external_media_address (set on the PJSIP transport) does NOT help
+; here; PJSIP only honors it for endpoints without ICE. For WebRTC
+; endpoints, ICE candidates take precedence.
+;
+; Google's public STUN is fine for discovery — no authentication
+; needed, low latency. If we ever onboard a customer behind a NAT
+; that blocks UDP to public STUN, add a TURN server (turnaddr,
+; turnusername, turnpassword) and it falls back automatically.
+stunaddr=stun.l.google.com:19302
