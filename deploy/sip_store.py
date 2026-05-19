@@ -59,6 +59,7 @@ plaintext-empty passwords still work.
 from __future__ import annotations
 
 import base64
+import hashlib
 import logging
 import os
 import re
@@ -99,6 +100,52 @@ _VALID_MODES       = {"register", "ip-trunk"}  # legacy provider table
 # without trial-and-error renaming.
 _SAFE_TRUNK_ID = re.compile(r"^[a-zA-Z0-9_-]{1,60}$")
 
+# Tenant identifier any legacy / un-tagged row falls back to. velentsAgents
+# (Laravel) issues real tenant ids via stancl/tenancy; this sentinel only
+# exists so the NOT NULL migration is non-destructive on a single-tenant
+# database. Backfill all 'default' rows to the real tenant id before
+# onboarding a second tenant.
+DEFAULT_TENANT_ID = "default"
+
+
+def safe_tenant_prefix(tenant_id: str) -> str:
+    """Compress an arbitrary tenant_id into 8 [a-z0-9] chars.
+
+    Used to build PJSIP realtime row ids that are safe across every
+    Asterisk-canonical column type (ps_*.id is VARCHAR(40) on stock
+    schemas; padding the prefix keeps the total under that ceiling
+    even with a 60-char trunk slug after _DDL_PJSIP_ID_WIDEN runs).
+    Same input always yields the same prefix, so a tenant's endpoints
+    are stable across pod restarts.
+    """
+    s = str(tenant_id or "").strip()
+    if not s:
+        return "default0"
+    if re.fullmatch(r"[a-z0-9]{1,8}", s):
+        return s
+    return hashlib.md5(s.encode("utf-8")).hexdigest()[:8]
+
+
+def pjsip_trunk_endpoint_id(tenant_id: str, trunk_id: str) -> str:
+    """PJSIP realtime row id (ps_endpoints.id etc.) for a trunk.
+
+    Prefixing with the tenant prevents two tenants both naming a trunk
+    'innov2' from clobbering each other's ps_endpoints row. The
+    user-facing sip_trunks.id stays 'innov2'; only the realtime layer
+    sees the namespaced form.
+    """
+    return f"t{safe_tenant_prefix(tenant_id)}_{trunk_id}"
+
+
+def pjsip_agent_endpoint_id(tenant_id: str, agent_id) -> str:
+    """PJSIP realtime row id for a per-agent WebRTC endpoint.
+
+    Agent ids in velentsAgents are scoped per-tenant (tenant A's agent
+    id 2 is a different person from tenant B's agent id 2), so the
+    realtime row id has to encode both.
+    """
+    return f"staff_t{safe_tenant_prefix(tenant_id)}_{agent_id}"
+
 
 class StoreError(RuntimeError):
     """Raised for validation, encryption, or persistence problems."""
@@ -120,7 +167,8 @@ class _NotFound(StoreError):
 # carrier we've onboarded ships SRTP off by default; SDES is opt-in.
 _DDL_TRUNKS = r"""
 CREATE TABLE IF NOT EXISTS sip_trunks (
-    id                     TEXT PRIMARY KEY,
+    tenant_id              TEXT NOT NULL DEFAULT 'default',
+    id                     TEXT NOT NULL,
     name                   TEXT NOT NULL,
     address                TEXT NOT NULL,
     protocol               TEXT NOT NULL DEFAULT 'udp',
@@ -139,6 +187,9 @@ CREATE TABLE IF NOT EXISTS sip_trunks (
     enabled                BOOLEAN NOT NULL DEFAULT TRUE,
     created_at             TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at             TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    -- (tenant_id, id) lets tenants share a trunk slug; the PJSIP
+    -- realtime layer disambiguates via pjsip_trunk_endpoint_id().
+    PRIMARY KEY (tenant_id, id),
     CONSTRAINT sip_trunks_id_format
         CHECK (id ~ '^[a-zA-Z0-9_-]{1,60}$'),
     CONSTRAINT sip_trunks_protocol_valid
@@ -152,6 +203,44 @@ CREATE TABLE IF NOT EXISTS sip_trunks (
     CONSTRAINT sip_trunks_ip_required_for_ip_trunk
         CHECK (register_enabled OR carrier_ip IS NOT NULL)
 );
+CREATE INDEX IF NOT EXISTS sip_trunks_tenant_idx ON sip_trunks(tenant_id);
+"""
+
+# Migration patch for pre-existing single-tenant deployments. Idempotent:
+# ADD COLUMN IF NOT EXISTS is a no-op once tenant_id is there; the
+# constraint switch runs only if the single-column PK is still in place.
+_DDL_TRUNKS_TENANT_MIGRATION = r"""
+ALTER TABLE sip_trunks ADD COLUMN IF NOT EXISTS tenant_id TEXT;
+UPDATE sip_trunks SET tenant_id = 'default' WHERE tenant_id IS NULL;
+ALTER TABLE sip_trunks ALTER COLUMN tenant_id SET NOT NULL;
+ALTER TABLE sip_trunks ALTER COLUMN tenant_id SET DEFAULT 'default';
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'sip_trunks_pkey'
+          AND conrelid = 'sip_trunks'::regclass
+          AND array_length(conkey, 1) = 1
+    ) THEN
+        ALTER TABLE sip_trunks DROP CONSTRAINT sip_trunks_pkey;
+        ALTER TABLE sip_trunks ADD PRIMARY KEY (tenant_id, id);
+    END IF;
+END $$;
+CREATE INDEX IF NOT EXISTS sip_trunks_tenant_idx ON sip_trunks(tenant_id);
+"""
+
+# Stock Asterisk realtime tables size *.id at VARCHAR(40), which is
+# tight once we prefix with the tenant: `t<8>_<60>` = 70 chars. Widen
+# to 190 (matching the rest of Asterisk's contrib alembic) so the
+# namespaced ids fit. Idempotent — ALTER ... TYPE VARCHAR(190) is a
+# no-op if the column is already wider, and the inner try/except in
+# bootstrap() swallows the case where the column doesn't exist at all
+# (stripped-down realtime schemas).
+_DDL_PJSIP_ID_WIDEN = r"""
+ALTER TABLE ps_endpoints     ALTER COLUMN id TYPE VARCHAR(190);
+ALTER TABLE ps_aors          ALTER COLUMN id TYPE VARCHAR(190);
+ALTER TABLE ps_auths         ALTER COLUMN id TYPE VARCHAR(190);
+ALTER TABLE ps_registrations ALTER COLUMN id TYPE VARCHAR(190);
 """
 
 _DDL_PROVIDERS = r"""
@@ -320,13 +409,48 @@ def bootstrap(db_conn_factory) -> None:
             cur.execute(_DDL_ACCOUNTS)
             # Canonical carrier-credential table.
             cur.execute(_DDL_TRUNKS)
+            # Tenant migration for sip_trunks pre-existing the
+            # tenant_id column. Safe on a fresh DB too — every step is
+            # IF NOT EXISTS / IF the old PK is still in place.
+            cur.execute(_DDL_TRUNKS_TENANT_MIGRATION)
             cur.execute(_SEED_INNOCALLS)
         log.info(
-            "sip_store.bootstrap: sip_trunks ensured + legacy provider/account "
-            "tables kept (read-only migration source)"
+            "sip_store.bootstrap: sip_trunks ensured + tenant_id migration applied"
         )
     except Exception as exc:
         log.error("sip_store.bootstrap (trunks/providers/accounts) failed: %s", exc)
+
+    # Widen ps_*.id from VARCHAR(40) to VARCHAR(190) so namespaced ids
+    # (tXXXXXXXX_<60>) fit. Same autocommit/per-statement pattern as
+    # _DDL_PS_ENDPOINTS_PATCH so a missing table doesn't roll back the
+    # rest of bootstrap.
+    try:
+        conn = db_conn_factory()
+        try:
+            conn.autocommit = True
+            with conn.cursor() as cur:
+                for stmt in _DDL_PJSIP_ID_WIDEN.split(";"):
+                    s = stmt.strip()
+                    if not s or s.startswith("--"):
+                        continue
+                    try:
+                        cur.execute(s)
+                    except Exception as inner_exc:
+                        log.warning(
+                            "sip_store.bootstrap (pjsip id widen %r): %s",
+                            s[:80], inner_exc,
+                        )
+        finally:
+            conn.close()
+        log.info(
+            "sip_store.bootstrap: ps_*.id widened to VARCHAR(190) for tenant-namespaced ids"
+        )
+    except Exception as exc:
+        log.warning(
+            "sip_store.bootstrap (pjsip id widen) failed: %s — "
+            "tenant-namespaced PJSIP endpoint ids may be truncated",
+            exc,
+        )
 
     # Copy any (provider, account) pairs that haven't been migrated yet
     # into sip_trunks. Idempotent: ON CONFLICT (id) DO NOTHING keeps
@@ -1126,7 +1250,7 @@ def validate_trunk_input(body: dict, partial: bool = False) -> tuple[dict, Optio
 
 
 _TRUNK_COLUMNS = (
-    "id", "name", "address", "protocol", "media_encryption",
+    "tenant_id", "id", "name", "address", "protocol", "media_encryption",
     "auth_username", "auth_password_enc", "numbers",
     "from_user", "from_domain", "realm",
     "register_enabled", "carrier_ip",
@@ -1139,6 +1263,7 @@ def _row_to_trunk(row) -> dict:
     """Cast a DictRow into the API shape (carrier-JSON keys, no ciphertext)."""
     carrier_ip = row["carrier_ip"]
     return {
+        "tenantId":         row["tenant_id"],
         "id":               row["id"],
         "name":             row["name"],
         "address":          row["address"],
@@ -1161,23 +1286,39 @@ def _row_to_trunk(row) -> dict:
     }
 
 
-def list_trunks(db_conn_factory) -> list[dict]:
+def _require_tenant(tenant_id):
+    """Reject empty / None tenant ids loudly.
+
+    Trunk routes that forget to pass a tenant id are a security bug:
+    silently defaulting to 'default' would let one tenant read or
+    write another's trunks. The handler is responsible for translating
+    a missing session-tenant into a 401 long before we get here.
+    """
+    if not tenant_id:
+        raise StoreError("tenant_id is required")
+    return str(tenant_id)
+
+
+def list_trunks(db_conn_factory, tenant_id: str) -> list[dict]:
+    tenant_id = _require_tenant(tenant_id)
     with db_conn_factory() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
             cur.execute(
                 f"SELECT {', '.join(_TRUNK_COLUMNS)} "
-                "FROM sip_trunks ORDER BY name, id"
+                "FROM sip_trunks WHERE tenant_id = %s ORDER BY name, id",
+                (tenant_id,),
             )
             return [_row_to_trunk(r) for r in cur.fetchall()]
 
 
-def get_trunk(db_conn_factory, trunk_id: str) -> dict:
+def get_trunk(db_conn_factory, tenant_id: str, trunk_id: str) -> dict:
+    tenant_id = _require_tenant(tenant_id)
     with db_conn_factory() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
             cur.execute(
                 f"SELECT {', '.join(_TRUNK_COLUMNS)} "
-                "FROM sip_trunks WHERE id = %s",
-                (trunk_id,),
+                "FROM sip_trunks WHERE tenant_id = %s AND id = %s",
+                (tenant_id, trunk_id),
             )
             row = cur.fetchone()
             if not row:
@@ -1194,6 +1335,12 @@ def _trunk_to_pjsip_row(trunk: dict, plaintext_password: str) -> dict:
     `trunk` is the camelCase API view returned by get_trunk / _row_to_trunk
     — that's what upsert_trunk hands us. Read the camelCase keys; the
     snake_case fields are only in the raw DB row.
+
+    The `id` we hand to _pjsip_upsert is the tenant-namespaced PJSIP
+    endpoint id, NOT the user-facing trunk slug. The realtime tables
+    share one namespace across all tenants; without the prefix two
+    tenants both naming a trunk 'innov2' would clobber each other's
+    ps_endpoints row.
     """
     host = (trunk["address"] or "").split(":", 1)[0]
     # Build the server URI from address + transport so _pick_transport
@@ -1208,8 +1355,10 @@ def _trunk_to_pjsip_row(trunk: dict, plaintext_password: str) -> dict:
         or trunk["authUsername"]
     register_enabled = bool(trunk.get("registerEnabled", True))
     carrier_ip = trunk.get("carrierIp")
+    tenant_id = trunk.get("tenantId") or DEFAULT_TENANT_ID
+    pjsip_id = pjsip_trunk_endpoint_id(tenant_id, trunk["id"])
     return {
-        "id":               trunk["id"],
+        "id":               pjsip_id,
         "display_name":     trunk["name"],
         "server_uri":       server_uri,
         "username":         trunk["authUsername"],
@@ -1235,6 +1384,7 @@ def _trunk_to_pjsip_row(trunk: dict, plaintext_password: str) -> dict:
 
 def upsert_trunk(
     db_conn_factory,
+    tenant_id: str,
     body: dict,
     pjsip_upsert,
     url_id: Optional[str] = None,
@@ -1244,7 +1394,12 @@ def upsert_trunk(
     pjsip_upsert is a callable matching control_api._pjsip_upsert's
     (flat_row_dict, plaintext_password) signature. Decoupled here so
     this module is unit-testable without importing control_api.
+
+    tenant_id comes from the request handler — never from the request
+    body, which a hostile client could spoof to write trunks into
+    another tenant's namespace.
     """
+    tenant_id = _require_tenant(tenant_id)
     if url_id and "id" not in body and "name" not in body:
         body = {**body, "id": url_id}
     cols, plaintext = validate_trunk_input(body, partial=False)
@@ -1254,13 +1409,14 @@ def upsert_trunk(
     # rename a trunk).
     if plaintext is None:
         try:
-            existing_view = get_trunk(db_conn_factory, cols["id"])
+            existing_view = get_trunk(db_conn_factory, tenant_id, cols["id"])
         except _NotFound:
             raise StoreError("authPassword is required for a new trunk")
         with db_conn_factory() as conn, conn.cursor() as cur:
             cur.execute(
-                "SELECT auth_password_enc FROM sip_trunks WHERE id = %s",
-                (cols["id"],),
+                "SELECT auth_password_enc FROM sip_trunks "
+                "WHERE tenant_id = %s AND id = %s",
+                (tenant_id, cols["id"]),
             )
             r = cur.fetchone()
             ciphertext = r[0] if r else ""
@@ -1274,20 +1430,20 @@ def upsert_trunk(
             cur.execute(
                 """
                 INSERT INTO sip_trunks
-                    (id, name, address, protocol, media_encryption,
+                    (tenant_id, id, name, address, protocol, media_encryption,
                      auth_username, auth_password_enc, numbers,
                      from_user, from_domain, realm,
                      register_enabled, carrier_ip,
                      channel_limit, expiration_seconds,
                      description, enabled, updated_at)
-                VALUES (%(id)s, %(name)s, %(address)s, %(protocol)s,
+                VALUES (%(tenant_id)s, %(id)s, %(name)s, %(address)s, %(protocol)s,
                         %(media_encryption)s, %(auth_username)s,
                         %(auth_password_enc)s, %(numbers)s,
                         %(from_user)s, %(from_domain)s, %(realm)s,
                         %(register_enabled)s, %(carrier_ip)s,
                         %(channel_limit)s, %(expiration_seconds)s,
                         %(description)s, %(enabled)s, NOW())
-                ON CONFLICT (id) DO UPDATE SET
+                ON CONFLICT (tenant_id, id) DO UPDATE SET
                     name               = EXCLUDED.name,
                     address            = EXCLUDED.address,
                     protocol           = EXCLUDED.protocol,
@@ -1307,6 +1463,7 @@ def upsert_trunk(
                     updated_at         = NOW()
                 """,
                 {
+                    "tenant_id":          tenant_id,
                     "id":                 cols["id"],
                     "name":               cols["name"],
                     "address":            cols["address"],
@@ -1327,18 +1484,26 @@ def upsert_trunk(
                 },
             )
 
-    view = get_trunk(db_conn_factory, cols["id"])
+    view = get_trunk(db_conn_factory, tenant_id, cols["id"])
     pjsip_row = _trunk_to_pjsip_row(view, plaintext)
     pjsip_upsert(pjsip_row, plaintext)
     return view
 
 
-def delete_trunk(db_conn_factory, trunk_id: str, pjsip_delete) -> None:
+def delete_trunk(
+    db_conn_factory, tenant_id: str, trunk_id: str, pjsip_delete,
+) -> None:
+    tenant_id = _require_tenant(tenant_id)
     with db_conn_factory() as conn:
         with conn.cursor() as cur:
-            cur.execute("DELETE FROM sip_trunks WHERE id = %s", (trunk_id,))
+            cur.execute(
+                "DELETE FROM sip_trunks WHERE tenant_id = %s AND id = %s",
+                (tenant_id, trunk_id),
+            )
             removed = cur.rowcount > 0
-    pjsip_delete(trunk_id)
+    # pjsip_delete takes the realtime row id (namespaced), not the
+    # user-facing slug. Compute it here so callers don't have to.
+    pjsip_delete(pjsip_trunk_endpoint_id(tenant_id, trunk_id))
     if not removed:
         raise _NotFound(f"trunk {trunk_id!r} not found")
 
@@ -1396,6 +1561,11 @@ def migrate_legacy_to_trunks(db_conn_factory) -> int:
                         r["account_id"],
                     )
                     continue
+                # Legacy rows have no tenant — fall through to the
+                # 'default' column default so the NOT NULL constraint
+                # is satisfied. Single-tenant deployments stay
+                # functional; multi-tenant deployments need to
+                # re-assign these rows post-migration.
                 cur.execute(
                     """
                     INSERT INTO sip_trunks
@@ -1411,7 +1581,7 @@ def migrate_legacy_to_trunks(db_conn_factory) -> int:
                             %s, %s,
                             %s, %s,
                             %s, %s)
-                    ON CONFLICT (id) DO NOTHING
+                    ON CONFLICT (tenant_id, id) DO NOTHING
                     """,
                     (
                         r["account_id"],
@@ -1440,6 +1610,11 @@ __all__ = [
     "bootstrap",
     "encrypt_password",
     "decrypt_password",
+    # tenant helpers
+    "DEFAULT_TENANT_ID",
+    "safe_tenant_prefix",
+    "pjsip_trunk_endpoint_id",
+    "pjsip_agent_endpoint_id",
     # canonical trunk API
     "list_trunks",
     "get_trunk",

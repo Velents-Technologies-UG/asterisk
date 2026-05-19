@@ -150,6 +150,9 @@ COPY deploy/entrypoint.sh   /entrypoint.sh
 COPY deploy/control_api.py  /usr/local/bin/control-api
 COPY deploy/sip_store.py    /usr/local/bin/sip_store.py
 COPY deploy/render_odbc.py  /usr/local/bin/render-odbc
+# One-shot ops scripts. Not wired into the entrypoint; run via
+# `kubectl exec deploy/asterisk -- python3 /usr/local/bin/<name>.py`.
+COPY deploy/scripts/rename_pjsip_to_namespaced.py /usr/local/bin/rename_pjsip_to_namespaced.py
 RUN chmod +x /entrypoint.sh /usr/local/bin/control-api /usr/local/bin/render-odbc
 
 EXPOSE 5060/udp 5060/tcp 5061/tcp 5062/tcp 8088/tcp 8089/tcp 5038/tcp 8092/tcp
