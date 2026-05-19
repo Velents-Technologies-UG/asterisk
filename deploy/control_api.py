@@ -569,23 +569,26 @@ def _pjsip_delete(trunk_id):
     _reload_res_pjsip_async()
 
 
-def _provision_agent(agent_id, display_name, context):
+def _provision_agent(tenant_id, agent_id, display_name, context):
     """Create or rotate a per-agent WebRTC PJSIP endpoint.
 
     The deployed call-engine is this Python sidecar (Dockerfile.prod
-    COPYs deploy/control_api.py to /usr/local/bin/control-api). The
-    endpoint id is hard-coded to `staff_<agentId>` because:
+    COPYs deploy/control_api.py to /usr/local/bin/control-api).
 
-      - The [from-agents] dialplan dials PJSIP/staff_${EXTEN:6} when an
-        agent is queue-dispatched.
-      - The 'outbound_click' Stasis handler matches ^staff_(\\d+)$ on
-        CHANNEL(endpoint) to identify the calling staff member.
-
-    A divergence in the prefix would break click-to-dial silently. The
-    column set and defaults are ported from
-    agent-hub/services/agenthub-call-engine/src/sip-store.js
-    AgentSipStore.provisionAgent — the Node call-engine the team
-    pivoted away from.
+    Endpoint id is `staff_t<tenant_prefix>_<agentId>`:
+      - velentsAgents (Laravel, stancl/tenancy database-per-tenant)
+        scopes agent ids per-tenant, so tenant A's agent id 2 is a
+        different person from tenant B's. ps_endpoints lives in a
+        single Asterisk realtime DB shared by every tenant, so without
+        the tenant prefix the second REGISTER overwrites the first.
+      - Click-to-dial / Stasis args[2] / WSS REGISTER all see this
+        full namespaced id; the Stasis handler parses tenant + agent
+        out of it.
+      - The queue-dispatcher dialplan ([from-agents] in
+        extensions_ai_runtime.conf, `Local/agent_X.@from-agents/n`)
+        still uses `PJSIP/staff_${EXTEN:6}` and is therefore single-
+        tenant only as of this commit. Multi-tenant queue dispatch
+        needs the dialplan to learn the tenant — out of scope here.
 
     Context defaults to `from-wss-agents-out` because that's the
     dialplan context that runs the outbound rule pipeline (Stasis →
@@ -594,7 +597,9 @@ def _provision_agent(agent_id, display_name, context):
     """
     if not _db_enabled():
         raise _DbError("DATABASE_URL not configured")
-    pjsip_id = f"staff_{agent_id}"
+    if not tenant_id:
+        raise _DbError("tenant_id is required for agent provisioning")
+    pjsip_id = sip_store.pjsip_agent_endpoint_id(tenant_id, agent_id)
     ctx = context or "from-wss-agents-out"
     display = display_name or f"Staff {agent_id}"
     # 24 random bytes → 32-char urlsafe base64 (no padding). Matches the
@@ -971,11 +976,42 @@ class Handler(BaseHTTPRequestHandler):
             status = HTTPStatus.SERVICE_UNAVAILABLE
         self._send_json(status, {"error": msg})
 
+    def _tenant_from_request(self, body=None):
+        """Extract the caller's tenant id.
+
+        agent-hub stamps a `X-Tenant-Id` header on every forwarded
+        request from the existing `tenantFrom(req)` helper; the body
+        fallback exists only for tools that don't go through agent-hub
+        (curl, internal scripts). Returns None if neither carries it —
+        the caller responds 401, never silently defaults.
+        """
+        header = self.headers.get("x-tenant-id") or self.headers.get("X-Tenant-Id")
+        if header and header.strip():
+            return header.strip()
+        if isinstance(body, dict):
+            t = body.get("tenantId") or body.get("tenant_id")
+            if t:
+                return str(t).strip()
+        return None
+
+    def _require_tenant_or_401(self, body=None):
+        t = self._tenant_from_request(body=body)
+        if not t:
+            self._send_json(
+                HTTPStatus.UNAUTHORIZED,
+                {"error": "missing tenant context (X-Tenant-Id header)"},
+            )
+            return None
+        return t
+
     def list_trunks(self):
         if not self._require_store():
             return
+        tenant_id = self._require_tenant_or_401()
+        if tenant_id is None:
+            return
         try:
-            items = sip_store.list_trunks(_db_conn)
+            items = sip_store.list_trunks(_db_conn, tenant_id)
         except sip_store.StoreError as exc:
             self._store_error(exc); return
         self._send_json(HTTPStatus.OK, {"items": items})
@@ -983,8 +1019,14 @@ class Handler(BaseHTTPRequestHandler):
     def show_trunk(self, trunk_id):
         if not self._require_store():
             return
+        tenant_id = self._require_tenant_or_401()
+        if tenant_id is None:
+            return
         try:
-            self._send_json(HTTPStatus.OK, sip_store.get_trunk(_db_conn, trunk_id))
+            self._send_json(
+                HTTPStatus.OK,
+                sip_store.get_trunk(_db_conn, tenant_id, trunk_id),
+            )
         except sip_store.StoreError as exc:
             self._store_error(exc)
 
@@ -1000,12 +1042,17 @@ class Handler(BaseHTTPRequestHandler):
         body = self._read_json_body()
         if body is None:
             return
+        tenant_id = self._require_tenant_or_401(body=body)
+        if tenant_id is None:
+            return
         if url_id is not None and body.get("id") and str(body["id"]) != url_id:
             self._send_json(HTTPStatus.UNPROCESSABLE_ENTITY,
                             {"error": "id in URL and body must match"})
             return
         try:
-            out = sip_store.upsert_trunk(_db_conn, body, _pjsip_upsert, url_id=url_id)
+            out = sip_store.upsert_trunk(
+                _db_conn, tenant_id, body, _pjsip_upsert, url_id=url_id,
+            )
         except sip_store.StoreError as exc:
             self._store_error(exc); return
         except _DbError as exc:
@@ -1016,8 +1063,11 @@ class Handler(BaseHTTPRequestHandler):
     def delete_trunk(self, trunk_id):
         if not self._require_store():
             return
+        tenant_id = self._require_tenant_or_401()
+        if tenant_id is None:
+            return
         try:
-            sip_store.delete_trunk(_db_conn, trunk_id, _pjsip_delete)
+            sip_store.delete_trunk(_db_conn, tenant_id, trunk_id, _pjsip_delete)
         except sip_store.StoreError as exc:
             self._store_error(exc); return
         except _DbError as exc:
@@ -1063,11 +1113,38 @@ class Handler(BaseHTTPRequestHandler):
         destination = str(body.get("destination") or "").strip()
         trunk_id = str(body.get("trunkId") or "").strip()
         target_endpoint = str(body.get("targetEndpoint") or "").strip()
+        target_agent_id = str(body.get("targetAgentId") or "").strip()
         extension = str(body.get("extension") or "s").strip()
         context = str(body.get("context") or DEFAULT_INBOUND_CONTEXT).strip()
         from_agent = str(body.get("fromAgent") or "").strip()
 
-        click_to_dial = bool(from_agent and destination and trunk_id and not target_endpoint)
+        click_to_dial = bool(
+            from_agent and destination and trunk_id
+            and not target_endpoint and not target_agent_id
+        )
+
+        # Tenant context is required for click-to-dial (we need to
+        # resolve the trunk owner) and for any path that names an
+        # agent or trunk by user-facing id. Probe mode that names
+        # only an already-namespaced endpoint can run without it.
+        needs_tenant = bool(
+            click_to_dial or trunk_id or from_agent or target_agent_id
+        )
+        tenant_id = None
+        if needs_tenant:
+            tenant_id = self._require_tenant_or_401(body=body)
+            if tenant_id is None:
+                return
+
+        # Backward-compat: accept fromAgent either as the bare agent id
+        # ("2") or as a legacy `staff_<id>` string. Either way, the
+        # channel uses the namespaced realtime endpoint id computed
+        # from the caller's tenant — no cross-tenant spoof possible.
+        def _agent_to_pjsip(raw_agent: str) -> str:
+            bare = raw_agent
+            if bare.startswith("staff_"):
+                bare = bare[len("staff_"):]
+            return sip_store.pjsip_agent_endpoint_id(tenant_id, bare)
 
         if click_to_dial:
             if not _SAFE_ID.match(from_agent):
@@ -1082,9 +1159,40 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(HTTPStatus.UNPROCESSABLE_ENTITY,
                                 {"error": "trunkId must be 1-60 chars, alphanumerics + _ -"})
                 return
-            channel = f"PJSIP/{from_agent}"
+            # Verify the trunk exists AND belongs to the caller's
+            # tenant. get_trunk raises _NotFound otherwise — that's
+            # the actual security barrier against using another
+            # tenant's trunk.
+            try:
+                sip_store.get_trunk(_db_conn, tenant_id, trunk_id)
+            except sip_store.StoreError as exc:
+                self._send_json(
+                    HTTPStatus.NOT_FOUND,
+                    {"error": f"trunk not found in your tenant: {exc}"},
+                )
+                return
+            channel = f"PJSIP/{_agent_to_pjsip(from_agent)}"
             mode = "click-to-dial"
+        elif target_agent_id:
+            # Internal peer call by bare agent id. Tenant context comes
+            # from the X-Tenant-Id header; we namespace into the
+            # realtime endpoint name so cross-tenant peer calls aren't
+            # possible (a different tenant's staff_t<other>_42 won't
+            # match the staff_t<this>_42 we compute).
+            if not _SAFE_ID.match(target_agent_id):
+                self._send_json(HTTPStatus.UNPROCESSABLE_ENTITY,
+                                {"error": "targetAgentId format invalid"})
+                return
+            channel = (
+                f"PJSIP/"
+                f"{sip_store.pjsip_agent_endpoint_id(tenant_id, target_agent_id)}"
+            )
+            mode = "peer"
         elif target_endpoint:
+            # Legacy raw-endpoint path. Kept so probe scripts that
+            # craft a `targetEndpoint: <pjsip_id>` body keep working;
+            # new callers should use `targetAgentId` and let the
+            # tenant prefix happen here.
             if not _SAFE_ID.match(target_endpoint):
                 self._send_json(HTTPStatus.UNPROCESSABLE_ENTITY,
                                 {"error": "targetEndpoint must be 1-60 chars, alphanumerics + _ -"})
@@ -1100,7 +1208,18 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(HTTPStatus.UNPROCESSABLE_ENTITY,
                                 {"error": "trunkId must be 1-60 chars, alphanumerics + _ -"})
                 return
-            channel = f"PJSIP/{destination}@{trunk_id}"
+            try:
+                sip_store.get_trunk(_db_conn, tenant_id, trunk_id)
+            except sip_store.StoreError as exc:
+                self._send_json(
+                    HTTPStatus.NOT_FOUND,
+                    {"error": f"trunk not found in your tenant: {exc}"},
+                )
+                return
+            channel = (
+                f"PJSIP/{destination}"
+                f"@{sip_store.pjsip_trunk_endpoint_id(tenant_id, trunk_id)}"
+            )
             mode = "probe"
 
         if mode in ("peer", "probe"):
@@ -1125,7 +1244,10 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if mode == "click-to-dial":
-            dial_args = f"PJSIP/{destination}@{trunk_id},{CLICK_TO_DIAL_TIMEOUT},t"
+            pjsip_trunk = sip_store.pjsip_trunk_endpoint_id(tenant_id, trunk_id)
+            dial_args = (
+                f"PJSIP/{destination}@{pjsip_trunk},{CLICK_TO_DIAL_TIMEOUT},t"
+            )
             cli = f"originate {channel} application Dial {dial_args}"
             extension_reported = f"Dial({dial_args})"
         else:
@@ -1179,6 +1301,9 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(HTTPStatus.SERVICE_UNAVAILABLE,
                             {"error": "DATABASE_URL not configured"})
             return
+        tenant_id = self._require_tenant_or_401(body=body)
+        if tenant_id is None:
+            return
         display_name = str(body.get("displayName") or "").strip()
         context = str(body.get("context") or "").strip()
         if context and not _SAFE_ID.match(context):
@@ -1186,12 +1311,20 @@ class Handler(BaseHTTPRequestHandler):
                             {"error": "context format invalid"})
             return
         try:
-            result = _provision_agent(agent_id, display_name, context or None)
+            result = _provision_agent(
+                tenant_id, agent_id, display_name, context or None,
+            )
         except _DbError as exc:
-            log.error("agent %s provision failed: %s", agent_id, exc)
+            log.error(
+                "agent %s (tenant=%s) provision failed: %s",
+                agent_id, tenant_id, exc,
+            )
             self._send_json(HTTPStatus.BAD_GATEWAY, {"error": str(exc)})
             return
-        log.info("agent %s provisioned: endpoint=%s", agent_id, result["username"])
+        log.info(
+            "agent %s (tenant=%s) provisioned: endpoint=%s",
+            agent_id, tenant_id, result["username"],
+        )
         self._send_json(HTTPStatus.OK, result)
 
     def reload_asterisk(self):
