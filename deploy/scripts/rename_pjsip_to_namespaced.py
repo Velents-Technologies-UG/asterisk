@@ -31,6 +31,7 @@ Idempotent: rows already in the namespaced form are left alone.
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import logging
 import os
 import re
@@ -40,10 +41,34 @@ import urllib.parse
 import psycopg2
 import psycopg2.extras
 
-# Importing the sidecar's modules pulls in their helpers without copying
-# code. /usr/local/bin is on sys.path inside the container image.
+# control_api is installed at /usr/local/bin/control-api (no .py
+# extension) so `import control_api` doesn't find it on sys.path.
+# Load it by file path via importlib so the script works inside the
+# stock image without needing a sibling .py copy. sip_store, on the
+# other hand, IS installed as /usr/local/bin/sip_store.py, so the
+# regular import works once /usr/local/bin is on sys.path.
 sys.path.insert(0, "/usr/local/bin")
-import control_api  # noqa: E402  pylint: disable=wrong-import-position
+
+
+def _load_control_api():
+    candidates = [
+        "/usr/local/bin/control-api",
+        "/usr/local/bin/control_api.py",
+        "/usr/local/bin/control_api",
+    ]
+    path = next((p for p in candidates if os.path.isfile(p)), None)
+    if path is None:
+        raise RuntimeError(
+            "control-api binary not found at any of: " + ", ".join(candidates)
+        )
+    spec = importlib.util.spec_from_file_location("control_api", path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["control_api"] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+control_api = _load_control_api()
 import sip_store  # noqa: E402  pylint: disable=wrong-import-position
 
 log = logging.getLogger("rename-pjsip-to-namespaced")

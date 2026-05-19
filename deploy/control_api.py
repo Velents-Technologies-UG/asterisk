@@ -771,6 +771,48 @@ def _state_to_status(state):
     return "unknown"
 
 
+def _build_trunk_id_reverse_map():
+    """Map PJSIP realtime endpoint ids back to user-facing trunk slugs.
+
+    Realtime ps_endpoints.id for trunks is now `t<tenant_prefix>_<slug>`
+    (the namespaced form sip_store.pjsip_trunk_endpoint_id produces),
+    while the UI's status hash is keyed by the user-facing slug
+    (`innov2`, not `tdefault_innov2`). Without the reverse, the
+    trunk badge in the UI stays grey/"unknown" even when the trunk
+    is happily registered. Query sip_trunks once per feeder tick and
+    return realtime_id -> slug.
+    """
+    if not HAS_SIP_STORE or not _db_enabled():
+        return {}
+    try:
+        with _db_conn() as conn, conn.cursor() as cur:
+            cur.execute("SELECT tenant_id, id FROM sip_trunks")
+            rows = cur.fetchall()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("status feeder: trunk reverse map query failed: %s", exc)
+        return {}
+    out = {}
+    for tenant_id, slug in rows:
+        out[sip_store.pjsip_trunk_endpoint_id(tenant_id, slug)] = slug
+    return out
+
+
+_AGENT_ID_NAMESPACED_RE = re.compile(r"^staff_t[a-z0-9]{1,8}_(?P<rest>.+)$")
+
+
+def _user_facing_agent_id(pjsip_id):
+    """Strip the tenant prefix from a namespaced agent endpoint id.
+
+    `staff_tdefault_2` -> `staff_2`. Non-namespaced legacy ids are
+    returned unchanged so a single deployment can still surface
+    pre-migration rows while they exist.
+    """
+    m = _AGENT_ID_NAMESPACED_RE.match(pjsip_id)
+    if not m:
+        return pjsip_id
+    return f"staff_{m.group('rest')}"
+
+
 def _status_feeder_loop(stop_event):
     if not REDIS_URL:
         log.info("status feeder: REDIS_URL unset; skipping")
@@ -818,22 +860,43 @@ def _status_feeder_loop(stop_event):
             )
             trunk_endpoints = endpoint_ids | ip_trunk_endpoints
 
+            # Map namespaced realtime ids back to user-facing slugs so
+            # the UI's lookup by row.id matches what's in Redis. The
+            # reverse map covers every row in sip_trunks; endpoints
+            # not present in sip_trunks (e.g. agent endpoints that
+            # leaked in here) fall through unchanged.
+            trunk_reverse = _build_trunk_id_reverse_map()
+
+            def _trunk_slug(ep_id):
+                # `pjsip show endpoints` sometimes emits the endpoint
+                # as `endpoint/contact` once a contact has registered;
+                # we only want the endpoint part for the UI join.
+                head = ep_id.split("/", 1)[0]
+                return trunk_reverse.get(head, head)
+
             if ep_proc.returncode == 0:
                 trunk_updates = {}
                 for ep_id, state in _parse_pjsip_endpoints(ep_proc.stdout):
-                    if ep_id in ip_trunk_endpoints:
-                        trunk_updates[ep_id] = "online"
+                    slug = _trunk_slug(ep_id)
+                    if ep_id.split("/", 1)[0] in ip_trunk_endpoints:
+                        trunk_updates[slug] = "online"
                     else:
-                        trunk_updates[ep_id] = _state_to_status(state)
+                        trunk_updates[slug] = _state_to_status(state)
                 if trunk_updates:
                     client.hset(STATUS_FEEDER_KEY, mapping=trunk_updates)
 
             if aor_proc.returncode == 0:
                 agent_updates = {}
                 for aor_id, status in _parse_pjsip_aors(aor_proc.stdout):
-                    if aor_id in trunk_endpoints:
+                    head = aor_id.split("/", 1)[0]
+                    if head in trunk_endpoints or head in trunk_reverse:
                         continue
-                    agent_updates[aor_id] = status
+                    # Agents are keyed in Redis by the un-namespaced
+                    # form `staff_<id>` so the agent-hub UI (which
+                    # doesn't know about tenant prefixes) joins
+                    # cleanly. Trunks come from sip_trunks; agents
+                    # don't, so use the regex-based stripper.
+                    agent_updates[_user_facing_agent_id(head)] = status
                 if agent_updates:
                     client.hset(STATUS_FEEDER_AGENTS_KEY, mapping=agent_updates)
         except Exception as exc:
