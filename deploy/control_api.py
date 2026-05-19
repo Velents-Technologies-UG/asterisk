@@ -867,28 +867,36 @@ def _status_feeder_loop(stop_event):
             # leaked in here) fall through unchanged.
             trunk_reverse = _build_trunk_id_reverse_map()
 
+            def _trunk_slug(ep_id):
+                # `pjsip show endpoints` sometimes emits the endpoint
+                # as `endpoint/contact` once a contact has registered;
+                # we only want the endpoint part for the UI join.
+                head = ep_id.split("/", 1)[0]
+                return trunk_reverse.get(head, head)
+
             if ep_proc.returncode == 0:
                 trunk_updates = {}
                 for ep_id, state in _parse_pjsip_endpoints(ep_proc.stdout):
-                    out_key = trunk_reverse.get(ep_id, ep_id)
-                    if ep_id in ip_trunk_endpoints:
-                        trunk_updates[out_key] = "online"
+                    slug = _trunk_slug(ep_id)
+                    if ep_id.split("/", 1)[0] in ip_trunk_endpoints:
+                        trunk_updates[slug] = "online"
                     else:
-                        trunk_updates[out_key] = _state_to_status(state)
+                        trunk_updates[slug] = _state_to_status(state)
                 if trunk_updates:
                     client.hset(STATUS_FEEDER_KEY, mapping=trunk_updates)
 
             if aor_proc.returncode == 0:
                 agent_updates = {}
                 for aor_id, status in _parse_pjsip_aors(aor_proc.stdout):
-                    if aor_id in trunk_endpoints:
+                    head = aor_id.split("/", 1)[0]
+                    if head in trunk_endpoints or head in trunk_reverse:
                         continue
                     # Agents are keyed in Redis by the un-namespaced
                     # form `staff_<id>` so the agent-hub UI (which
                     # doesn't know about tenant prefixes) joins
                     # cleanly. Trunks come from sip_trunks; agents
                     # don't, so use the regex-based stripper.
-                    agent_updates[_user_facing_agent_id(aor_id)] = status
+                    agent_updates[_user_facing_agent_id(head)] = status
                 if agent_updates:
                     client.hset(STATUS_FEEDER_AGENTS_KEY, mapping=agent_updates)
         except Exception as exc:
