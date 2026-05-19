@@ -800,6 +800,68 @@ def _build_trunk_id_reverse_map():
 _AGENT_ID_NAMESPACED_RE = re.compile(r"^staff_t[a-z0-9]{1,8}_(?P<rest>.+)$")
 
 
+def _decorate_trunks_with_live_state(items, tenant_id):
+    """Embed `state` and `activeChannels` into each trunk row in-place.
+
+    The Redis-based status feeder only works when asterisk and agent-hub
+    share a Redis instance. When agent-hub runs in a different cluster
+    (test on GCP while asterisk lives on AWS), there's no shared Redis
+    and the UI's badge stays grey. Embedding state here makes the
+    /control/sip/trunks response self-sufficient — agent-hub gets the
+    badge value over the same HTTPS call it already makes.
+
+    Reads `pjsip show endpoints` once for the whole list. Mutates each
+    item dict (camelCase fields: state, activeChannels) and returns
+    nothing.
+    """
+    if not items:
+        return
+    if shutil.which(ASTERISK_BIN) is None:
+        return
+    try:
+        ep_proc = subprocess.run(
+            [ASTERISK_BIN, "-rx", "pjsip show endpoints"],
+            capture_output=True, text=True, timeout=5, check=False,
+        )
+        id_proc = subprocess.run(
+            [ASTERISK_BIN, "-rx", "pjsip show identifies"],
+            capture_output=True, text=True, timeout=5, check=False,
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("trunk live-state decorate failed: %s", exc)
+        return
+    if ep_proc.returncode != 0:
+        return
+
+    # Map slug -> live state. PJSIP endpoint ids are tenant-namespaced,
+    # so for each row compute the expected pjsip id and look it up.
+    state_by_pjsip = {}
+    for ep_id, state in _parse_pjsip_endpoints(ep_proc.stdout):
+        # Strip trailing /contact suffix some pjsip versions add.
+        head = ep_id.split("/", 1)[0]
+        state_by_pjsip[head] = _state_to_status(state)
+    ip_trunks = (
+        set(_parse_pjsip_identifies(id_proc.stdout))
+        if id_proc.returncode == 0 else set()
+    )
+
+    for row in items:
+        slug = row.get("id")
+        if not slug:
+            continue
+        pjsip_id = sip_store.pjsip_trunk_endpoint_id(tenant_id, slug)
+        if pjsip_id in ip_trunks:
+            row["state"] = "online"
+        else:
+            row["state"] = state_by_pjsip.get(pjsip_id, "unknown")
+        # activeChannels needs a separate channel-show round-trip;
+        # leave at 0 here so the badge color is at least correct.
+        # The UI's util read still works through Redis when it's
+        # configured; this just guarantees the *state* part isn't
+        # blocked by Redis being unreachable.
+        row.setdefault("activeChannels", 0)
+
+
 def _user_facing_agent_id(pjsip_id):
     """Strip the tenant prefix from a namespaced agent endpoint id.
 
@@ -1077,6 +1139,7 @@ class Handler(BaseHTTPRequestHandler):
             items = sip_store.list_trunks(_db_conn, tenant_id)
         except sip_store.StoreError as exc:
             self._store_error(exc); return
+        _decorate_trunks_with_live_state(items, tenant_id)
         self._send_json(HTTPStatus.OK, {"items": items})
 
     def show_trunk(self, trunk_id):
@@ -1086,12 +1149,11 @@ class Handler(BaseHTTPRequestHandler):
         if tenant_id is None:
             return
         try:
-            self._send_json(
-                HTTPStatus.OK,
-                sip_store.get_trunk(_db_conn, tenant_id, trunk_id),
-            )
+            row = sip_store.get_trunk(_db_conn, tenant_id, trunk_id)
         except sip_store.StoreError as exc:
-            self._store_error(exc)
+            self._store_error(exc); return
+        _decorate_trunks_with_live_state([row], tenant_id)
+        self._send_json(HTTPStatus.OK, row)
 
     def create_trunk(self):
         self._trunk_upsert_common(None)
