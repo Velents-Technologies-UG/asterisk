@@ -25,6 +25,12 @@
 endpoint=realtime,ps_endpoints
 auth=realtime,ps_auths
 aor=realtime,ps_aors
+; identify must be realtime too, else ps_identify rows (written by
+; control_api for IP-based / register+inbound trunks) are never loaded and
+; `pjsip show identifies` is empty — inbound INVITEs from the carrier's IP
+; then fail with "No matching endpoint found". extconfig.conf already maps
+; ps_identify => odbc,asterisk,ps_identify.
+identify=realtime,ps_identify
 
 [res_pjsip_outbound_registration]
 registration=realtime,ps_registrations
