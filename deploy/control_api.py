@@ -51,6 +51,12 @@ CLICK_TO_DIAL_TIMEOUT = int(os.environ.get("CLICK_TO_DIAL_TIMEOUT", "30"))
 STATUS_FEEDER_INTERVAL = int(os.environ.get("STATUS_FEEDER_INTERVAL", "5"))
 STATUS_FEEDER_KEY = os.environ.get("STATUS_FEEDER_KEY", "cx:trunks:status")
 STATUS_FEEDER_AGENTS_KEY = os.environ.get("STATUS_FEEDER_AGENTS_KEY", "cx:agents:sip-status")
+# Epoch-ms heartbeat of the last successful reachability sweep. The
+# agent-hub health card reads this to degrade stale data instead of
+# trusting an optimistic "online" (AGH-6795).
+STATUS_FEEDER_CHECKED_AT_KEY = os.environ.get(
+    "STATUS_FEEDER_CHECKED_AT_KEY", "cx:trunks:checked_at"
+)
 MAX_BODY_BYTES = 64 * 1024
 
 BEHIND_NAT = bool(os.environ.get("ASTERISK_EXTERNAL_IP", "").strip()) or \
@@ -958,6 +964,12 @@ def _status_feeder_loop(stop_event):
                         trunk_updates[slug] = _state_to_status(state)
                 if trunk_updates:
                     client.hset(STATUS_FEEDER_KEY, mapping=trunk_updates)
+                # Stamp the sweep time whenever Asterisk answered, even if
+                # no trunk rows matched — the freshness signal is "did we
+                # just verify reachability", independent of trunk count.
+                client.set(
+                    STATUS_FEEDER_CHECKED_AT_KEY, int(time.time() * 1000)
+                )
 
             if aor_proc.returncode == 0:
                 agent_updates = {}
