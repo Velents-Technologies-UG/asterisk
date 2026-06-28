@@ -59,7 +59,15 @@ STATUS_FEEDER_CHECKED_AT_KEY = os.environ.get(
 )
 MAX_BODY_BYTES = 64 * 1024
 
-BEHIND_NAT = bool(os.environ.get("ASTERISK_EXTERNAL_IP", "").strip()) or \
+# ASTERISK_EXTERNAL_IP is the master NAT switch. If it's unset but a public
+# media address was provided, fall back to that — otherwise endpoints are
+# provisioned without rtp_symmetric/force_rport/rewrite_contact and Asterisk
+# advertises the pod's private IP, so calls connect with no audio.
+EXTERNAL_IP = (
+    os.environ.get("ASTERISK_EXTERNAL_IP", "").strip()
+    or os.environ.get("ASTERISK_EXTERNAL_MEDIA_ADDRESS", "").strip()
+)
+BEHIND_NAT = bool(EXTERNAL_IP) or \
     os.environ.get("ASTERISK_BEHIND_NAT", "").strip().lower() in ("1", "yes", "true")
 
 # Legacy in-memory trunk dict — kept only as a fallback when the DB is

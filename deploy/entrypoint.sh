@@ -43,6 +43,17 @@ TLS_CERT_CN="${ASTERISK_TLS_CERT_CN:-asterisk.velents.ai}"
 
 log() { echo "entrypoint: $*"; }
 
+# ASTERISK_EXTERNAL_IP is the master switch for the NAT-aware transport
+# below (and for the control-api sidecar's BEHIND_NAT). If it's unset but a
+# public media address was supplied, fall back to it — otherwise Asterisk
+# advertises the pod's internal IP and calls connect with no audio. Exported
+# so the control-api sidecar launched later inherits the resolved value.
+if [ -z "${ASTERISK_EXTERNAL_IP:-}" ] && [ -n "${ASTERISK_EXTERNAL_MEDIA_ADDRESS:-}" ]; then
+  ASTERISK_EXTERNAL_IP="${ASTERISK_EXTERNAL_MEDIA_ADDRESS}"
+  export ASTERISK_EXTERNAL_IP
+  log "ASTERISK_EXTERNAL_IP unset; falling back to ASTERISK_EXTERNAL_MEDIA_ADDRESS=${ASTERISK_EXTERNAL_IP}"
+fi
+
 # 1. NAT-aware transport block.
 #
 # DevOps sets ASTERISK_EXTERNAL_IP to the public address the carrier
