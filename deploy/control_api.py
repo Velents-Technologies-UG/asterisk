@@ -569,7 +569,7 @@ def _pjsip_delete(trunk_id):
     _reload_res_pjsip_async()
 
 
-def _provision_agent(tenant_id, agent_id, display_name, context):
+def _provision_agent(tenant_id, agent_id, display_name, context, rotate=False):
     """Create or rotate a per-agent WebRTC PJSIP endpoint.
 
     The deployed call-engine is this Python sidecar (Dockerfile.prod
@@ -602,13 +602,25 @@ def _provision_agent(tenant_id, agent_id, display_name, context):
     pjsip_id = sip_store.pjsip_agent_endpoint_id(tenant_id, agent_id)
     ctx = context or "from-wss-agents-out"
     display = display_name or f"Staff {agent_id}"
-    # 24 random bytes → 32-char urlsafe base64 (no padding). Matches the
-    # Node version's crypto.randomBytes(24).toString('base64url').
-    password = secrets.token_urlsafe(24)
     callerid = f'"{display}" <{pjsip_id}>'
 
     try:
         with _db_conn() as conn, conn.cursor() as cur:
+            # Stable credentials: REUSE the existing password unless an explicit
+            # rotate is requested. The softphone calls this endpoint on every
+            # mount/reconnect; rotating the password each time invalidated the
+            # agent's live REGISTER, producing endless "Failed to authenticate"
+            # loops so the desktop flapped out of registration and inbound calls
+            # couldn't ring it. Generate a fresh secret only on first create or
+            # when rotate=true. (24 random bytes → 32-char urlsafe base64,
+            # matching the Node version's crypto.randomBytes(24).base64url.)
+            existing_password = None
+            if not rotate:
+                cur.execute("SELECT password FROM ps_auths WHERE id = %s", (pjsip_id,))
+                _row = cur.fetchone()
+                existing_password = _row[0] if _row else None
+            password = existing_password or secrets.token_urlsafe(24)
+
             cur.execute("""
                 INSERT INTO ps_aors
                     (id, max_contacts, remove_existing, qualify_frequency, support_path)
@@ -1438,6 +1450,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             result = _provision_agent(
                 tenant_id, agent_id, display_name, context or None,
+                rotate=bool(body.get("rotate")),
             )
         except _DbError as exc:
             log.error(
