@@ -6,7 +6,6 @@
 ;   - Reusable [agent-endpoint-template] / [agent-aor-template] /
 ;     [agent-auth-template] templates that the agenthub-call-engine
 ;     provisions per-agent via PJSIP realtime
-;   - One static [agent-demo] endpoint for smoke testing without the API
 ;
 ; Required modules:
 ;     res_pjsip.so, res_pjsip_session.so, res_pjsip_transport_websocket.so
@@ -70,24 +69,9 @@ qualify_frequency=60
 type=auth
 auth_type=userpass
 
-;------------------------------------------------------------
-; Static demo agent (handy for connectivity testing without the API).
-; The realtime-provisioned agents created by agenthub-call-engine
-; inherit the same templates above through sorcery defaults.
-;------------------------------------------------------------
-[agent-demo](agent-auth-template)
-type=auth
-username=agent-demo
-password=change-me-in-production
-
-[agent-demo](agent-aor-template)
-type=aor
-
-[agent-demo](agent-endpoint-template)
-type=endpoint
-auth=agent-demo
-aors=agent-demo
-callerid=Demo Agent <agent-demo>
+; Agents are provisioned at runtime by agenthub-call-engine, which writes
+; ps_endpoints/ps_auths/ps_aors via sorcery using the templates above. No
+; static demo agent ships here (it carried a change-me placeholder password).
 
 ;------------------------------------------------------------
 ; Dialplan landing context for WSS agent outbound is
