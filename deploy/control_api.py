@@ -338,7 +338,14 @@ def _pjsip_upsert(row, password):
     ) or row.get("client_uri") or None
     register_enabled = bool(row.get("register_enabled", True))
     carrier_ip = row.get("carrier_ip")
-    identify_by = "ip,username,auth_username" if not register_enabled else "username,auth_username"
+    # A registering trunk can ALSO receive inbound calls from the carrier's
+    # media IP. Registration authenticates OUTBOUND only; for inbound INVITEs
+    # to match this endpoint Asterisk needs 'ip' in identify_by plus a
+    # ps_identify row for the carrier IP. Without it, inbound from the carrier
+    # hits "No matching endpoint found" and is rejected before the dialplan.
+    identify_by = ("ip,username,auth_username"
+                   if (not register_enabled or carrier_ip)
+                   else "username,auth_username")
 
     # Carrier compatibility, proven against innocalls:
     #
@@ -539,8 +546,20 @@ def _pjsip_upsert(row, password):
                 else:
                     cur.execute("DELETE FROM ps_registrations WHERE id = %s",
                                 (row["id"],))
-                cur.execute("DELETE FROM ps_identify WHERE id = %s",
-                            (identify_id,))
+                # Keep an inbound IP identify when the carrier also delivers
+                # calls to us from a known media IP — a registering trunk still
+                # needs this for INBOUND (registration only covers outbound).
+                if carrier_ip:
+                    cur.execute("""
+                        INSERT INTO ps_identify (id, endpoint, "match")
+                        VALUES (%s, %s, %s)
+                        ON CONFLICT (id) DO UPDATE SET
+                            endpoint = EXCLUDED.endpoint,
+                            "match"  = EXCLUDED."match"
+                    """, (identify_id, row["id"], f"{carrier_ip}/32"))
+                else:
+                    cur.execute("DELETE FROM ps_identify WHERE id = %s",
+                                (identify_id,))
             else:
                 cur.execute("DELETE FROM ps_registrations WHERE id = %s",
                             (row["id"],))
