@@ -143,6 +143,27 @@ if [ -n "${ASTERISK_EXTERNAL_MEDIA_ADDRESS:-}" ]; then
   done
 fi
 
+# 3c. Inject TURN config into rtp.conf when a TURN server is configured.
+#
+# WebRTC agent endpoints use ICE. Behind the public NLB, Asterisk can
+# only gather a host candidate (pod 10.x) plus a STUN srflx that carries
+# the pod's NAT-gateway egress IP — neither is reachable by the browser,
+# so ICE fails and media never connects (external_media_address above
+# does NOT help: PJSIP ignores it for ICE endpoints). Pointing rtp.conf
+# at a TURN relay (coturn) makes Asterisk gather a relay candidate on the
+# relay's public IP, which the browser CAN reach. turnaddr is set per
+# deployment (prod has coturn; dev/test don't), so it lives in env, not
+# the baked rtp.conf.sample. Idempotent: skip if already present.
+if [ -n "${ASTERISK_TURN_ADDR:-}" ]; then
+  if grep -q '^turnaddr=' /etc/asterisk/rtp.conf 2>/dev/null; then
+    log "turnaddr already present in rtp.conf, skipping"
+  else
+    sed -i "/^\[general\]\$/a turnaddr=${ASTERISK_TURN_ADDR}\nturnusername=${ASTERISK_TURN_USERNAME:-}\nturnpassword=${ASTERISK_TURN_PASSWORD:-}" \
+      /etc/asterisk/rtp.conf
+    log "injected turnaddr=${ASTERISK_TURN_ADDR} into rtp.conf"
+  fi
+fi
+
 # 4. Runtime dirs - idempotent. PVCs / emptyDirs may mask the image's
 # pre-created versions, so re-create on every start.
 for d in \

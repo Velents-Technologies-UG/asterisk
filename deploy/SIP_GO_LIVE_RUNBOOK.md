@@ -26,14 +26,27 @@ because they need a test environment, an ops action, or the external call-engine
      `rtpend` to e.g. `10300` (~150 calls). They MUST match or Asterisk allocates
      ports the NLB won't forward (symptom: "connects, no audio").
    - Verify: place 5+ concurrent calls; all have two-way audio.
-2. **TURN server (WebRTC media behind NAT).** Only STUN is configured. Agents on
-   corporate/symmetric NAT get SIP-OK + dead air.
-   - Deploy coturn (devops helm) with a public IP on 3478/UDP+TCP (and 5349/TLS).
-   - Wire it into `asterisk configs/samples/rtp.conf.sample`
-     (`turnaddr/turnusername/turnpassword`) AND `agent-hub` env
-     `ASTERISK_ICE_SERVERS` (a JSON array incl. the `turn:` URL + credentials —
-     `lib/sip/provision.ts` already parses it).
-   - Verify: an agent on a mobile hotspot / locked-down LAN gets two-way audio.
+2. **TURN server (WebRTC media behind NAT).** STUN alone cannot work behind the
+   NLB — Asterisk's only ICE candidates are the pod `host` (10.x) and a STUN srflx
+   carrying the symmetric NAT-gateway egress IP, neither reachable by the browser —
+   so every WebRTC agent gets SIP-OK + dead air, not just those on corporate NAT.
+   The in-repo wiring is now **shipped**; the remaining work is the coturn deploy +
+   AWS config.
+   - Shipped: `deploy/entrypoint.sh` injects `turnaddr/turnusername/turnpassword`
+     into `rtp.conf` from `ASTERISK_TURN_ADDR` / `ASTERISK_TURN_USERNAME` /
+     `ASTERISK_TURN_PASSWORD`; `agent-hub lib/sip/provision.ts` already parses
+     `ASTERISK_ICE_SERVERS` and (PR #687) passes it to JsSIP; `devops
+     .../helm-charts/coturn/` chart added.
+   - Ops: allocate an Elastic IP and pin it to the coturn NLB
+     (`eip-allocations`); set it as coturn `external-ip` + the `turn.velents.ai`
+     DNS A record. Mirror the coturn image to ECR. Create Secrets Manager
+     `prod/coturn/env` (`TURN_PASSWORD=…`) and append the matching
+     `ASTERISK_TURN_*` vars to `prod/asterisk/env` and `ASTERISK_ICE_SERVERS`
+     (JSON array incl. the `turn:` URL + credentials) to `prod/agent-hub/env`.
+   - TLS (5349) is deferred — needs a server cert; `turn:…?transport=tcp` covers
+     TCP-only networks meanwhile.
+   - Verify: an agent on a mobile hotspot / locked-down LAN gets two-way audio;
+     `chrome://webrtc-internals` shows a `relay` candidate and ICE `connected`.
 3. **K8s health probes + ARI health.** `devops values.yaml` has empty probes;
    `control_api.py /healthz` only checks bind, not ARI reachability.
    - Add liveness/readiness/startup probes; make `/healthz` confirm ARI is
