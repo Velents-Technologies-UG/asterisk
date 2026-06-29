@@ -43,18 +43,8 @@ rtpend=10003
 ; here; PJSIP only honors it for endpoints without ICE. For WebRTC
 ; endpoints, ICE candidates take precedence.
 ;
-; Google's public STUN is fine for cheap discovery, but it is NOT
-; sufficient behind our NLB: the srflx it yields carries the pod's
-; NAT-gateway *egress* IP (symmetric NAT, different from the NLB
-; ingress IP), so the browser still can't reach Asterisk's media and
-; ICE goes checking -> failed. The working path is a TURN relay.
-;
-; turnaddr/turnusername/turnpassword are injected at boot by
-; deploy/entrypoint.sh from ASTERISK_TURN_ADDR / ASTERISK_TURN_USERNAME
-; / ASTERISK_TURN_PASSWORD (prod points these at coturn). They are NOT
-; baked here because the relay address + credentials are deployment-
-; specific. With turnaddr set, Asterisk gathers a relay candidate on
-; the relay's public IP that the browser CAN reach, and bidirectional
-; audio comes up. Leaving stunaddr in place lets STUN succeed first on
-; networks where it can, falling back to TURN otherwise.
+; Google's public STUN is fine for discovery — no authentication
+; needed, low latency. If we ever onboard a customer behind a NAT
+; that blocks UDP to public STUN, add a TURN server (turnaddr,
+; turnusername, turnpassword) and it falls back automatically.
 stunaddr=stun.l.google.com:19302
