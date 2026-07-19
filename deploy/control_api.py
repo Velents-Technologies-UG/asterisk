@@ -1106,6 +1106,15 @@ class Handler(BaseHTTPRequestHandler):
     def _dispatch(self, method):
         path = self.path.split("?", 1)[0]
         if path == "/healthz":
+            # Bind-only liveness check. entrypoint.sh polls this during boot
+            # to confirm the sidecar's socket is up *before* Asterisk itself
+            # has started (see deploy/entrypoint.sh) — it must stay 200 the
+            # instant the process is listening, independent of ARI/Asterisk
+            # readiness, or the entrypoint's own boot gate deadlocks against
+            # this same check. Use /readyz for ARI-aware readiness instead.
+            self._send_json(HTTPStatus.OK, {"ok": True, "service": "call-engine-stub"})
+            return
+        if path == "/readyz":
             ari_ok, ari_detail = _check_ari_reachable()
             payload = {
                 "ok": ari_ok,
