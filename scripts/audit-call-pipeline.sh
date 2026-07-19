@@ -17,6 +17,11 @@
 #                                                 # unset, only in-cluster
 #                                                 # gates run
 #   AGENT_HUB_URL=https://agent-hub-test.velents.ai
+#   ENV_FILE=.env                                  # where Gate A/B read
+#                                                   # ASTERISK_WSS_URL /
+#                                                   # ASTERISK_SIP_DOMAIN
+#                                                   # from, to derive the
+#                                                   # canonical WSS host
 #
 # Read-only. The only mutation is gate E (originate to TEST_DID) — comment
 # it out if you don't want to ring a phone.
@@ -30,6 +35,7 @@ TEST_DID="${TEST_DID:-}"
 CONTROL_URL="${CONTROL_URL:-}"
 BEARER="${BEARER:-}"
 AGENT_HUB_URL="${AGENT_HUB_URL:-}"
+ENV_FILE="${ENV_FILE:-.env}"
 
 C_RED=$'\033[31m'; C_GRN=$'\033[32m'; C_YEL=$'\033[33m'; C_OFF=$'\033[0m'
 pass() { printf '%s  PASS%s  %s\n' "$C_GRN" "$C_OFF" "$*"; }
@@ -38,6 +44,26 @@ warn() { printf '%s  WARN%s  %s\n' "$C_YEL" "$C_OFF" "$*"; }
 hdr()  { printf '\n%s── %s ──%s\n'  "$C_YEL" "$*" "$C_OFF"; }
 
 FAILED=0
+
+# Derive the one canonical WSS host both Gate A and Gate B key off of.
+# Prefers ASTERISK_WSS_URL (the value that was actually wrong in the
+# :8089 incident this checklist exists to catch), falls back to
+# ASTERISK_SIP_DOMAIN, then a hardcoded default so the gate still runs
+# somewhere without an .env file.
+derive_wss_host() {
+  local url host
+  if [[ -f "$ENV_FILE" ]]; then
+    url=$(grep -E '^ASTERISK_WSS_URL=' "$ENV_FILE" | tail -1 | cut -d= -f2-)
+    if [[ -n "$url" ]]; then
+      host=$(echo "$url" | sed -E 's#^wss?://##; s#[:/].*$##')
+      [[ -n "$host" ]] && { echo "$host"; return; }
+    fi
+    host=$(grep -E '^ASTERISK_SIP_DOMAIN=' "$ENV_FILE" | tail -1 | cut -d= -f2-)
+    [[ -n "$host" ]] && { echo "$host"; return; }
+  fi
+  echo "asterisk.velents.ai"
+}
+WSS_HOST=$(derive_wss_host)
 
 # ────────────────────────────────────────────────────────────────────
 hdr "Gate A — Signaling exposure (Services + Ingress)"
@@ -52,32 +78,48 @@ SVC_OUT=$(kubectl -n "$NS" get svc -o wide 2>/dev/null) \
 echo "$SVC_OUT" | awk 'NR==1 || /asterisk/'
 
 SIP_PORTS_FOUND=$(echo "$SVC_OUT" | grep -oE '\b(5060|5061|8088|8089)/(TCP|UDP)' | sort -u)
-RTP_RANGE=$(echo "$SVC_OUT" | grep -oE '10000-10099|10000:10099' | head -1)
+
+# RTP is exposed today as individual NodePort UDP mappings
+# (10000:31386/UDP,10001:30900/UDP,...), not a literal "10000-10099"
+# range string — match both forms. Per SIP_GO_LIVE_RUNBOOK.md item 1,
+# the AWS security-group rule quota currently limits this to exactly
+# 10000-10003 (4 ports, ~2-4 concurrent calls); that's a known/accepted
+# limitation, not a fresh regression, so it WARNs rather than FAILs.
+RTP_RANGE_LITERAL=$(echo "$SVC_OUT" | grep -oE '10000-10099|10000:10099' | head -1)
+RTP_PORTS_FOUND=$(echo "$SVC_OUT" | grep -oE '\b1[0-9]{4}:[0-9]+/UDP' | grep -oE '^1[0-9]{4}' | sort -un)
+RTP_COUNT=$(echo -n "$RTP_PORTS_FOUND" | grep -c '^[0-9]')
 
 [[ -n "$SIP_PORTS_FOUND" ]] \
   && pass "SIP signaling ports exposed: $(echo $SIP_PORTS_FOUND | tr '\n' ' ')" \
   || fail "no Service exposes 5060/5061/8088/8089 — carriers and softphones can't reach the pod"
 
-[[ -n "$RTP_RANGE" ]] \
-  && pass "RTP UDP range exposed via NLB: $RTP_RANGE" \
-  || fail "RTP UDP range 10000-10099 not exposed — calls will answer with no audio"
+if [[ -n "$RTP_RANGE_LITERAL" ]]; then
+  pass "RTP UDP range exposed via NLB: $RTP_RANGE_LITERAL"
+elif [[ "$RTP_COUNT" -eq 4 ]]; then
+  warn "RTP UDP range limited to 4 ports ($(echo $RTP_PORTS_FOUND | tr '\n' ' ')) — known/accepted per SIP_GO_LIVE_RUNBOOK.md item 1 (AWS SG rule quota; ~2-4 concurrent call ceiling)"
+elif [[ "$RTP_COUNT" -gt 4 ]]; then
+  pass "RTP UDP range exposed via NLB: $RTP_COUNT ports ($(echo $RTP_PORTS_FOUND | tr '\n' ' '))"
+elif [[ "$RTP_COUNT" -gt 0 ]]; then
+  fail "RTP UDP range narrower than the documented 4-port minimum — only $RTP_COUNT port(s) found: $(echo $RTP_PORTS_FOUND | tr '\n' ' ')"
+else
+  fail "RTP UDP range not exposed — calls will answer with no audio"
+fi
 
 ING=$(kubectl -n "$NS" get ingress -o jsonpath='{range .items[*]}{.spec.rules[*].host}{"\n"}{end}' 2>/dev/null \
         | sort -u)
 echo "Ingress hosts:"; echo "$ING" | sed 's/^/    /'
 
-echo "$ING" | grep -q '^asterisk-ws\.' && pass "WSS Ingress route present" \
-  || warn "no asterisk-ws.* Ingress host found; WSS may not be terminated at the Ingress"
+echo "$ING" | grep -qx "$WSS_HOST" && pass "WSS Ingress route present ($WSS_HOST)" \
+  || warn "no Ingress host matching '$WSS_HOST' found; WSS may not be terminated at the Ingress"
 
 # ────────────────────────────────────────────────────────────────────
 hdr "Gate B — WSS handshake (TLS cert + reachability)"
-# Browser softphones connect to wss://<host>:8089/ws. If the cert is
-# self-signed, expired, or the host doesn't resolve, the Softphone
-# widget hangs at 'connecting' forever.
+# Browser softphones connect to wss://<host>/ws (TLS terminated at the
+# Ingress). If the cert is self-signed, expired, or the host doesn't
+# resolve, the Softphone widget hangs at 'connecting' forever.
 # ────────────────────────────────────────────────────────────────────
 
-WSS_HOST=$(echo "$ING" | grep -m1 'asterisk-ws\.')
-if [[ -n "$WSS_HOST" ]]; then
+if echo "$ING" | grep -qx "$WSS_HOST"; then
   CERT_INFO=$(timeout 5 openssl s_client -servername "$WSS_HOST" \
                 -connect "$WSS_HOST:443" </dev/null 2>/dev/null \
               | openssl x509 -noout -issuer -subject -dates 2>/dev/null)
@@ -121,7 +163,7 @@ hdr "Gate D — Transports + DB connectivity inside the pod"
 
 K() { kubectl exec -n "$NS" deploy/asterisk -- "$@" 2>&1; }
 
-TRANSPORTS=$(K asterisk -rx 'pjsip show transports' | grep -E '^ Transport:')
+TRANSPORTS=$(K asterisk -rx 'pjsip show transports' | grep -E '^Transport:')
 echo "$TRANSPORTS" | sed 's/^/    /'
 
 for t in transport-udp transport-tcp transport-tls transport-wss; do

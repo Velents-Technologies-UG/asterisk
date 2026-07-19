@@ -1,0 +1,746 @@
+<title>Asterisk Service — Test Suite &amp; Feature Gap Plan</title>
+<style>
+  :root{
+    --bg:#f5f7f8;
+    --surface:#ffffff;
+    --surface-alt:#eef1f3;
+    --text:#1a232c;
+    --muted:#5c6b78;
+    --muted-2:#7c8b97;
+    --border:#dde3e7;
+    --border-strong:#c7d0d6;
+    --accent:#1f6f6b;
+    --accent-soft:#e3f1ef;
+    --risk-high:#b3261e;
+    --risk-high-soft:#fbe9e7;
+    --risk-med:#8a5300;
+    --risk-med-soft:#fdf1de;
+    --ok:#1c7a4d;
+    --ok-soft:#e6f4ec;
+    --code-bg:#eef1f3;
+    --shadow: 0 1px 2px rgba(20,30,35,.06), 0 8px 24px -12px rgba(20,30,35,.12);
+  }
+  :root[data-theme="dark"]{
+    --bg:#0c1116; --surface:#131a21; --surface-alt:#1a222b;
+    --text:#e6ebf0; --muted:#93a2ae; --muted-2:#7c8b97;
+    --border:#232d37; --border-strong:#2d3945;
+    --accent:#5fd4c8; --accent-soft:#122b29;
+    --risk-high:#f2726b; --risk-high-soft:#2c1614;
+    --risk-med:#f0ab4d; --risk-med-soft:#2b220e;
+    --ok:#52d492; --ok-soft:#0f2419;
+    --code-bg:#1a222b;
+    --shadow: 0 1px 2px rgba(0,0,0,.3), 0 12px 32px -16px rgba(0,0,0,.6);
+  }
+  @media (prefers-color-scheme: dark){
+    :root:not([data-theme="light"]){
+      --bg:#0c1116; --surface:#131a21; --surface-alt:#1a222b;
+      --text:#e6ebf0; --muted:#93a2ae; --muted-2:#7c8b97;
+      --border:#232d37; --border-strong:#2d3945;
+      --accent:#5fd4c8; --accent-soft:#122b29;
+      --risk-high:#f2726b; --risk-high-soft:#2c1614;
+      --risk-med:#f0ab4d; --risk-med-soft:#2b220e;
+      --ok:#52d492; --ok-soft:#0f2419;
+      --code-bg:#1a222b;
+      --shadow: 0 1px 2px rgba(0,0,0,.3), 0 12px 32px -16px rgba(0,0,0,.6);
+    }
+  }
+
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;}
+  body{
+    background:var(--bg);
+    color:var(--text);
+    font-family:"Source Serif Pro","Iowan Old Style","Palatino Linotype",Georgia,serif;
+    font-size:17px;
+    line-height:1.62;
+    -webkit-font-smoothing:antialiased;
+  }
+  ::selection{ background:var(--accent-soft); color:var(--text); }
+
+  .doc{
+    max-width:960px;
+    margin:0 auto;
+    padding:0 24px 96px;
+  }
+  .wide{ max-width:1180px; }
+
+  /* ---------- Header ---------- */
+  header.masthead{
+    max-width:960px;
+    margin:0 auto;
+    padding:56px 24px 28px;
+    border-bottom:1px solid var(--border);
+  }
+  .eyebrow{
+    font-family:"IBM Plex Mono",ui-monospace,"SFMono-Regular",Menlo,Consolas,monospace;
+    font-size:12.5px;
+    letter-spacing:.14em;
+    text-transform:uppercase;
+    color:var(--accent);
+    display:flex;
+    align-items:center;
+    gap:10px;
+    margin-bottom:14px;
+  }
+  .eyebrow .dot{width:6px;height:6px;border-radius:50%;background:var(--accent);display:inline-block;}
+  h1{
+    font-family:"IBM Plex Sans","Segoe UI Semibold","Segoe UI",system-ui,sans-serif;
+    font-weight:650;
+    font-size:clamp(28px,4vw,40px);
+    line-height:1.12;
+    letter-spacing:-.015em;
+    margin:0 0 12px;
+    text-wrap:balance;
+    color:var(--text);
+  }
+  .subtitle{
+    font-size:17px;
+    color:var(--muted);
+    max-width:62ch;
+    margin:0 0 22px;
+  }
+  .meta-row{
+    display:flex; flex-wrap:wrap; gap:10px 22px;
+    font-family:"IBM Plex Mono",ui-monospace,monospace;
+    font-size:12.5px;
+    color:var(--muted-2);
+  }
+  .meta-row span b{ color:var(--text); font-weight:600; }
+  .chip{
+    display:inline-flex; align-items:center; gap:6px;
+    background:var(--ok-soft); color:var(--ok);
+    border:1px solid color-mix(in srgb, var(--ok) 35%, transparent);
+    padding:3px 10px 3px 8px; border-radius:100px;
+    font-size:12px; font-weight:600; letter-spacing:.02em;
+  }
+  .chip::before{ content:"✓"; font-size:11px; }
+
+  /* ---------- Section rhythm ---------- */
+  section{ margin-top:56px; }
+  .section-label{
+    font-family:"IBM Plex Mono",ui-monospace,monospace;
+    font-size:12px; letter-spacing:.14em; text-transform:uppercase;
+    color:var(--muted-2);
+    display:flex; align-items:center; gap:14px;
+    margin-bottom:16px;
+  }
+  .section-label::after{
+    content:""; flex:1; height:1px; background:var(--border);
+  }
+  h2{
+    font-family:"IBM Plex Sans","Segoe UI Semibold","Segoe UI",system-ui,sans-serif;
+    font-weight:640; font-size:25px; letter-spacing:-.008em;
+    margin:0 0 16px; color:var(--text); text-wrap:balance;
+  }
+  h3{
+    font-family:"IBM Plex Sans","Segoe UI Semibold","Segoe UI",system-ui,sans-serif;
+    font-weight:620; font-size:18px; margin:28px 0 10px; color:var(--text);
+  }
+  p{ margin:0 0 14px; max-width:72ch; }
+  .wide p{ max-width:78ch; }
+  ul,ol{ padding-left:1.3em; margin:0 0 16px; max-width:72ch; }
+  li{ margin-bottom:8px; }
+  strong{ font-weight:700; }
+  a{ color:var(--accent); }
+
+  code, .mono{
+    font-family:"IBM Plex Mono",ui-monospace,"SFMono-Regular",Menlo,Consolas,monospace;
+    font-size:.86em;
+    background:var(--code-bg);
+    border:1px solid var(--border);
+    border-radius:4px;
+    padding:.05em .38em;
+    color:var(--text);
+  }
+
+  /* ---------- Callout boxes ---------- */
+  .callout{
+    background:var(--surface);
+    border:1px solid var(--border);
+    border-left:3px solid var(--accent);
+    border-radius:8px;
+    padding:18px 20px;
+    margin:18px 0;
+    box-shadow:var(--shadow);
+  }
+  .callout p:last-child{ margin-bottom:0; }
+  .callout ul:last-child{ margin-bottom:0; }
+  .callout-label{
+    font-family:"IBM Plex Mono",monospace; font-size:11.5px; letter-spacing:.1em;
+    text-transform:uppercase; color:var(--accent); font-weight:700; margin-bottom:8px; display:block;
+  }
+
+  /* ---------- Tables ---------- */
+  .table-scroll{
+    overflow-x:auto;
+    border:1px solid var(--border);
+    border-radius:10px;
+    box-shadow:var(--shadow);
+    margin:18px 0 8px;
+    background:var(--surface);
+  }
+  table{
+    border-collapse:collapse;
+    width:100%;
+    font-family:"IBM Plex Sans","Segoe UI",system-ui,sans-serif;
+    font-size:13.6px;
+    line-height:1.5;
+  }
+  thead th{
+    position:sticky; top:0;
+    background:var(--surface-alt);
+    text-align:left;
+    font-weight:650;
+    font-size:11.5px;
+    letter-spacing:.06em;
+    text-transform:uppercase;
+    color:var(--muted);
+    padding:12px 14px;
+    border-bottom:1px solid var(--border-strong);
+    white-space:nowrap;
+  }
+  tbody td{
+    padding:12px 14px;
+    border-bottom:1px solid var(--border);
+    vertical-align:top;
+    color:var(--text);
+  }
+  tbody tr:last-child td{ border-bottom:none; }
+  tbody tr:nth-child(even){ background:color-mix(in srgb, var(--surface-alt) 45%, transparent); }
+  td.narrow, th.narrow{ min-width:74px; white-space:nowrap; }
+  td.id-col{ font-family:"IBM Plex Mono",monospace; font-size:12.6px; white-space:nowrap; color:var(--muted); }
+  td.wrap{ min-width:230px; }
+
+  .risk-High{ color:var(--risk-high); font-weight:700; }
+  .risk-Medium{ color:var(--risk-med); font-weight:700; }
+  .risk-Low{ color:var(--muted); font-weight:700; }
+
+  .priority-pill{
+    display:inline-block; font-size:11.5px; font-weight:700; letter-spacing:.02em;
+    padding:2px 9px; border-radius:100px; white-space:nowrap;
+  }
+  .p-critical{ background:var(--risk-high-soft); color:var(--risk-high); }
+  .p-high{ background:var(--risk-med-soft); color:var(--risk-med); }
+  .p-medium{ background:var(--accent-soft); color:var(--accent); }
+  .p-low{ background:var(--surface-alt); color:var(--muted); border:1px solid var(--border); }
+
+  /* ---------- Diagram card ---------- */
+  .diagram-card{
+    background:var(--surface);
+    border:1px solid var(--border);
+    border-radius:12px;
+    box-shadow:var(--shadow);
+    padding:8px;
+    margin:18px 0;
+  }
+  /* Diagram uses fixed dark node colors (set in the mermaid init block itself,
+     independent of page theme) — the card ground stays dark to match, by
+     deliberate choice, the same way a circuit-schematic panel would. */
+  .diagram-card .mermaid-wrap{
+    overflow-x:auto;
+    padding:28px 20px;
+    background:#0d1218;
+    border-radius:8px;
+    min-width:100%;
+  }
+  .diagram-legend{
+    display:flex; gap:22px; flex-wrap:wrap;
+    padding:14px 20px 4px;
+    font-family:"IBM Plex Mono",monospace; font-size:12px; color:var(--muted);
+  }
+  .diagram-legend span{ display:inline-flex; align-items:center; gap:7px; }
+  .legend-line{ width:22px; height:0; border-top:2px solid var(--muted); display:inline-block; }
+  .legend-line.gap{ border-top:2px dashed var(--risk-high); }
+
+  /* ---------- Divider ---------- */
+  hr.rule{ border:none; border-top:1px solid var(--border); margin:56px 0 0; }
+
+  footer{
+    max-width:960px; margin:64px auto 0; padding:24px;
+    border-top:1px solid var(--border);
+    font-family:"IBM Plex Mono",monospace; font-size:12px; color:var(--muted-2);
+    display:flex; justify-content:space-between; flex-wrap:wrap; gap:8px;
+  }
+
+  @media (max-width:640px){
+    body{ font-size:16px; }
+    header.masthead{ padding:40px 18px 24px; }
+    .doc{ padding:0 18px 72px; }
+    thead th, tbody td{ padding:10px; }
+  }
+</style>
+
+<header class="masthead">
+  <div class="eyebrow"><span class="dot"></span>Internal planning document — asterisk repo</div>
+  <h1>Deployment test suite &amp; platform feature gap analysis</h1>
+  <p class="subtitle">A working plan for closing the config-drift bug we found this session, hardening the deployment-health test suite around it, and mapping the wider CXM roadmap against what's actually built today.</p>
+  <div class="meta-row">
+    <span><b>Repo</b> e:\Projects\Velents\asterisk</span>
+    <span><b>Scope</b> test suite + gap analysis</span>
+    <span class="chip">.env fix verified live</span>
+  </div>
+</header>
+
+<main class="doc">
+
+  <section>
+    <div class="section-label">Context</div>
+    <p>Earlier this session we manually diagnosed a real production misconfiguration: <code>.env</code> had <code>ASTERISK_WSS_URL=wss://asterisk.velents.ai:8089/ws</code>, but port 8089 is completely unreachable externally — <code>kubectl get svc/ingress -n velents</code> showed the real routing is the <code>asterisk-wss</code> Service (port 80 → targetPort 8088) fronted by an nginx Ingress on host <code>asterisk.velents.ai</code> (80/443), i.e. TLS terminates at the ingress and forwards plaintext WS to the pod's 8088. Nothing routes to 8089 externally.</p>
+    <p>The working URL is <code>wss://asterisk.velents.ai/ws</code> (default 443), confirmed via a 426 Upgrade Required response carrying <code>Server: Asterisk/GIT-master-</code>. The user fixed <code>.env</code> and asked for a repeatable test suite so this class of bug — config says one thing, actual K8s routing does another — gets caught automatically going forward.</p>
+    <p>Before designing anything new, I checked what already exists (<code>scripts/audit-call-pipeline.sh</code>, <code>deploy/README.md</code>, <code>deploy/SIP_GO_LIVE_RUNBOOK.md</code>), actually ran the existing script read-only against the live cluster, and read the <code>ref/</code> directory (platform architecture + product-roadmap docs) to ground the plan in the real, current state of both the deployment and the broader product. That work surfaced three confirmed bugs in the existing test script and a full picture of what's built vs. planned across the platform — both captured below.</p>
+  </section>
+
+  <section>
+    <div class="section-label">ref/ directory — what exists vs. what's still missing</div>
+    <p>Four docs live in <code>ref/</code>: <code>velents-platform-services-overview.md</code> (written by directly reading the actual repos under <code>E:\Projects\Velents\</code> — the most reliable source here), <code>agent-hub-cxm-contact-center-full-context-dossier.md</code> (1255 lines — the full Linear-derived product roadmap: 100 issues, P0–P5 phases, 13 parent increments with AGH-#### IDs), <code>infath-cxm-platform-demo-analysis.md</code> (a reverse-engineered analysis of a click-through, no-backend UI demo), and <code>infath-service-scope-softphone-and-tech-alternatives.md</code> (an older architecture-alternatives doc).</p>
+
+    <div class="callout">
+      <span class="callout-label">Two corrections the docs make about themselves</span>
+      <ul>
+        <li>The tech-alternatives doc frames <strong>FreeSWITCH as primary, Asterisk as the alternative</strong> for the media/call-control tier — the services-overview doc explicitly flags this as <strong>stale</strong>: <em>"the actual codebase has committed to Asterisk, with real infrastructure built on it… Don't silently follow the old planning docs' FreeSWITCH-primary framing."</em></li>
+        <li>"agent-hub" (the name used throughout the dossier/Linear project) is <strong>not</strong> a separate Next.js repo — it <strong>is</strong> <code>velentsAgents</code>, a Laravel 12 / PHP full-stack app. A prior version of the services-overview doc assumed otherwise; corrected 2026-07-15.</li>
+      </ul>
+    </div>
+
+    <p><strong>Dossier-wide status baseline:</strong> of the 100 tracked issues, only <strong>AGH-6655</strong> (Inc 1, the P0 voice spine) is "In Progress." <strong>98 are Backlog. 1 (AGH-6701) is Canceled</strong> (superseded by AGH-6749). The dossier itself is a planning document with no code-level evidence — "built vs. missing" below comes from cross-referencing the services-overview doc (real repo reads) and the demo-analysis doc (UI/UX prototype, explicitly <strong>not</strong> production code).</p>
+    <p>The pattern across nearly the whole roadmap: <strong>the demo prototype has a polished, interactive UI mockup for most modules; the asterisk repo has real, working infrastructure for the voice/trunk/softphone layer specifically; almost nothing has both</strong> — i.e., the gap is consistently "wire the real backend behind the already-designed UX," not "design the feature from scratch."</p>
+  </section>
+
+  <section>
+    <div class="section-label">Bugs found this session</div>
+
+    <div class="table-scroll">
+      <table>
+        <thead>
+          <tr><th class="narrow">#</th><th>Bug</th><th>Where</th><th>Risk</th><th>Effort to fix</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="narrow">1</td>
+            <td class="wrap"><code>.env</code> <code>ASTERISK_WSS_URL</code> pointed at dead port <code>:8089</code> instead of the live ingress route</td>
+            <td class="id-col">.env</td>
+            <td><span class="risk-High">High</span> — every browser-softphone WSS connection would fail/hang at "connecting" in production</td>
+            <td>Trivial — <strong>already fixed</strong> this session</td>
+          </tr>
+          <tr>
+            <td class="narrow">2</td>
+            <td class="wrap">Gate A/B WSS-host detection matches a nonexistent <code>asterisk-ws.*</code> subdomain instead of the real ingress host <code>asterisk.velents.ai</code></td>
+            <td class="id-col">audit-call-pipeline.sh:69,79</td>
+            <td><span class="risk-Medium">Medium</span> — the suite silently WARNs+skips the TLS-cert gate every run, giving false confidence rather than actually testing WSS</td>
+            <td>Small (~10 lines)</td>
+          </tr>
+          <tr>
+            <td class="narrow">3</td>
+            <td class="wrap">Gate A's RTP-range check greps a literal range string that never matches the real per-port NodePort listing</td>
+            <td class="id-col">audit-call-pipeline.sh:55,61-63</td>
+            <td><span class="risk-Medium">Medium</span> — always FAILs even though the documented/accepted 4-port range is present and working ("cry wolf")</td>
+            <td>Small</td>
+          </tr>
+          <tr>
+            <td class="narrow">4</td>
+            <td class="wrap">Gate D's transport-loaded grep anchor has an extra leading space vs. the real CLI output</td>
+            <td class="id-col">audit-call-pipeline.sh:124</td>
+            <td><span class="risk-Medium">Medium</span> — always reports all 4 PJSIP transports "NOT loaded" regardless of true state (verified live: udp/tcp/wss actually loaded)</td>
+            <td>Trivial — one character</td>
+          </tr>
+          <tr>
+            <td class="narrow">5</td>
+            <td class="wrap"><code>control_api.py</code>'s <code>/healthz</code> only checks process bind, not real ARI reachability — flagged open in <code>SIP_GO_LIVE_RUNBOOK.md</code> item 3</td>
+            <td class="id-col">control_api.py:1074-1076</td>
+            <td><span class="risk-High">High</span> — a half-up pod stays in the K8s LB pool reporting 200, silently dropping real calls</td>
+            <td>Medium — real code change, out of test-script scope</td>
+          </tr>
+          <tr>
+            <td class="narrow">6</td>
+            <td class="wrap"><code>ARI_URL=http://120.0.0.1:8088</code> in <code>.env</code> looks like a <code>127.0.0.1</code> loopback typo</td>
+            <td class="id-col">.env</td>
+            <td><span class="risk-Low">Low/Unknown</span> — not consumed anywhere in this repo; blast radius depends on the external consumer</td>
+            <td>Trivial once confirmed with the owning service</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="wide">
+    <div class="section-label">Features / increments — status, effort, priority</div>
+    <p>Ordered exactly as the dossier's board order (P0 → P5, Inc 1 → Inc 13, AGH-#### ascending within each). <strong>Service</strong> names the concrete sibling repo(s) under <code>e:\Projects\Velents\</code> that already provide real, working infrastructure toward this increment — verified this session, not inferred. Estimates are rough order-of-magnitude for planning conversations, not committed quotes.</p>
+
+    <div class="callout">
+      <span class="callout-label">Correction — Inc 1's AI-audio piece</span>
+      <p>I originally wrote this as "missing, 3–5wk to build a pipeline." Wrong — two working AI-voice integrations already exist in sibling repos, just not bridged to Asterisk yet:</p>
+      <ul>
+        <li><code>livekit-dispatcher</code> (<code>app.py</code>) — FastAPI dispatcher with an <code>ECall</code> worker placing outbound calls via <strong>ElevenLabs' own SIP-trunk API</strong> — the "most-used" option.</li>
+        <li><code>livekit-outbound-caller</code> (<code>core/call_handler.py:52-56</code>) — a LiveKit agent worker whose <code>phone_dict</code> already maps <code>"innocalls"</code> (the same SIP carrier Asterisk's PJSIP trunks use) to a LiveKit outbound-trunk ID. <strong>Caveat:</strong> the trunk-selection function is currently hardcoded to a different ID, with the innocalls branch commented out — present in code, not on the active path.</li>
+        <li>No code anywhere bridges Asterisk's AudioSocket tap (or its innocalls PJSIP trunk) to either — confirmed by a repo-wide search. Two parallel integrations against the same carrier, not one connected pipeline.</li>
+      </ul>
+      <p>Net effect: the missing work is <strong>wiring</strong>, not a new AI-voice vendor integration — the table below reflects the revised estimate.</p>
+    </div>
+
+    <div class="table-scroll">
+      <table>
+        <thead>
+          <tr>
+            <th class="narrow">Phase</th><th>Increment</th><th class="narrow">Ast.?</th><th>Service(s)</th>
+            <th>What exists today</th><th>What's missing</th><th>Est. effort</th><th class="narrow">Size</th><th>Priority</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="narrow id-col">P0</td>
+            <td class="wrap"><strong>Inc 1</strong> — Voice Engine Spine<br><span class="mono">AGH-6655</span> · <em>In Progress</em></td>
+            <td class="narrow"><strong>Yes</strong></td>
+            <td class="wrap"><code>asterisk</code>; <code>livekit-dispatcher</code>; <code>livekit-outbound-caller</code></td>
+            <td class="wrap">SIP trunk connectivity largely built (PJSIP realtime CRUD, dialplan). WebRTC softphone infra (WSS, TURN/coturn) built. Two working AI-voice integrations exist against the same <code>innocalls</code> carrier.</td>
+            <td class="wrap">Session/event model (no orchestrator yet). AudioSocket tap is a stub — needs a <strong>bridge</strong> to an existing integration, not a new pipeline. Screen-pop handoff (no realtime gateway). DR posture (no evidence).</td>
+            <td class="wrap">Session/event: 4-6wk. AI audio bridge: 2-4wk. Screen-pop: 2-3wk. DR: 2wk+</td>
+            <td class="narrow">L</td>
+            <td><span class="priority-pill p-critical">Critical</span></td>
+          </tr>
+          <tr>
+            <td class="narrow id-col">P2</td>
+            <td class="wrap"><strong>Inc 2</strong> — Unified Agent Desktop<br><span class="mono">AGH-6656</span></td>
+            <td class="narrow">Partial</td>
+            <td class="wrap"><code>asterisk</code>; <code>velentsAgents</code></td>
+            <td class="wrap">WebRTC softphone infra (built in asterisk) is the backend this desktop would call into.</td>
+            <td class="wrap">Workspace shell, call controls, live context display, wrap-up flow, notes capture — all frontend, in velentsAgents.</td>
+            <td class="wrap">6-10wk for a full live desktop UI wired to real events</td>
+            <td class="narrow">L</td>
+            <td><span class="priority-pill p-high">High</span></td>
+          </tr>
+          <tr>
+            <td class="narrow id-col">P1</td>
+            <td class="wrap"><strong>Inc 3</strong> — Routing &amp; ACD parity<br><span class="mono">AGH-6657</span></td>
+            <td class="narrow">No</td>
+            <td class="wrap">None yet — candidate host <code>velentsAgents</code></td>
+            <td class="wrap">Demo UI mockup only (interactive, no backend).</td>
+            <td class="wrap">Entire routing/ACD engine: queue model, skill routing, availability, prioritization, overflow, SLA timers, transfer/requeue parity, multi-tenant isolation (12 tickets).</td>
+            <td class="wrap">8-12wk for a real ACD engine</td>
+            <td class="narrow">XL</td>
+            <td><span class="priority-pill p-high">High</span></td>
+          </tr>
+          <tr>
+            <td class="narrow id-col">P2</td>
+            <td class="wrap"><strong>Inc 4</strong> — Supervisor live ops<br><span class="mono">AGH-6658</span></td>
+            <td class="narrow">Partial</td>
+            <td class="wrap"><code>asterisk</code> (ARI externalMedia); <code>velentsAgents</code></td>
+            <td class="wrap">Underlying Asterisk primitive (ARI externalMedia snoop channel) exists and is reusable. Demo has a full consent-gated barge/audit-log UX mockup.</td>
+            <td class="wrap">Wiring externalMedia to whisper/barge/monitor + consent/audit safeguards, live board/queue supervision, intervention controls (10+ tickets).</td>
+            <td class="wrap">Barge/whisper alone: 6-10wk. Full suite: 3mo+</td>
+            <td class="narrow">XL <span style="color:var(--muted-2)">(L for Asterisk-side)</span></td>
+            <td><span class="priority-pill p-high">Med-High</span></td>
+          </tr>
+          <tr>
+            <td class="narrow id-col">P1</td>
+            <td class="wrap"><strong>Inc 5</strong> — Recording Management<br><span class="mono">AGH-6659</span></td>
+            <td class="narrow">Partial</td>
+            <td class="wrap"><code>asterisk</code> (MixMonitor + PVC); DevOps S3 cron</td>
+            <td class="wrap">Recording PVC + S3 sync cron documented/plumbed. Demo has a full retention/redaction policy proposal (180-day, PII/PCI, AES-256) as a spec.</td>
+            <td class="wrap">Retention/backup/restore policy <strong>externally blocked</strong> (AGH-6685, due 2026-07-19 — needs NCA/PDPL reference from INFATH). Access/search console not built.</td>
+            <td class="wrap">Policy: externally blocked. Once unblocked: retention 3-4wk; console 2-3wk</td>
+            <td class="narrow">M</td>
+            <td><span class="priority-pill p-high">High</span></td>
+          </tr>
+          <tr>
+            <td class="narrow id-col">P3</td>
+            <td class="wrap"><strong>Inc 6</strong> — Omnichannel completion<br><span class="mono">AGH-6660</span></td>
+            <td class="narrow">No</td>
+            <td class="wrap"><code>velentsAgents</code>; <code>velents_integrations</code></td>
+            <td class="wrap">Substantial real prior art in velentsAgents (Conversations/Calls/Integration/Inbox); velents_integrations already owns WhatsApp/Messenger/Instagram wiring.</td>
+            <td class="wrap">CC-specific interaction-model extension + agent-desktop handling (3 tickets); optionally simplify velents_integrations into one uniform API first.</td>
+            <td class="wrap">4-6wk (+1-2wk if simplifying the API surface first)</td>
+            <td class="narrow">M</td>
+            <td><span class="priority-pill p-medium">Medium</span></td>
+          </tr>
+          <tr>
+            <td class="narrow id-col">P1</td>
+            <td class="wrap"><strong>Inc 7</strong> — Agent/Workforce mgmt<br><span class="mono">AGH-6661</span></td>
+            <td class="narrow">No</td>
+            <td class="wrap"><code>velentsAgents</code> (Management module, partial)</td>
+            <td class="wrap">Demo UI mockup only. velentsAgents' "Management" (Staff/roles) is not equivalent to scheduling/WFM.</td>
+            <td class="wrap">Real WFM engine: staffing model, schedule/readiness rules, operational admin (4 tickets).</td>
+            <td class="wrap">6-8wk for a baseline WFM module</td>
+            <td class="narrow">L</td>
+            <td><span class="priority-pill p-medium">Medium</span></td>
+          </tr>
+          <tr>
+            <td class="narrow id-col">P1</td>
+            <td class="wrap"><strong>Inc 8</strong> — CC dashboards &amp; reports<br><span class="mono">AGH-6662</span></td>
+            <td class="narrow">No</td>
+            <td class="wrap"><code>velentsAgents</code> (Analytics, Observer)</td>
+            <td class="wrap">Demo UI mockup only. Adjacent real prior art: Analytics module + Observer QA-scorecard module.</td>
+            <td class="wrap">KPI baseline (already has concrete acceptance criteria — 95% SL/30s, 4.5min AHT, ≤5% abandonment, 90% quality, CDR ±1%), ops dashboards, export.</td>
+            <td class="wrap">5-7wk given targets already specified</td>
+            <td class="narrow">M-L</td>
+            <td><span class="priority-pill p-medium">Medium</span></td>
+          </tr>
+          <tr>
+            <td class="narrow id-col">P3<span style="color:var(--muted-2)"><br>(P1 groundwork)</span></td>
+            <td class="wrap"><strong>Inc 9</strong> — IVR &amp; self-service<br><span class="mono">AGH-6663</span></td>
+            <td class="narrow"><strong>Yes</strong></td>
+            <td class="wrap"><code>asterisk</code> (dialplan hook + analytics contract)</td>
+            <td class="wrap"><code>[from-flows]</code> dialplan hook and the <code>/control/flow-analytics/*</code> contract already exist. Demo has a fully fleshed-out IVR Flow Designer UX as the build spec.</td>
+            <td class="wrap">Visual builder UI and FlowRunner execution engine — neither exists in any repo (6 tickets, 1 canceled/superseded).</td>
+            <td class="wrap">FlowRunner backend: 5-8wk. Builder UI (React Flow): 4-6wk</td>
+            <td class="narrow">L</td>
+            <td><span class="priority-pill p-high">Med-High</span></td>
+          </tr>
+          <tr>
+            <td class="narrow id-col">P3</td>
+            <td class="wrap"><strong>Inc 10</strong> — Agent Assist &amp; Productivity<br><span class="mono">AGH-6746</span></td>
+            <td class="narrow">Partial</td>
+            <td class="wrap"><code>velentsAgents</code> (Agents/Tools/Assistant); <code>text-agent</code></td>
+            <td class="wrap">General AI infra exists (Agents, Tools, Assistant), not agent-assist-specific. Demo has a full AI Copilot UI mockup, no backend.</td>
+            <td class="wrap">The human-agent-facing suggestion/KB-match/summary assist itself (11 tickets).</td>
+            <td class="wrap">8-12wk for a real live-transcription + suggestion pipeline</td>
+            <td class="narrow">XL</td>
+            <td><span class="priority-pill p-low">Low-Med</span></td>
+          </tr>
+          <tr>
+            <td class="narrow id-col">P3</td>
+            <td class="wrap"><strong>Inc 11</strong> — Outbound &amp; Callback<br><span class="mono">AGH-6747</span></td>
+            <td class="narrow">Partial</td>
+            <td class="wrap"><code>livekit-dispatcher</code>, <code>livekit-outbound-caller</code></td>
+            <td class="wrap">Already exist as a working <strong>AI-initiated</strong> outbound pipeline. (<code>voice-agent</code> is actually a Weaviate KB API, not an audio pipeline — corrected.)</td>
+            <td class="wrap">Human-agent outbound/callback scheduling + controls (4 tickets), adapting the existing dial infra.</td>
+            <td class="wrap">4-6wk, reusing existing outbound-dial infra</td>
+            <td class="narrow">M</td>
+            <td><span class="priority-pill p-low">Low</span></td>
+          </tr>
+          <tr>
+            <td class="narrow id-col">P1</td>
+            <td class="wrap"><strong>Inc 12</strong> — Governance, RBAC &amp; Audit<br><span class="mono">AGH-6748</span></td>
+            <td class="narrow">No</td>
+            <td class="wrap"><code>velentsAgents</code> (Spatie roles, AuditLog)</td>
+            <td class="wrap">Real prior art: Management module (Spatie roles/permissions) + dedicated AuditLog module. Demo has a full RBAC/governance UI mockup.</td>
+            <td class="wrap">CC-specific RBAC baseline, admin governance, audit-trail wiring, policy-sensitive handling (5 tickets).</td>
+            <td class="wrap">3-5wk — Spatie roles + AuditLog are direct reusable foundations</td>
+            <td class="narrow">M</td>
+            <td><span class="priority-pill p-high">High</span></td>
+          </tr>
+          <tr>
+            <td class="narrow id-col">P5</td>
+            <td class="wrap"><strong>Inc 13</strong> — Productization / 2nd-client<br><span class="mono">AGH-7309</span></td>
+            <td class="narrow">No</td>
+            <td class="wrap"><code>velentsAgents</code> (stancl/tenancy)</td>
+            <td class="wrap">Platform-level multi-tenancy already exists (database-per-tenant) — directly relevant prior art.</td>
+            <td class="wrap">CXM-specific tenantization gaps, config productization, boundary cleanup, onboarding repeatability, docs/packaging (6 tickets).</td>
+            <td class="wrap">6-10wk, mostly after everything else ships</td>
+            <td class="narrow">L</td>
+            <td><span class="priority-pill p-low">Low</span></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="wide">
+    <div class="section-label">Data flow between the services involved</div>
+    <p>Solid arrows = confirmed live/working today. Dashed red arrows = the actual gaps — either unbuilt, or code that exists but isn't on the active path. This is what "wire the AI-audio bridge" in Inc 1 concretely means: the two right-hand paths out of the AudioSocket tap are the missing links.</p>
+
+    <div class="diagram-card">
+      <div class="diagram-legend">
+        <span><span class="legend-line"></span> live / working today</span>
+        <span><span class="legend-line gap"></span> gap — not wired, or dormant code</span>
+      </div>
+      <div class="mermaid-wrap">
+        <pre class="mermaid">
+%%{init: {
+  'theme': 'base',
+  'themeVariables': {
+    'fontSize': '16px',
+    'fontFamily': 'IBM Plex Sans, Segoe UI, sans-serif',
+    'primaryTextColor': '#e6ebf0',
+    'primaryBorderColor': '#4d5c6b',
+    'lineColor': '#9fb0ba',
+    'edgeLabelBackground': '#10151b'
+  },
+  'flowchart': { 'nodeSpacing': 55, 'rankSpacing': 75, 'curve': 'basis' }
+}}%%
+flowchart TB
+  subgraph Carrier["Carrier"]
+    Innocalls["innocalls SIP trunk\ncu622.sip.innocalls.net"]
+  end
+
+  subgraph SoftphoneUI["Human agent"]
+    WSS["Browser softphone\nPJSIP-over-WSS via asterisk.velents.ai/ws\n(UI hosted by velentsAgents)"]
+  end
+
+  subgraph AsteriskPod["asterisk pod (K8s, namespace velents)"]
+    PJSIP["PJSIP trunks\n(pjsip_trunks.conf / realtime)"]
+    Dialplan["Dialplan\n[from-trunk] / [from-trunk-out]\n[from-wss-agents-out] / [from-flows]"]
+    AudioSocket["AudioSocket tap\n[ai-runtime] context\n(STUB — plays 3s tone only)"]
+    ControlAPI["control_api.py sidecar\n:8092  /control/*, /healthz"]
+  end
+
+  subgraph ARILayer["ARI / Stasis 'call-engine'"]
+    ARI["Stasis app\n(location TBD: PHP-in-velentsAgents\nor separate service)"]
+  end
+
+  subgraph Platform["velentsAgents (Laravel 12, core platform)"]
+    VA_Integration["Integration module\n(ElevenLabs, LiveKit, Genesys, WhatsApp...)"]
+    VA_Calls["Calls module (LiveKit voice, per-tenant)"]
+  end
+
+  subgraph RoutingChoice["AI call routing — front-end toggle (proposed)"]
+    Toggle{{"Route this AI-initiated call"}}
+  end
+
+  subgraph AIVoice["AI-voice services (sibling repos)"]
+    LKDispatcher["livekit-dispatcher\napp.py: Dispatch / ECall / Monitor"]
+    LKOutbound["livekit-outbound-caller\ncall_handler.py\nphone_dict['innocalls'] -> trunk ID\n(commented-out branch, dormant)"]
+  end
+
+  subgraph ExternalAI["External AI vendors"]
+    ElevenLabs["ElevenLabs ConvAI\nSIP-trunk outbound-call API"]
+    LiveKitCloud["LiveKit room / SIP bridge"]
+  end
+
+  subgraph IntegrationsSvc["velents_integrations (standalone Laravel service)"]
+    VI["WhatsApp / Messenger / Instagram\nPayment (MoneyHash)"]
+  end
+
+  subgraph Data["Data"]
+    PG[("Postgres\nps_endpoints / ps_aors /\nps_auths / ps_registrations")]
+  end
+
+  Innocalls <-->|SIP REGISTER / INVITE| PJSIP
+  PJSIP --> Dialplan
+  Dialplan -->|inbound DID| ARI
+  Dialplan -->|agent-initiated dial| ARI
+  Dialplan -.->|AI-runtime hook, stub only| AudioSocket
+  WSS -->|WebRTC / DTLS-SRTP, TURN via coturn| PJSIP
+  ControlAPI <-->|CRUD trunks + agent creds| PG
+  PJSIP -.->|reads realtime rows| PG
+  VA_Integration -->|"POST /control/sip/trunks\nPOST /control/asterisk/reload"| ControlAPI
+  VA_Integration -.-> VI
+
+  VA_Calls ==>|"today: fixed path,\nno toggle yet"| Toggle
+  Toggle ==>|"DEFAULT today\ndirect to carrier"| LKDispatcher
+  Toggle ==>|"DEFAULT today\ndirect to carrier"| LKOutbound
+  Toggle -.->|"proposed toggle\nvia Asterisk flow"| AudioSocket
+
+  LKDispatcher -->|"ECall worker\nPOST /v1/convai/sip-trunk/outbound-call"| ElevenLabs
+  LKOutbound -->|CreateSIPParticipantRequest| LiveKitCloud
+  LKOutbound -.->|"mapping exists,\nbranch commented out"| Innocalls
+
+  classDef carrier fill:#1c2a48,stroke:#5b7fc4,color:#dbe6ff,stroke-width:1.5px;
+  classDef human fill:#2c2148,stroke:#8a72d1,color:#ede3ff,stroke-width:1.5px;
+  classDef asterisk fill:#0e332f,stroke:#3fb6ac,color:#d8fbf6,stroke-width:1.5px;
+  classDef ari fill:#2a333d,stroke:#7d93a8,color:#eef2f6,stroke-width:1.5px;
+  classDef platform fill:#1c2348,stroke:#6f80d1,color:#dbe2ff,stroke-width:1.5px;
+  classDef aivoice fill:#4a3612,stroke:#d1953f,color:#ffe9c7,stroke-width:1.5px;
+  classDef vendor fill:#0e3320,stroke:#3fb673,color:#d7ffe6,stroke-width:1.5px;
+  classDef integrations fill:#212b33,stroke:#7391a3,color:#d7e4ec,stroke-width:1.5px;
+  classDef data fill:#2a2a2e,stroke:#8a8a99,color:#eeeeee,stroke-width:1.5px;
+  classDef toggle fill:#3a1830,stroke:#d1439f,color:#ffd6ef,stroke-width:2px;
+  classDef gap stroke:#e5544c,stroke-width:2px,stroke-dasharray:5 5,color:#ffb3ae,fill:#2c1614;
+
+  class Innocalls carrier;
+  class WSS human;
+  class PJSIP,Dialplan,ControlAPI asterisk;
+  class AudioSocket gap;
+  class ARI ari;
+  class VA_Integration,VA_Calls platform;
+  class Toggle toggle;
+  class LKDispatcher,LKOutbound aivoice;
+  class ElevenLabs,LiveKitCloud vendor;
+  class VI integrations;
+  class PG data;
+
+  style Carrier fill:#141d30,stroke:#3d5170,color:#cddcff
+  style SoftphoneUI fill:#1c1630,stroke:#4a3d70,color:#e3d9ff
+  style AsteriskPod fill:#0a211f,stroke:#256b64,color:#d8fbf6
+  style ARILayer fill:#1e252c,stroke:#4d5c6b,color:#eef2f6
+  style Platform fill:#12173a,stroke:#3d4a80,color:#dbe2ff
+  style RoutingChoice fill:#2a1224,stroke:#8a3068,color:#ffd6ef
+  style AIVoice fill:#2b2010,stroke:#8a6224,color:#ffe9c7
+  style ExternalAI fill:#0a2116,stroke:#256b45,color:#d7ffe6
+  style IntegrationsSvc fill:#161d23,stroke:#455a66,color:#d7e4ec
+  style Data fill:#1c1c1e,stroke:#5c5c5c,color:#eeeeee
+        </pre>
+      </div>
+    </div>
+
+    <p style="max-width:78ch; color:var(--muted); font-size:15px; margin-top:14px;"><strong style="color:var(--text)">New this pass — the routing toggle:</strong> today, AI-initiated outbound calls default to going <strong>directly from the LiveKit services to the carrier</strong> (innocalls), bypassing Asterisk entirely — there's no branch point, it's just the only path that's wired up. The diagram now models that as an explicit decision node (pink) with the live default (solid <code>==&gt;</code>) alongside a <strong>proposed</strong> front-end toggle (dashed) that would let a call route through Asterisk's AudioSocket bridge instead, once Inc 1's AI-audio bridge is built.</p>
+
+    <div class="callout">
+      <span class="callout-label">Reading this against the Service column</span>
+      <ul>
+        <li>The <strong>teal group</strong> (Carrier → PJSIP → Dialplan → ARI/violet softphone) is the live, working call-control path — this is what today's <code>audit-call-pipeline.sh</code> gates (fixed per this plan) actually test.</li>
+        <li>The <strong>pink toggle node</strong> is the new addition: it's where a future "route via Asterisk vs. direct-to-carrier" decision would live, once one exists.</li>
+        <li>The <strong>amber group</strong> (livekit-dispatcher / livekit-outbound-caller) is today's live default AI-call path; the dashed line into the <strong>red-dashed AudioSocket</strong> node is the proposed alternative, and the <code>innocalls</code> mapping in livekit-outbound-caller is present in code but its selection branch is commented out — not a live end-to-end route yet.</li>
+        <li>The <strong>indigo group</strong> (velentsAgents' Integration module) already talks to both the Asterisk control-API and livekit-dispatcher — the natural place to eventually own both the AudioSocket bridge and the routing toggle, rather than inventing a fourth coordination point.</li>
+      </ul>
+    </div>
+  </section>
+
+  <section>
+    <div class="section-label">Test-suite implementation plan — the concrete near-term deliverable</div>
+
+    <div class="callout">
+      <span class="callout-label">Decisions confirmed with the user</span>
+      <p>Wrapper lives as a <strong>project-scoped command</strong> (<code>.claude/commands/audit-call-pipeline.md</code>, not the global one); the narrow RTP range (10000-10003) is a known/accepted limitation → <strong>WARN, not FAIL</strong>; <code>CONTROL_API_SECRET</code> may be <strong>auto-read from .env</strong> as the <code>BEARER</code> default (explicit env var still overrides) — ARI credentials stay <code>kubectl exec</code>-only, never read from local <code>.env</code>.</p>
+    </div>
+
+    <p>All gate logic stays in <code>scripts/audit-call-pipeline.sh</code> — the single source of truth, runnable from a terminal, CI, or cron with zero Claude Code dependency. Add a thin wrapper command that only resolves inputs, invokes the script, and re-renders its output as a structured report — no gate logic duplicated in the command file.</p>
+
+    <h3>1. Fix the three confirmed bugs</h3>
+    <ul>
+      <li><strong>Gate A</strong> (<code>audit-call-pipeline.sh:65-70</code>): derive <code>WSS_HOST</code> once, preferring <code>ASTERISK_WSS_URL</code> from <code>.env</code>, falling back to <code>ASTERISK_SIP_DOMAIN</code>, then a hardcoded default. Replace <code>grep -q '^asterisk-ws\.'</code> with an exact match. Delete the independent re-derivation at line 79.</li>
+      <li><strong>Gate A's RTP check</strong> (lines 55, 61-63): match individual NodePort UDP entries instead of a literal range string. Exactly the documented 4-port set → <strong>WARN</strong>, not FAIL; only FAIL if narrower or absent.</li>
+      <li><strong>Gate D</strong> (line 124): fix the grep anchor from <code>'^ Transport:'</code> to <code>'^Transport:'</code>.</li>
+    </ul>
+
+    <h3>2. New gate — external reachability + .env config-drift guard</h3>
+    <p>Inserted right after the (fixed) WSS TLS-cert gate — the gate that would have caught today's <code>:8089</code> bug automatically: DNS resolution, HTTP/HTTPS reachability (lenient status-code PASS), the exact WSS-upgrade probe verified by hand this session (426 + <code>Server: Asterisk</code> header required), and a config-drift guard scanning <code>.env</code> for any <code>*_WSS_URL</code>/<code>*_ARI_URL</code> var that disagrees with the live ingress mapping. <code>SKIP_EXTERNAL=1</code> opts out for offline/firewalled dev.</p>
+
+    <h3>3. New gate — pod health</h3>
+    <p>Restart-count / CrashLoopBackOff detection via <code>kubectl get pods</code>, plus a log scan that excludes confirmed-normal noise (trunk flapping, UNIX socket disconnects) before checking for genuinely fatal patterns.</p>
+
+    <h3>4. New gate — ARI readiness + control-api /healthz cross-check</h3>
+    <p>Closes the gap <code>SIP_GO_LIVE_RUNBOOK.md</code> item 3 flags as open: in-pod ARI readiness via <code>kubectl exec</code>, in-pod <code>/healthz</code> (labeled bind-only), and — the key new assertion — <strong>FAIL if <code>/healthz</code> is 200 but ARI readiness fails</strong>, naming the documented gap explicitly. Plus cross-cluster checks using <code>BEARER</code> against the real external ingress path.</p>
+
+    <h3>5. Relabel gates A→J</h3>
+    <div class="table-scroll">
+      <table>
+        <thead><tr><th class="narrow">New</th><th class="narrow">Old</th><th>Content</th></tr></thead>
+        <tbody>
+          <tr><td class="narrow id-col">A</td><td class="narrow id-col">A</td><td>Signaling exposure (host-detection + RTP-range bugs fixed)</td></tr>
+          <tr><td class="narrow id-col">B</td><td class="narrow id-col">B</td><td>WSS TLS cert check (bug fixed, shared WSS_HOST)</td></tr>
+          <tr><td class="narrow id-col">C</td><td class="narrow id-col">—</td><td><strong>New:</strong> external reachability + .env drift guard</td></tr>
+          <tr><td class="narrow id-col">D</td><td class="narrow id-col">—</td><td><strong>New:</strong> pod health</td></tr>
+          <tr><td class="narrow id-col">E</td><td class="narrow id-col">C</td><td>Permissions-Policy header</td></tr>
+          <tr><td class="narrow id-col">F</td><td class="narrow id-col">D</td><td>Transports + DB connectivity (grep-anchor bug fixed)</td></tr>
+          <tr><td class="narrow id-col">G</td><td class="narrow id-col">—</td><td><strong>New:</strong> ARI readiness + /healthz cross-check + cross-cluster checks</td></tr>
+          <tr><td class="narrow id-col">H</td><td class="narrow id-col">E</td><td>Trunk REGISTER state</td></tr>
+          <tr><td class="narrow id-col">I</td><td class="narrow id-col">F</td><td>Agent provisioning</td></tr>
+          <tr><td class="narrow id-col">J</td><td class="narrow id-col">G</td><td>Outbound INVITE to TEST_DID — <strong>stays opt-in/mutating, unchanged</strong></td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3>6. Thin wrapper command</h3>
+    <p><code>.claude/commands/audit-call-pipeline.md</code> mirrors the shape of the user's existing <code>run-tests.md</code>: resolve inputs from repo conventions and <code>.env</code>; ask once for what must never be silently defaulted; invoke the script; re-render its PASS/FAIL/WARN stream into a structured summary. No gate logic lives in this file.</p>
+
+    <h3>Files to change</h3>
+    <ul>
+      <li><code>scripts/audit-call-pipeline.sh</code> — three bug fixes, three new gates, relabel, updated header.</li>
+      <li><code>.claude/commands/audit-call-pipeline.md</code> — new file, thin reporting wrapper.</li>
+    </ul>
+
+    <h3>Verification</h3>
+    <ol>
+      <li>Run the script with no mutating env vars set and confirm every fixed/new gate behaves as designed.</li>
+      <li>Deliberately re-break <code>ASTERISK_WSS_URL</code> back to <code>:8089</code> in a scratch copy and confirm the drift guard catches it, citing this incident.</li>
+      <li>Run <code>/audit-call-pipeline</code> from a session in this repo and confirm the structured summary matches the raw gate results.</li>
+      <li>Exit code: <code>0</code> clean, <code>1</code> on any FAIL — unchanged CI/cron contract.</li>
+    </ol>
+  </section>
+
+</main>
+
+<footer>
+  <span>Draft plan — pending review</span>
+  <span>asterisk / scripts / .claude</span>
+</footer>

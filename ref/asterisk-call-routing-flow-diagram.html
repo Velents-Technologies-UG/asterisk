@@ -1,0 +1,262 @@
+<title>Asterisk / AI-voice call routing — overview</title>
+<style>
+  :root{
+    --bg:#0a0e13;
+    --panel:#0d1218;
+    --text:#e7ecf1;
+    --muted:#8a97a6;
+    --border:#232f3a;
+    --accent:#5fd4c8;
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;height:100%;}
+  body{
+    background:var(--bg);
+    color:var(--text);
+    font-family:"IBM Plex Sans","Segoe UI",system-ui,sans-serif;
+    display:flex; flex-direction:column;
+    min-height:100vh;
+  }
+
+  header{
+    padding:22px 28px 16px;
+    border-bottom:1px solid var(--border);
+    display:flex; align-items:baseline; justify-content:space-between; flex-wrap:wrap; gap:10px 24px;
+  }
+  h1{
+    font-size:18px; font-weight:640; margin:0; letter-spacing:-.01em;
+  }
+  .legend{
+    display:flex; gap:20px; flex-wrap:wrap;
+    font-family:"IBM Plex Mono",ui-monospace,Menlo,Consolas,monospace;
+    font-size:12px; color:var(--muted);
+  }
+  .legend span{ display:inline-flex; align-items:center; gap:7px; }
+  .lline{ width:20px; height:0; border-top:1.5px solid #9fb0ba; display:inline-block; }
+  .lline.dflt{ border-top:3px solid #d1953f; }
+  .lline.proposed{ border-top:1.5px dashed #4fc3f7; }
+  .lline.legacy{ border-top:1px dashed #7a8590; }
+  .lline.gap{ border-top:2px dashed #e5544c; }
+
+  .toolbar{
+    position:fixed; right:20px; bottom:20px; z-index:10;
+    display:flex; gap:6px;
+    background:var(--panel); border:1px solid var(--border); border-radius:10px;
+    padding:6px; box-shadow:0 8px 24px -8px rgba(0,0,0,.6);
+  }
+  .toolbar button{
+    width:34px; height:34px; border-radius:7px; border:1px solid var(--border);
+    background:#141b22; color:var(--text); font-size:16px; cursor:pointer;
+    display:flex; align-items:center; justify-content:center;
+  }
+  .toolbar button:hover{ border-color:var(--accent); color:var(--accent); }
+  .toolbar .sep{ width:1px; background:var(--border); margin:4px 2px; }
+
+  .stage{
+    flex:1;
+    overflow:auto;
+    display:flex;
+    align-items:flex-start;
+    justify-content:center;
+    padding:32px 16px 80px;
+    cursor:grab;
+  }
+  .stage.grabbing{ cursor:grabbing; }
+  .zoomwrap{
+    transform-origin: top center;
+    transition: transform .12s ease-out;
+  }
+
+  footer{
+    padding:14px 28px; border-top:1px solid var(--border);
+    font-family:"IBM Plex Mono",monospace; font-size:11.5px; color:var(--muted);
+    text-align:center;
+  }
+
+  /* Edge labels are supporting detail, not the main point — keep them a
+     notch smaller and dimmer than node text so the node's role still reads
+     first at a glance. */
+  .edgeLabel, .edgeLabel *, g.edgeLabel text, g.edgeLabel tspan{
+    font-size:10.5px !important;
+    opacity:.88;
+  }
+  .edgeLabel div{ line-height:1.35 !important; }
+  .nodeLabel div, .label div{ line-height:1.4; }
+</style>
+
+<header>
+  <h1>Asterisk ↔ AI-voice call routing — logic overview</h1>
+  <div class="legend">
+    <span><span class="lline"></span> live path</span>
+    <span><span class="lline dflt"></span> default today</span>
+    <span><span class="lline proposed"></span> proposed change</span>
+    <span><span class="lline legacy"></span> legacy / dormant</span>
+    <span><span class="lline gap"></span> gap — not built</span>
+  </div>
+</header>
+
+<div class="stage" id="stage">
+  <div class="zoomwrap" id="zoomwrap">
+    <pre class="mermaid">
+%%{init: {
+  'theme': 'base',
+  'themeVariables': {
+    'fontSize': '13px',
+    'fontFamily': 'IBM Plex Sans, Segoe UI, sans-serif',
+    'primaryTextColor': '#eef2f5',
+    'primaryBorderColor': '#4d5c6b',
+    'lineColor': '#9fb0ba',
+    'edgeLabelBackground': '#0d1218'
+  },
+  'flowchart': { 'nodeSpacing': 65, 'rankSpacing': 95, 'curve': 'basis' }
+}}%%
+flowchart TB
+  subgraph Carrier["Carrier"]
+    Innocalls["Innocalls\n(SIP carrier)"]
+  end
+
+  subgraph VelentsAgentsFE["velentsAgents — Frontend"]
+    Softphone["Agent Desktop UI\nbrowser softphone, call controls\nhuman agents work here"]
+  end
+
+  subgraph AsteriskPod["Asterisk"]
+    PJSIP["SIP Trunk Configuration"]
+    Dialplan["Call Routing Logic"]
+    AudioSocket["AI Audio Bridge\n(not built yet)"]
+    ControlAPI["Control API"]
+  end
+
+  subgraph ARILayer["Call control"]
+    ARI["Call Control Service\n(location TBD)"]
+  end
+
+  subgraph Platform["velentsAgents — Backend"]
+    VA_Integration["Integrations\n(3rd-party services)"]
+    VA_Calls["Voice Calls"]
+  end
+
+  subgraph IntegrationsSvc["velents_integrations"]
+    VI["Channel &amp; Payment Integrations\n(+ proposed: Asterisk provisioning)"]
+  end
+
+  subgraph RoutingChoice["Routing choice (proposed)"]
+    Toggle{{"Route this AI call"}}
+  end
+
+  subgraph AIVoice["AI voice services"]
+    LKDispatcher["AI Call Dispatcher"]
+    LKOutbound["AI Outbound Caller"]
+  end
+
+  subgraph ExternalAI["AI vendors"]
+    ElevenLabs["ElevenLabs\n(Voice AI)"]
+    LiveKitCloud["LiveKit\n(Voice AI)"]
+  end
+
+  subgraph Data["Database"]
+    PG[("Trunk &amp; Agent Database")]
+  end
+
+  Innocalls <-->|phone calls| PJSIP
+  PJSIP --> Dialplan
+  Dialplan -->|incoming call| ARI
+  Dialplan -->|agent call| ARI
+  Dialplan -->|AI hook, not built| AudioSocket
+  Softphone -->|connects| PJSIP
+  Softphone -->|call status| VA_Calls
+  ControlAPI <-->|reads / writes| PG
+  PJSIP -->|reads config| PG
+  VA_Integration -->|legacy: direct| ControlAPI
+  VA_Integration -->|proposed| VI
+  VI -->|proposed| ControlAPI
+  VA_Calls --> Toggle
+  Toggle -->|default today| LKDispatcher
+  Toggle -->|default today| LKOutbound
+  Toggle -->|proposed| AudioSocket
+  LKDispatcher -->|places call| ElevenLabs
+  LKOutbound -->|places call| LiveKitCloud
+  LKOutbound -->|legacy: inactive| Innocalls
+
+  linkStyle default stroke:#9fb0ba,stroke-width:1.5px;
+  linkStyle 4 stroke:#e5544c,stroke-width:2px,stroke-dasharray:6 4;
+  linkStyle 9,18 stroke:#7a8590,stroke-width:1px,stroke-dasharray:2 7;
+  linkStyle 10,11,15 stroke:#4fc3f7,stroke-width:1.5px,stroke-dasharray:5 4;
+  linkStyle 13,14 stroke:#d1953f,stroke-width:3px;
+
+  classDef carrier fill:#1c2a48,stroke:#5b7fc4,color:#dbe6ff,stroke-width:1.5px;
+  classDef human fill:#2c2148,stroke:#8a72d1,color:#ede3ff,stroke-width:1.5px;
+  classDef asterisk fill:#0e332f,stroke:#3fb6ac,color:#d8fbf6,stroke-width:1.5px;
+  classDef ari fill:#2a333d,stroke:#7d93a8,color:#eef2f6,stroke-width:1.5px;
+  classDef platform fill:#1c2348,stroke:#6f80d1,color:#dbe2ff,stroke-width:1.5px;
+  classDef aivoice fill:#4a3612,stroke:#d1953f,color:#ffe9c7,stroke-width:1.5px;
+  classDef vendor fill:#0e3320,stroke:#3fb673,color:#d7ffe6,stroke-width:1.5px;
+  classDef integrations fill:#212b33,stroke:#7391a3,color:#d7e4ec,stroke-width:1.5px;
+  classDef data fill:#2a2a2e,stroke:#8a8a99,color:#eeeeee,stroke-width:1.5px;
+  classDef toggle fill:#3a1830,stroke:#d1439f,color:#ffd6ef,stroke-width:2px;
+  classDef gap stroke:#e5544c,stroke-width:2px,stroke-dasharray:5 5,color:#ffb3ae,fill:#2c1614;
+
+  class Innocalls carrier;
+  class Softphone human;
+  class PJSIP,Dialplan,ControlAPI asterisk;
+  class AudioSocket gap;
+  class ARI ari;
+  class VA_Integration,VA_Calls platform;
+  class Toggle toggle;
+  class LKDispatcher,LKOutbound aivoice;
+  class ElevenLabs,LiveKitCloud vendor;
+  class VI integrations;
+  class PG data;
+
+  style Carrier fill:#141d30,stroke:#3d5170,color:#cddcff
+  style VelentsAgentsFE fill:#1c1630,stroke:#4a3d70,color:#e3d9ff
+  style AsteriskPod fill:#0a211f,stroke:#256b64,color:#d8fbf6
+  style ARILayer fill:#1e252c,stroke:#4d5c6b,color:#eef2f6
+  style Platform fill:#12173a,stroke:#3d4a80,color:#dbe2ff
+  style IntegrationsSvc fill:#161d23,stroke:#455a66,color:#d7e4ec
+  style RoutingChoice fill:#2a1224,stroke:#8a3068,color:#ffd6ef
+  style AIVoice fill:#2b2010,stroke:#8a6224,color:#ffe9c7
+  style ExternalAI fill:#0a2116,stroke:#256b45,color:#d7ffe6
+  style Data fill:#1c1c1e,stroke:#5c5c5c,color:#eeeeee
+    </pre>
+  </div>
+</div>
+
+<div class="toolbar">
+  <button id="zoomOut" title="Zoom out">−</button>
+  <button id="zoomReset" title="Reset">⟲</button>
+  <button id="zoomIn" title="Zoom in">+</button>
+</div>
+
+<footer>Scroll/pinch or use the controls to zoom — this is a real vector diagram, so it stays sharp at any size. Drag to pan.</footer>
+
+<script>
+  (function(){
+    var scale = 1;
+    var wrap = document.getElementById('zoomwrap');
+    var stage = document.getElementById('stage');
+    function apply(){ wrap.style.transform = 'scale(' + scale + ')'; }
+    document.getElementById('zoomIn').onclick = function(){ scale = Math.min(scale + 0.15, 3); apply(); };
+    document.getElementById('zoomOut').onclick = function(){ scale = Math.max(scale - 0.15, 0.4); apply(); };
+    document.getElementById('zoomReset').onclick = function(){ scale = 1; apply(); };
+
+    stage.addEventListener('wheel', function(e){
+      if (!e.ctrlKey && !e.metaKey) return;
+      e.preventDefault();
+      scale = Math.min(3, Math.max(0.4, scale + (e.deltaY < 0 ? 0.08 : -0.08)));
+      apply();
+    }, { passive:false });
+
+    var isDown = false, startX, startY, scrollLeft, scrollTop;
+    stage.addEventListener('mousedown', function(e){
+      isDown = true; stage.classList.add('grabbing');
+      startX = e.pageX; startY = e.pageY;
+      scrollLeft = stage.scrollLeft; scrollTop = stage.scrollTop;
+    });
+    window.addEventListener('mouseup', function(){ isDown = false; stage.classList.remove('grabbing'); });
+    window.addEventListener('mousemove', function(e){
+      if (!isDown) return;
+      stage.scrollLeft = scrollLeft - (e.pageX - startX);
+      stage.scrollTop = scrollTop - (e.pageY - startY);
+    });
+  })();
+</script>

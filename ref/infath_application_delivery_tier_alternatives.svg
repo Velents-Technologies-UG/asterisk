@@ -1,0 +1,39 @@
+<svg width="100%" viewBox="0 0 780 320" role="img" xmlns="http://www.w3.org/2000/svg" font-family="&quot;Anthropic Sans&quot;, -apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, sans-serif">
+<title>Application &amp; delivery tier — alternatives</title>
+<desc>Backend service framework (NestJS, Go, Java, .NET — near-equivalent, pick by team fluency) and the softphone client library, which is the one genuinely coupled choice: SIP.js/JsSIP paired with Kamailio WebSocket to FreeSWITCH, or the LiveKit client paired with routing agent audio through a LiveKit room.</desc>
+
+<rect x="0" y="0" width="780" height="320" fill="white"/>
+
+<text x="24" y="28" font-size="16" font-weight="600" fill="#0B0B0B">Application &amp; delivery tier — services you write + agent's screen</text>
+<text x="24" y="46" font-size="12" fill="#52514E">teal = primary / already in stack · gray = drop-in alternative</text>
+
+<text x="24" y="76" font-size="13" font-weight="500" fill="#0B0B0B">Backend service framework — near-equivalent, no diagrammed primary</text>
+<g>
+<rect x="24" y="86" width="160" height="42" rx="8" fill="#F1EFE8" stroke="#5F5E5A"/>
+<text x="104" y="112" text-anchor="middle" font-size="13" fill="#444441">NestJS</text>
+<rect x="200" y="86" width="160" height="42" rx="8" fill="#F1EFE8" stroke="#5F5E5A"/>
+<text x="280" y="112" text-anchor="middle" font-size="13" fill="#444441">Go</text>
+<rect x="376" y="86" width="160" height="42" rx="8" fill="#F1EFE8" stroke="#5F5E5A"/>
+<text x="456" y="112" text-anchor="middle" font-size="13" fill="#444441">Java</text>
+<rect x="552" y="86" width="160" height="42" rx="8" fill="#F1EFE8" stroke="#5F5E5A"/>
+<text x="632" y="112" text-anchor="middle" font-size="13" fill="#444441">.NET</text>
+</g>
+<text x="24" y="146" font-size="11" fill="#898781">all called "fine CCaaS backends" in source — pick for team fluency, not technical superiority</text>
+
+<line x1="24" y1="170" x2="756" y2="170" stroke="#E5E3DC" stroke-width="1"/>
+
+<text x="24" y="196" font-size="13" font-weight="500" fill="#0B0B0B">Softphone client library — the one genuinely coupled choice</text>
+
+<rect x="24" y="206" width="330" height="56" rx="8" fill="#E1F5EE" stroke="#0F6E56"/>
+<text x="189" y="228" text-anchor="middle" font-size="14" font-weight="600" fill="#085041">SIP.js / JsSIP</text>
+<text x="189" y="246" text-anchor="middle" font-size="11" fill="#0F6E56">→ Kamailio (WSS) → FreeSWITCH</text>
+<text x="189" y="258" text-anchor="middle" font-size="11" fill="#0F6E56">preferred: full supervisor barge/whisper + recording</text>
+
+<rect x="406" y="206" width="330" height="56" rx="8" fill="#F1EFE8" stroke="#5F5E5A"/>
+<text x="571" y="228" text-anchor="middle" font-size="14" font-weight="500" fill="#444441">LiveKit client</text>
+<text x="571" y="246" text-anchor="middle" font-size="11" fill="#5F5E5A">→ agent audio routed through a LiveKit room</text>
+<text x="571" y="258" text-anchor="middle" font-size="11" fill="#5F5E5A">simpler client — no in-browser SIP handling</text>
+
+<rect x="24" y="278" width="712" height="34" rx="8" fill="#FAECE7" stroke="#993C1D"/>
+<text x="40" y="299" font-size="12" fill="#7A2E15">This choice follows from the voice-tier diagram's media-server pick, not the other way around.</text>
+</svg>

@@ -40,3 +40,24 @@ tests/CI/output
 .develvars
 .devcontainer/
 .claude/
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+!.env.sample
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editors/IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Python
+__pycache__/
+.venv/
+venv/

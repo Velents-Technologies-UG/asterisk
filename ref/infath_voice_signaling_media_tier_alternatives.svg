@@ -1,0 +1,46 @@
+<svg width="100%" viewBox="0 0 760 300" role="img" xmlns="http://www.w3.org/2000/svg" font-family="&quot;Anthropic Sans&quot;, -apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, sans-serif">
+<title>Voice signaling &amp; media tier — alternatives</title>
+<desc>Carrier edge through call control into WebRTC media. Kamailio (primary SBC) vs OpenSIPS (alternative); FreeSWITCH (primary media server) vs Asterisk (alternative) — swapping FreeSWITCH for Asterisk changes the media-forking mechanism from mod_audio_fork to ARI externalMedia, so it is not a free swap.</desc>
+
+<rect x="0" y="0" width="760" height="300" fill="white"/>
+
+<text x="24" y="28" font-size="16" font-weight="600" fill="#0B0B0B">Voice path — carrier edge to WebRTC media</text>
+<text x="24" y="46" font-size="12" fill="#52514E">teal = primary / already in stack · gray = drop-in alternative</text>
+
+<rect x="24" y="58" width="12" height="12" rx="3" fill="#E1F5EE" stroke="#0F6E56"/>
+<text x="42" y="68" font-size="12" fill="#52514E">Primary</text>
+<rect x="110" y="58" width="12" height="12" rx="3" fill="#F1EFE8" stroke="#5F5E5A"/>
+<text x="128" y="68" font-size="12" fill="#52514E">Alternative</text>
+
+<text x="46" y="98" font-size="12" font-weight="500" fill="#52514E">Carrier edge</text>
+<rect x="24" y="106" width="150" height="44" rx="8" fill="#F1EFE8" stroke="#5F5E5A"/>
+<text x="99" y="124" text-anchor="middle" font-size="13" font-weight="500" fill="#444441">KSA carrier</text>
+<text x="99" y="140" text-anchor="middle" font-size="12" fill="#5F5E5A">SIP trunk (STC/Mobily/Salam)</text>
+
+<text x="238" y="98" font-size="12" font-weight="500" fill="#52514E">SBC</text>
+<rect x="216" y="106" width="150" height="44" rx="8" fill="#E1F5EE" stroke="#0F6E56"/>
+<text x="291" y="132" text-anchor="middle" font-size="14" font-weight="600" fill="#085041">Kamailio</text>
+<rect x="216" y="160" width="150" height="40" rx="8" fill="#F1EFE8" stroke="#5F5E5A"/>
+<text x="291" y="184" text-anchor="middle" font-size="13" fill="#444441">OpenSIPS</text>
+<text x="291" y="212" text-anchor="middle" font-size="11" fill="#898781">same lineage — pick by ops familiarity</text>
+
+<text x="450" y="98" font-size="12" font-weight="500" fill="#52514E">Call control / media server</text>
+<rect x="428" y="106" width="150" height="44" rx="8" fill="#E1F5EE" stroke="#0F6E56"/>
+<text x="503" y="132" text-anchor="middle" font-size="14" font-weight="600" fill="#085041">FreeSWITCH</text>
+<rect x="428" y="160" width="150" height="40" rx="8" fill="#F1EFE8" stroke="#5F5E5A"/>
+<text x="503" y="184" text-anchor="middle" font-size="13" fill="#444441">Asterisk</text>
+<text x="503" y="212" text-anchor="middle" font-size="11" fill="#B33" font-weight="500">ripples: mod_audio_fork → ARI externalMedia</text>
+
+<text x="672" y="98" font-size="12" font-weight="500" fill="#52514E">Agent browser</text>
+<rect x="620" y="106" width="120" height="44" rx="8" fill="#F1EFE8" stroke="#5F5E5A"/>
+<text x="680" y="124" text-anchor="middle" font-size="13" font-weight="500" fill="#444441">WebRTC</text>
+<text x="680" y="140" text-anchor="middle" font-size="12" fill="#5F5E5A">softphone media</text>
+
+<line x1="176" y1="128" x2="214" y2="128" stroke="#898781" stroke-width="1.5"/>
+<line x1="368" y1="128" x2="426" y2="128" stroke="#898781" stroke-width="1.5"/>
+<line x1="580" y1="128" x2="618" y2="128" stroke="#898781" stroke-width="1.5"/>
+
+<rect x="24" y="240" width="712" height="42" rx="8" fill="#FAECE7" stroke="#993C1D"/>
+<text x="40" y="257" font-size="12" font-weight="500" fill="#993C1D">Coupled choice, not independent:</text>
+<text x="40" y="273" font-size="12" fill="#7A2E15">swapping the media-server row changes the audio-fork mechanism the AI voice tier depends on — decide media server before AI pipeline integration.</text>
+</svg>

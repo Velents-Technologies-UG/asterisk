@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # Minimal control API that runs alongside Asterisk in the same pod.
 
+import base64
 import json
 import os
 import re
@@ -13,7 +14,9 @@ import sys
 import threading
 import time
 import logging
+import urllib.error
 import urllib.parse
+import urllib.request
 from datetime import datetime, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -44,6 +47,15 @@ DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
 DATABASE_SSLMODE = os.environ.get("DATABASE_SSLMODE", "disable").strip()
 REDIS_URL = os.environ.get("REDIS_URL", "").strip()
 ASTERISK_BIN = os.environ.get("ASTERISK_BIN", "asterisk")
+# /healthz used to only prove this sidecar process was bound (SIP_GO_LIVE_RUNBOOK.md
+# item 3: "control_api.py /healthz only checks bind, not ARI reachability"). These
+# back the real check below, mirroring deploy/README.md's documented readiness
+# probe (GET /ari/asterisk/info, basic auth) — same-pod loopback, deliberately not
+# ARI_URL, which isn't otherwise consumed by this process.
+ARI_USERNAME = os.environ.get("ARI_USERNAME", "").strip()
+ARI_PASSWORD = os.environ.get("ARI_PASSWORD", "").strip()
+ARI_HEALTH_URL = os.environ.get("ARI_HEALTH_URL", "http://127.0.0.1:8088/ari/asterisk/info").strip()
+ARI_HEALTH_TIMEOUT_SECONDS = float(os.environ.get("ARI_HEALTH_TIMEOUT_SECONDS", "3"))
 DEFAULT_TRANSPORT = os.environ.get("PJSIP_TRANSPORT_NAME", "transport-udp")
 DEFAULT_INBOUND_CONTEXT = os.environ.get("TRUNK_INBOUND_CONTEXT", "from-trunk")
 DEFAULT_CODEC_ALLOW = os.environ.get("TRUNK_DEFAULT_ALLOW", "ulaw,alaw")
@@ -1043,6 +1055,28 @@ _ROUTES = [
 ]
 
 
+def _check_ari_reachable():
+    """Real ARI reachability check for /healthz. Returns (ok, detail) — detail is
+    None on success, or a short diagnostic string on failure."""
+    if not ARI_USERNAME or not ARI_PASSWORD:
+        return False, "ARI_USERNAME/ARI_PASSWORD not set"
+    req = urllib.request.Request(ARI_HEALTH_URL)
+    auth = base64.b64encode(f"{ARI_USERNAME}:{ARI_PASSWORD}".encode("utf-8")).decode("ascii")
+    req.add_header("Authorization", f"Basic {auth}")
+    try:
+        with urllib.request.urlopen(req, timeout=ARI_HEALTH_TIMEOUT_SECONDS) as resp:
+            if resp.status != 200:
+                return False, f"ARI returned HTTP {resp.status}"
+            body = json.loads(resp.read().decode("utf-8") or "{}")
+            if "version" not in body:
+                return False, "ARI response missing 'version'"
+            return True, None
+    except urllib.error.HTTPError as e:
+        return False, f"ARI returned HTTP {e.code}"
+    except Exception as e:
+        return False, f"{type(e).__name__}: {e}"
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         log.info("%s - %s", self.address_string(), fmt % args)
@@ -1072,7 +1106,16 @@ class Handler(BaseHTTPRequestHandler):
     def _dispatch(self, method):
         path = self.path.split("?", 1)[0]
         if path == "/healthz":
-            self._send_json(HTTPStatus.OK, {"ok": True, "service": "call-engine-stub"})
+            ari_ok, ari_detail = _check_ari_reachable()
+            payload = {
+                "ok": ari_ok,
+                "service": "call-engine-stub",
+                "ari_reachable": ari_ok,
+            }
+            if ari_detail:
+                payload["detail"] = ari_detail
+            status = HTTPStatus.OK if ari_ok else HTTPStatus.SERVICE_UNAVAILABLE
+            self._send_json(status, payload)
             return
         if not path.startswith("/control/"):
             self._send_json(HTTPStatus.NOT_FOUND, {"error": "not found", "path": path})

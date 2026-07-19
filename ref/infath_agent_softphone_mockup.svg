@@ -1,0 +1,63 @@
+<svg width="100%" viewBox="0 0 340 600" role="img" xmlns="http://www.w3.org/2000/svg" font-family="&quot;Anthropic Sans&quot;, -apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, sans-serif" direction="rtl">
+<title>Agent softphone — RTL mockup, connected-call state (reconstruction)</title>
+<desc>Reconstruction of the Arabic-first (RTL) agent softphone mockup shown in chat: screen-pop header (caller name, number, queue), connected-call timer, clickable dialpad, and call-control buttons (mute, hold, transfer, end call). Exact original pixels were not preserved in the plain-text chat export; layout and copy are a reasonable reconstruction from the description.</desc>
+
+<rect x="0" y="0" width="340" height="600" rx="20" fill="#FFFFFF" stroke="#E5E3DC" stroke-width="1.5"/>
+
+<rect x="16" y="16" width="308" height="88" rx="12" fill="#F1EFE8"/>
+<circle cx="60" cy="60" r="26" fill="#E1F5EE" stroke="#0F6E56"/>
+<text x="60" y="67" text-anchor="middle" font-size="18" font-weight="600" fill="#085041">أش</text>
+<text x="284" y="46" text-anchor="end" font-size="15" font-weight="600" fill="#0B0B0B">أحمد الشهري</text>
+<text x="284" y="64" text-anchor="end" font-size="12" fill="#52514E">+966 5X XXX XXXX</text>
+<text x="284" y="82" text-anchor="end" font-size="12" fill="#5F5E5A">قائمة الانتظار: الدعم الفني</text>
+
+<rect x="16" y="112" width="308" height="34" rx="17" fill="#E1F5EE" stroke="#0F6E56"/>
+<circle cx="298" cy="129" r="4" fill="#0F6E56"/>
+<text x="288" y="134" text-anchor="end" font-size="12" font-weight="600" fill="#085041">متصلة — 02:14</text>
+
+<text x="284" y="176" text-anchor="end" font-size="12" font-weight="500" fill="#52514E">لوحة الاتصال</text>
+<g font-size="16" font-weight="500" fill="#0B0B0B">
+<rect x="242" y="186" width="82" height="52" rx="10" fill="#F1EFE8" stroke="#E5E3DC"/>
+<text x="283" y="218" text-anchor="middle">١</text>
+<rect x="150" y="186" width="82" height="52" rx="10" fill="#F1EFE8" stroke="#E5E3DC"/>
+<text x="191" y="218" text-anchor="middle">٢</text>
+<rect x="58" y="186" width="82" height="52" rx="10" fill="#F1EFE8" stroke="#E5E3DC"/>
+<text x="99" y="218" text-anchor="middle">٣</text>
+
+<rect x="242" y="246" width="82" height="52" rx="10" fill="#F1EFE8" stroke="#E5E3DC"/>
+<text x="283" y="278" text-anchor="middle">٤</text>
+<rect x="150" y="246" width="82" height="52" rx="10" fill="#F1EFE8" stroke="#E5E3DC"/>
+<text x="191" y="278" text-anchor="middle">٥</text>
+<rect x="58" y="246" width="82" height="52" rx="10" fill="#F1EFE8" stroke="#E5E3DC"/>
+<text x="99" y="278" text-anchor="middle">٦</text>
+
+<rect x="242" y="306" width="82" height="52" rx="10" fill="#F1EFE8" stroke="#E5E3DC"/>
+<text x="283" y="338" text-anchor="middle">٧</text>
+<rect x="150" y="306" width="82" height="52" rx="10" fill="#F1EFE8" stroke="#E5E3DC"/>
+<text x="191" y="338" text-anchor="middle">٨</text>
+<rect x="58" y="306" width="82" height="52" rx="10" fill="#F1EFE8" stroke="#E5E3DC"/>
+<text x="99" y="338" text-anchor="middle">٩</text>
+
+<rect x="242" y="366" width="82" height="52" rx="10" fill="#F1EFE8" stroke="#E5E3DC"/>
+<text x="283" y="398" text-anchor="middle">*</text>
+<rect x="150" y="366" width="82" height="52" rx="10" fill="#F1EFE8" stroke="#E5E3DC"/>
+<text x="191" y="398" text-anchor="middle">٠</text>
+<rect x="58" y="366" width="82" height="52" rx="10" fill="#F1EFE8" stroke="#E5E3DC"/>
+<text x="99" y="398" text-anchor="middle">#</text>
+</g>
+<text x="284" y="430" text-anchor="end" font-size="10" fill="#898781">الأرقام قابلة للنقر — ترسل DTMF عبر session.dtmf()</text>
+
+<line x1="16" y1="450" x2="324" y2="450" stroke="#E5E3DC" stroke-width="1"/>
+
+<g>
+<circle cx="60" cy="500" r="30" fill="#F1EFE8" stroke="#5F5E5A"/>
+<text x="60" y="505" text-anchor="middle" font-size="12" fill="#444441">كتم</text>
+<circle cx="132" cy="500" r="30" fill="#F1EFE8" stroke="#5F5E5A"/>
+<text x="132" y="505" text-anchor="middle" font-size="12" fill="#444441">انتظار</text>
+<circle cx="204" cy="500" r="30" fill="#F1EFE8" stroke="#5F5E5A"/>
+<text x="204" y="505" text-anchor="middle" font-size="12" fill="#444441">تحويل</text>
+<circle cx="276" cy="500" r="30" fill="#FAECE7" stroke="#993C1D"/>
+<text x="276" y="505" text-anchor="middle" font-size="12" font-weight="600" fill="#993C1D">إنهاء</text>
+</g>
+<text x="284" y="552" text-anchor="end" font-size="10" fill="#898781">الحالة (idle → ringing → connected → held → wrap-up) قادمة من أحداث الخادم، وليست تخمينًا محليًا</text>
+</svg>

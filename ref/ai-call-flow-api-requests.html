@@ -1,0 +1,520 @@
+<title>AI call flow — API request sequence</title>
+<style>
+  :root{
+    --bg:#0a0e13;
+    --panel:#0d1218;
+    --panel-2:#131a21;
+    --text:#e7ecf1;
+    --muted:#8a97a6;
+    --border:#232f3a;
+    --accent:#5fd4c8;
+    --gap:#f2726b;
+    --gap-soft:#2c1614;
+    --tbd:#f0ab4d;
+    --tbd-soft:#2b2010;
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;}
+  body{
+    background:var(--bg);
+    color:var(--text);
+    font-family:"IBM Plex Sans","Segoe UI",system-ui,sans-serif;
+    line-height:1.55;
+  }
+  .wrap{ max-width:1180px; margin:0 auto; padding:0 28px 96px; }
+
+  header.masthead{
+    max-width:1180px; margin:0 auto; padding:48px 28px 24px;
+    border-bottom:1px solid var(--border);
+  }
+  .eyebrow{
+    font-family:"IBM Plex Mono",ui-monospace,Menlo,Consolas,monospace;
+    font-size:12px; letter-spacing:.14em; text-transform:uppercase;
+    color:var(--accent); display:flex; align-items:center; gap:9px; margin-bottom:14px;
+  }
+  .eyebrow .dot{ width:6px; height:6px; border-radius:50%; background:var(--accent); }
+  h1{
+    font-size:clamp(24px,3.4vw,32px); font-weight:640; letter-spacing:-.01em;
+    margin:0 0 10px; text-wrap:balance;
+  }
+  .subtitle{ color:var(--muted); max-width:70ch; margin:0 0 22px; font-size:15px; }
+
+  .legend{
+    display:flex; gap:22px; flex-wrap:wrap;
+    font-family:"IBM Plex Mono",ui-monospace,Menlo,Consolas,monospace;
+    font-size:11.5px; color:var(--muted);
+  }
+  .legend span{ display:inline-flex; align-items:center; gap:7px; }
+  .lline{ width:20px; height:0; border-top:1.5px solid #9fb0ba; display:inline-block; }
+  .lline.dflt{ border-top:3px solid #d1953f; }
+  .lline.proposed{ border-top:1.5px dashed #4fc3f7; }
+  .lline.legacy{ border-top:1px dashed #7a8590; }
+  .lline.gap{ border-top:2px dashed var(--gap); }
+  .lline.tbd{ border-top:2px dashed var(--tbd); }
+
+  section{ margin-top:52px; }
+  .section-label{
+    font-family:"IBM Plex Mono",ui-monospace,monospace; font-size:12.5px; font-weight:600;
+    letter-spacing:.13em; text-transform:uppercase; color:var(--muted);
+    display:flex; align-items:center; gap:14px; margin-bottom:16px;
+  }
+  .section-label::after{ content:""; flex:1; height:1px; background:var(--border); }
+  h2{ font-size:25px; font-weight:700; margin:0 0 10px; letter-spacing:-.008em; }
+  .note{ color:var(--muted); font-size:14px; max-width:80ch; margin:0 0 18px; }
+  .note code{
+    font-family:"IBM Plex Mono",monospace; font-size:.92em; background:var(--panel-2);
+    border:1px solid var(--border); border-radius:4px; padding:1px 5px;
+  }
+
+  .callout-list{ display:flex; flex-direction:column; gap:10px; margin-bottom:8px; }
+  .callout{
+    display:flex; gap:12px; padding:12px 14px; border-radius:8px;
+    background:var(--panel); border:1px solid var(--border); font-size:13.5px;
+  }
+  .callout .tag{
+    flex:0 0 auto; font-family:"IBM Plex Mono",monospace; font-size:10px;
+    letter-spacing:.08em; text-transform:uppercase; padding:3px 8px; border-radius:100px;
+    height:fit-content; white-space:nowrap;
+  }
+  .callout.decision{ border-left:3px solid var(--tbd); }
+  .callout.decision .tag{ background:var(--tbd-soft); color:var(--tbd); }
+  .callout.gap{ border-left:3px solid var(--gap); }
+  .callout.gap .tag{ background:var(--gap-soft); color:var(--gap); }
+  .callout.resolved{ border-left:3px solid var(--accent); }
+  .callout.resolved .tag{ background:rgba(95,212,200,.12); color:var(--accent); }
+  .callout p{ margin:0; color:var(--text); }
+  .callout .sub{ color:var(--muted); display:block; margin-top:3px; font-size:12.5px; }
+
+  .diagram-box{
+    position:relative; border:1px solid var(--border); border-radius:10px;
+    background:var(--panel); overflow:hidden;
+  }
+  .stage{
+    overflow:auto; display:flex; align-items:flex-start; justify-content:center;
+    padding:28px 16px 44px; cursor:grab; max-height:78vh;
+  }
+  .stage.grabbing{ cursor:grabbing; }
+  .zoomwrap{ transform-origin:top left; transition:transform .12s ease-out; }
+
+  .toolbar{
+    position:absolute; right:12px; top:12px; z-index:5;
+    display:flex; gap:5px; background:var(--panel-2); border:1px solid var(--border);
+    border-radius:8px; padding:5px;
+  }
+  .toolbar button{
+    width:28px; height:28px; border-radius:6px; border:1px solid var(--border);
+    background:#141b22; color:var(--text); font-size:14px; cursor:pointer;
+    display:flex; align-items:center; justify-content:center;
+  }
+  .toolbar button:hover{ border-color:var(--accent); color:var(--accent); }
+  .toolbar .sep{ width:1px; align-self:stretch; background:var(--border); margin:2px 1px; }
+
+  .diagram-box.is-fullscreen{
+    position:fixed; inset:0; z-index:1000; border-radius:0;
+    width:100vw; height:100vh; background:var(--panel);
+  }
+  .diagram-box.is-fullscreen .stage{ max-height:none; height:100%; }
+  body.diagram-fullscreen-open{ overflow:hidden; }
+
+  .edgeLabel, .edgeLabel *, g.edgeLabel text, g.edgeLabel tspan{
+    font-size:10.5px !important; opacity:.9;
+  }
+  .edgeLabel div{ line-height:1.35 !important; }
+  .nodeLabel div, .label div{ line-height:1.4; }
+
+  footer.page{
+    max-width:1180px; margin:40px auto 0; padding:20px 28px 0;
+    border-top:1px solid var(--border); font-family:"IBM Plex Mono",monospace;
+    font-size:11px; color:var(--muted); text-align:center;
+  }
+</style>
+
+<header class="masthead">
+  <div class="eyebrow"><span class="dot"></span>ref / call-flow / api-requests</div>
+  <h1>AI call flow — API request sequence</h1>
+  <p class="subtitle">
+    Inbound-call routing, the human-agent-assist copilot pipeline, and the AI-agent-handled
+    call with human takeover — as three request/response flows, built from what's actually
+    verified in the <code>asterisk</code> repo plus the platform-services and dossier docs in
+    this directory. Several nodes below are marked <strong>unresolved</strong> or
+    <strong>not built</strong> rather than guessed at.
+  </p>
+  <div class="legend">
+    <span><span class="lline"></span> live / working today</span>
+    <span><span class="lline dflt"></span> default path today</span>
+    <span><span class="lline proposed"></span> proposed, not built</span>
+    <span><span class="lline gap"></span> gap — nothing built</span>
+    <span><span class="lline tbd"></span> unresolved — needs a decision</span>
+  </div>
+</header>
+
+<div class="wrap">
+
+  <section id="open-questions">
+    <div class="section-label">still open</div>
+    <h2>What this diagram assumes, not confirms</h2>
+    <p class="note">
+      Four things below are drawn as forks or TBD nodes rather than resolved, because the
+      answers materially change the architecture and are worth a deliberate call rather than
+      an inferred one.
+    </p>
+    <div class="callout-list">
+      <div class="callout decision">
+        <span class="tag">fork</span>
+        <p>STT ingestion path for the human-assist pipeline — direct <code>AudioSocket</code>/<code>externalMedia</code>
+          tap vs. bridging into a LiveKit room as a silent subscriber. Both are drawn in
+          diagram 2; the earlier services-overview doc argued the direct tap is sufficient
+          since this need is one-way.
+          <span class="sub">Changes whether this pipeline needs a room/SFU at all.</span></p>
+      </div>
+      <div class="callout decision">
+        <span class="tag">unresolved</span>
+        <p>The call-engine (ARI/Stasis app) that every dialplan hook routes into has no
+          confirmed location in any repo on this machine — Asterisk's own docs point to an
+          uncloned <code>agent-hub</code> repo, contradicting an earlier note that
+          "agent-hub = velentsAgents."
+          <span class="sub">Blocks accurate scoping of diagram 1's routing step and both downstream flows.</span></p>
+      </div>
+      <div class="callout gap">
+        <span class="tag">not built</span>
+        <p>The IVR FlowRunner that would execute "route to AI vs. human vs. TTS based on this
+          tenant's flow" doesn't exist yet — only the dialplan entry hook and an analytics
+          contract are in place.</p>
+      </div>
+      <div class="callout decision">
+        <span class="tag">partially resolved</span>
+        <p>Tenant KB has two candidate sources that were never reconciled: <code>velentsAgents</code>'
+          own Agents/KnowledgeBase model, vs. the standalone <code>voice-agent</code> service
+          (a Weaviate KB API, despite the name — not an audio pipeline). <strong>Resolved for the
+          reply_recommendation branch</strong>: reading <code>text-agent</code>'s source confirms
+          it calls <code>voice-agent</code> over HTTP (<code>POST /kb/retrieve</code>, one Weaviate
+          collection per <code>agent_id</code>) — <code>velentsAgents</code>' own KB model is not
+          used anywhere in that path. Still open for whatever would do tool_recommendation, which
+          isn't built anywhere yet — diagram 2 now names <code>voice-agent</code> on the reply-rec
+          branch specifically, and keeps <code>Tenant KB (source TBD)</code> on the tool-rec branch
+          and in diagram 3.</p>
+      </div>
+      <div class="callout gap">
+        <span class="tag">not supported today</span>
+        <p><code>text-agent</code> has no "generate N variations" capability — every chat/completion
+          endpoint (<code>/api/v1/sessions/{id}/process</code>, DSPy <code>/agent/chat</code>)
+          returns one response, and it discards whatever similarity score <code>voice-agent</code>
+          might return, keeping only the retrieved text. <code>reply_recommendation</code> as
+          originally proposed assumes two capabilities — N variations and a KB-match % — that would
+          both need to be added upstream before this flow works as described.</p>
+      </div>
+      <div class="callout resolved">
+        <span class="tag">confirmed, not new</span>
+        <p>MongoDB is already a live platform dependency, not a new technology —
+          <code>text-agent</code> runs an async Motor client against it for session/conversation
+          persistence (its own <code>mlapi</code> database). Using Mongo for AI-copilot task
+          results would be a new database/use case on existing infrastructure, not a third stack
+          to operate — still worth deciding whether it shares <code>text-agent</code>'s instance or
+          gets its own.</p>
+      </div>
+    </div>
+  </section>
+
+  <section id="diagram1">
+    <div class="section-label">1 — routing</div>
+    <h2>Inbound call → tenant IVR → queue decision</h2>
+    <p class="note">
+      Where a call lands before any AI copilot logic runs: trunk → dialplan → call-engine →
+      tenant IVR → one of TTS-only / human queue / AI queue.
+    </p>
+    <div class="diagram-box">
+      <div class="toolbar" data-target="1">
+        <button data-act="out" title="Zoom out">−</button><button data-act="reset" title="Reset zoom">⟲</button><button data-act="in" title="Zoom in">+</button><span class="sep"></span><button data-act="fullscreen" title="Full screen">⛶</button>
+      </div>
+      <div class="stage" id="stage1">
+        <div class="zoomwrap" id="zoomwrap1">
+<pre class="mermaid">
+%%{init: {
+  'theme': 'base',
+  'themeVariables': {
+    'fontSize': '13px',
+    'fontFamily': 'IBM Plex Sans, Segoe UI, sans-serif',
+    'primaryTextColor': '#eef2f5',
+    'primaryBorderColor': '#4d5c6b',
+    'lineColor': '#9fb0ba',
+    'edgeLabelBackground': '#0d1218'
+  },
+  'flowchart': { 'nodeSpacing': 55, 'rankSpacing': 80, 'curve': 'basis' }
+}}%%
+flowchart TB
+  Caller["Caller"] -->|PSTN| Trunk["PJSIP trunk"]
+  Trunk --> Dialplan["Dialplan: from-trunk"]
+  Dialplan -->|Stasis call-engine, inbound| Engine["Call-engine\nlocation TBD"]
+  Engine -->|resolve DID to tenant| ControlAPI["Control API / Postgres"]
+  Engine -->|run tenant IVR flow| FlowRunner["IVR FlowRunner\nnot built yet"]
+  FlowRunner --> Decision{{"client's choice"}}
+  Decision -->|hours, FAQ, self-service| TTSPath["TTS / recorded audio"]
+  Decision -->|talk to a human| HumanQueue["Human agent queue"]
+  Decision -->|AI-handled| AIQueue["AI agent queue"]
+  TTSPath --> EndCall["call ends\nno AI copilot involved"]
+  HumanQueue --> HumanAnswer["human agent answers\nWSS softphone"]
+  AIQueue --> AIPipeline["AI-agent pipeline\nsee diagram 3"]
+  HumanAnswer --> AssistFlow["AI copilot / assist flow\nsee diagram 2"]
+
+  classDef gap stroke:#e5544c,stroke-width:2px,stroke-dasharray:5 5,color:#ffb3ae,fill:#2c1614;
+  classDef tbd stroke:#f0ab4d,stroke-width:2px,stroke-dasharray:4 4,color:#ffe9c7,fill:#2b2010;
+  class Engine tbd;
+  class FlowRunner gap;
+</pre>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="diagram2">
+    <div class="section-label">2 — human-agent assist</div>
+    <h2>AI copilot request flow (human agent on the call)</h2>
+    <p class="note">
+      Per-tenant feature toggles (<code>sentimental_analyses</code>, <code>client_intention</code>,
+      <code>tool_recommendation</code>, <code>reply_recommendation</code>, ...) are sent as one
+      config array to two places at call start — the ingestion/STT service and the
+      velentsAgents backend. Disabled features (e.g. <code>question_to_ai_recommendation: false</code>)
+      never fire a webhook. Raw call audio reaches the agent over the existing WebRTC/WSS
+      softphone path — it never enters this pipeline. The reply-rec branch below is grounded in
+      the real <code>text-agent</code> service, not assumed — see the "confirmed"/"not supported
+      today" callouts above for what that changed.
+    </p>
+    <div class="diagram-box">
+      <div class="toolbar" data-target="2">
+        <button data-act="out" title="Zoom out">−</button><button data-act="reset" title="Reset zoom">⟲</button><button data-act="in" title="Zoom in">+</button><span class="sep"></span><button data-act="fullscreen" title="Full screen">⛶</button>
+      </div>
+      <div class="stage" id="stage2">
+        <div class="zoomwrap" id="zoomwrap2">
+<pre class="mermaid">
+%%{init: {
+  'theme': 'base',
+  'themeVariables': {
+    'fontSize': '13px',
+    'fontFamily': 'IBM Plex Sans, Segoe UI, sans-serif',
+    'primaryTextColor': '#eef2f5',
+    'primaryBorderColor': '#4d5c6b',
+    'lineColor': '#9fb0ba',
+    'actorBkg': '#131a21',
+    'actorBorder': '#4d5c6b',
+    'actorTextColor': '#eef2f5',
+    'actorLineColor': '#4d5c6b',
+    'signalColor': '#9fb0ba',
+    'signalTextColor': '#e7ecf1',
+    'labelBoxBkgColor': '#1a222b',
+    'labelBoxBorderColor': '#4d5c6b',
+    'labelTextColor': '#eef2f5',
+    'loopTextColor': '#e7ecf1',
+    'noteBkgColor': '#2b2010',
+    'noteBorderColor': '#8a6224',
+    'noteTextColor': '#ffe9c7',
+    'activationBkgColor': '#1c2a48',
+    'activationBorderColor': '#5b7fc4'
+  }
+}}%%
+sequenceDiagram
+  participant Caller
+  participant Ast as Asterisk / Call-engine
+  participant STT as Ingestion/STT (path TBD)
+  participant Sent as Sentiment svc
+  participant Intent as Intent svc
+  participant Tool as Tool-rec svc
+  participant Reply as Reply-rec svc
+  participant TA as text_agent
+  participant VA as voice-agent (Weaviate KB)
+  participant KB as Tenant KB, tool-rec (source TBD)
+  participant Mongo as MongoDB
+  participant BE as velentsAgents backend
+  participant FE as Agent browser
+
+  Caller->>Ast: call answered by human agent
+  Ast->>Ast: look up tenant AI-feature config
+  Ast->>STT: config array + start media tap (webhook 1)
+  Ast->>BE: config array, expect these results (webhook 2)
+  Note over Ast,STT: media tap path not decided — direct AudioSocket/externalMedia vs. LiveKit room subscribe
+  loop each transcript segment
+    STT->>Sent: webhook: analyze sentiment
+    STT->>Intent: webhook: detect intent
+    STT->>Tool: webhook: recommend tool
+    STT->>Reply: webhook: recommend reply
+    Tool->>KB: RAG lookup, unconfirmed
+    Reply->>TA: generate reply, single response only
+    TA->>TA: rewrite query with conversation context
+    TA->>VA: POST /kb/retrieve, agent_id plus query
+    VA-->>TA: page_content chunks, no score returned
+    Note over TA,VA: confirmed by reading text-agent source, 2026-07-19
+    Sent->>Mongo: write result
+    Intent->>Mongo: write result
+    Tool->>Mongo: write result plus KB match %
+    Reply->>Mongo: write result, no KB-match score available
+    Sent->>BE: completion webhook
+    Intent->>BE: completion webhook
+    Tool->>BE: completion webhook
+    Reply->>BE: completion webhook
+    BE->>Mongo: fetch result
+    BE->>FE: push over WebSocket
+  end
+</pre>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="diagram3">
+    <div class="section-label">3 — ai-agent handled</div>
+    <h2>AI-agent call, human monitoring, and takeover</h2>
+    <p class="note">
+      Same sentiment/intent analysis as diagram 2 runs alongside the AI's own STT → LLM → TTS
+      loop, pushed to a human as a live transcript with tools-used and analysis. The human can
+      optionally listen in — reusing the same ARI <code>externalMedia</code> snoop primitive
+      already needed for supervisor whisper/barge — before deciding to take the call.
+    </p>
+    <div class="diagram-box">
+      <div class="toolbar" data-target="3">
+        <button data-act="out" title="Zoom out">−</button><button data-act="reset" title="Reset zoom">⟲</button><button data-act="in" title="Zoom in">+</button><span class="sep"></span><button data-act="fullscreen" title="Full screen">⛶</button>
+      </div>
+      <div class="stage" id="stage3">
+        <div class="zoomwrap" id="zoomwrap3">
+<pre class="mermaid">
+%%{init: {
+  'theme': 'base',
+  'themeVariables': {
+    'fontSize': '13px',
+    'fontFamily': 'IBM Plex Sans, Segoe UI, sans-serif',
+    'primaryTextColor': '#eef2f5',
+    'primaryBorderColor': '#4d5c6b',
+    'lineColor': '#9fb0ba',
+    'actorBkg': '#131a21',
+    'actorBorder': '#4d5c6b',
+    'actorTextColor': '#eef2f5',
+    'actorLineColor': '#4d5c6b',
+    'signalColor': '#9fb0ba',
+    'signalTextColor': '#e7ecf1',
+    'labelBoxBkgColor': '#1a222b',
+    'labelBoxBorderColor': '#4d5c6b',
+    'labelTextColor': '#eef2f5',
+    'loopTextColor': '#e7ecf1',
+    'noteBkgColor': '#2b2010',
+    'noteBorderColor': '#8a6224',
+    'noteTextColor': '#ffe9c7',
+    'activationBkgColor': '#1c2a48',
+    'activationBorderColor': '#5b7fc4'
+  }
+}}%%
+sequenceDiagram
+  participant Caller
+  participant Ast as Asterisk / Call-engine
+  participant AIPipe as AI-agent pipeline (STT to LLM to TTS)
+  participant KB as Tenant KB (source TBD)
+  participant Sent as Sentiment/Intent svc
+  participant Mongo as MongoDB
+  participant BE as velentsAgents backend
+  participant HFE as Human agent browser
+
+  Caller->>Ast: routed to AI-agent queue
+  Ast->>AIPipe: bridge call
+  loop live conversation
+    AIPipe->>AIPipe: STT to transcript
+    AIPipe->>KB: RAG lookup
+    AIPipe->>Caller: TTS response
+    AIPipe->>Sent: transcript segment
+    Sent->>Mongo: sentiment plus intent result
+    Sent->>BE: completion webhook
+    BE->>Mongo: fetch result
+    BE->>HFE: push: live transcript, tools used, analysis
+  end
+  opt human reviewing
+    HFE->>Ast: optional listen-in, reuses supervisor snoop primitive
+  end
+  HFE->>BE: request takeover
+  BE->>Ast: request takeover
+  Ast->>Caller: play announcement: directed to a human agent
+  Ast->>Ast: drop AI leg
+  Ast->>Caller: bridge to human agent
+  Note over Ast,HFE: after transfer, assumed to continue under the assist flow in diagram 2 - not confirmed
+</pre>
+        </div>
+      </div>
+    </div>
+  </section>
+
+</div>
+
+<footer class="page">
+  Scroll/pinch or use each diagram's controls to zoom — drag to pan. Grounded in
+  <code>ref/velents-platform-services-overview.md</code>, <code>ref/asterisk-deployment-test-suite-and-feature-gap-plan.md</code>,
+  and the live <code>asterisk</code> repo dialplan/control-API.
+</footer>
+
+<script>
+  (function(){
+    document.querySelectorAll('.diagram-box').forEach(function(box){
+      var id = box.querySelector('.toolbar').getAttribute('data-target');
+      var stage = box.querySelector('#stage' + id);
+      var wrap = box.querySelector('#zoomwrap' + id);
+      var scale = 1;
+      function apply(){ wrap.style.transform = 'scale(' + scale + ')'; }
+      box.querySelectorAll('.toolbar button').forEach(function(btn){
+        btn.addEventListener('click', function(){
+          var act = btn.getAttribute('data-act');
+          if (act === 'in') scale = Math.min(scale + 0.15, 3);
+          else if (act === 'out') scale = Math.max(scale - 0.15, 0.4);
+          else scale = 1;
+          apply();
+        });
+      });
+      stage.addEventListener('wheel', function(e){
+        if (!e.ctrlKey && !e.metaKey) return;
+        e.preventDefault();
+        scale = Math.min(3, Math.max(0.4, scale + (e.deltaY < 0 ? 0.08 : -0.08)));
+        apply();
+      }, { passive:false });
+
+      var isDown = false, startX, startY, scrollLeft, scrollTop;
+      stage.addEventListener('mousedown', function(e){
+        isDown = true; stage.classList.add('grabbing');
+        startX = e.pageX; startY = e.pageY;
+        scrollLeft = stage.scrollLeft; scrollTop = stage.scrollTop;
+      });
+      window.addEventListener('mouseup', function(){ isDown = false; stage.classList.remove('grabbing'); });
+      window.addEventListener('mousemove', function(e){
+        if (!isDown) return;
+        stage.scrollLeft = scrollLeft - (e.pageX - startX);
+        stage.scrollTop = scrollTop - (e.pageY - startY);
+      });
+
+      var fsBtn = box.querySelector('[data-act="fullscreen"]');
+      function exitFullscreen(){
+        box.classList.remove('is-fullscreen');
+        document.body.classList.remove('diagram-fullscreen-open');
+        fsBtn.textContent = '⛶';
+        fsBtn.title = 'Full screen';
+      }
+      fsBtn.addEventListener('click', function(){
+        var goingFullscreen = !box.classList.contains('is-fullscreen');
+        document.querySelectorAll('.diagram-box.is-fullscreen').forEach(function(other){
+          if (other !== box) {
+            other.classList.remove('is-fullscreen');
+            var otherBtn = other.querySelector('[data-act="fullscreen"]');
+            if (otherBtn) { otherBtn.textContent = '⛶'; otherBtn.title = 'Full screen'; }
+          }
+        });
+        if (goingFullscreen) {
+          box.classList.add('is-fullscreen');
+          document.body.classList.add('diagram-fullscreen-open');
+          fsBtn.textContent = '✕';
+          fsBtn.title = 'Exit full screen';
+        } else {
+          exitFullscreen();
+        }
+      });
+      box._exitFullscreen = exitFullscreen;
+    });
+
+    document.addEventListener('keydown', function(e){
+      if (e.key !== 'Escape') return;
+      document.querySelectorAll('.diagram-box.is-fullscreen').forEach(function(box){
+        if (box._exitFullscreen) box._exitFullscreen();
+      });
+    });
+  })();
+</script>
