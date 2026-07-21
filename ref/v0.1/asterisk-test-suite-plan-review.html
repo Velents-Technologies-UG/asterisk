@@ -1,0 +1,505 @@
+<title>Asterisk Service — Test Suite &amp; Feature Gap Plan (v0.1)</title>
+<style>
+  :root{
+    --bg:#f5f7f8;
+    --surface:#ffffff;
+    --surface-alt:#eef1f3;
+    --text:#1a232c;
+    --muted:#5c6b78;
+    --muted-2:#7c8b97;
+    --border:#dde3e7;
+    --border-strong:#c7d0d6;
+    --accent:#1f6f6b;
+    --accent-soft:#e3f1ef;
+    --risk-high:#b3261e;
+    --risk-high-soft:#fbe9e7;
+    --risk-med:#8a5300;
+    --risk-med-soft:#fdf1de;
+    --ok:#1c7a4d;
+    --ok-soft:#e6f4ec;
+    --crit:#7a1220;
+    --crit-soft:#fbe4e2;
+    --code-bg:#eef1f3;
+    --shadow: 0 1px 2px rgba(20,30,35,.06), 0 8px 24px -12px rgba(20,30,35,.12);
+  }
+  :root[data-theme="dark"]{
+    --bg:#0c1116; --surface:#131a21; --surface-alt:#1a222b;
+    --text:#e6ebf0; --muted:#93a2ae; --muted-2:#7c8b97;
+    --border:#232d37; --border-strong:#2d3945;
+    --accent:#5fd4c8; --accent-soft:#122b29;
+    --risk-high:#f2726b; --risk-high-soft:#2c1614;
+    --risk-med:#f0ab4d; --risk-med-soft:#2b220e;
+    --ok:#52d492; --ok-soft:#0f2419;
+    --crit:#ff8a80; --crit-soft:#331411;
+    --code-bg:#1a222b;
+    --shadow: 0 1px 2px rgba(0,0,0,.3), 0 12px 32px -16px rgba(0,0,0,.6);
+  }
+  @media (prefers-color-scheme: dark){
+    :root:not([data-theme="light"]){
+      --bg:#0c1116; --surface:#131a21; --surface-alt:#1a222b;
+      --text:#e6ebf0; --muted:#93a2ae; --muted-2:#7c8b97;
+      --border:#232d37; --border-strong:#2d3945;
+      --accent:#5fd4c8; --accent-soft:#122b29;
+      --risk-high:#f2726b; --risk-high-soft:#2c1614;
+      --risk-med:#f0ab4d; --risk-med-soft:#2b220e;
+      --ok:#52d492; --ok-soft:#0f2419;
+      --crit:#ff8a80; --crit-soft:#331411;
+      --code-bg:#1a222b;
+      --shadow: 0 1px 2px rgba(0,0,0,.3), 0 12px 32px -16px rgba(0,0,0,.6);
+    }
+  }
+
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;}
+  body{
+    background:var(--bg);
+    color:var(--text);
+    font-family:"Source Serif Pro","Iowan Old Style","Palatino Linotype",Georgia,serif;
+    font-size:17px;
+    line-height:1.62;
+    -webkit-font-smoothing:antialiased;
+  }
+  ::selection{ background:var(--accent-soft); color:var(--text); }
+
+  .doc{ max-width:960px; margin:0 auto; padding:0 24px 96px; }
+  .wide{ max-width:1180px; }
+
+  header.masthead{
+    max-width:960px; margin:0 auto; padding:56px 24px 28px;
+    border-bottom:1px solid var(--border);
+  }
+  .eyebrow{
+    font-family:"IBM Plex Mono",ui-monospace,"SFMono-Regular",Menlo,Consolas,monospace;
+    font-size:12.5px; letter-spacing:.14em; text-transform:uppercase; color:var(--accent);
+    display:flex; align-items:center; gap:10px; margin-bottom:14px;
+  }
+  .eyebrow .dot{width:6px;height:6px;border-radius:50%;background:var(--accent);display:inline-block;}
+  h1{
+    font-family:"IBM Plex Sans","Segoe UI Semibold","Segoe UI",system-ui,sans-serif;
+    font-weight:650; font-size:clamp(28px,4vw,40px); line-height:1.12; letter-spacing:-.015em;
+    margin:0 0 12px; text-wrap:balance; color:var(--text);
+  }
+  .subtitle{ font-size:17px; color:var(--muted); max-width:62ch; margin:0 0 22px; }
+  .meta-row{
+    display:flex; flex-wrap:wrap; gap:10px 22px;
+    font-family:"IBM Plex Mono",ui-monospace,monospace; font-size:12.5px; color:var(--muted-2);
+  }
+  .meta-row span b{ color:var(--text); font-weight:600; }
+  .chip{
+    display:inline-flex; align-items:center; gap:6px;
+    background:var(--ok-soft); color:var(--ok);
+    border:1px solid color-mix(in srgb, var(--ok) 35%, transparent);
+    padding:3px 10px 3px 8px; border-radius:100px; font-size:12px; font-weight:600; letter-spacing:.02em;
+  }
+  .chip::before{ content:"✓"; font-size:11px; }
+  .chip.version{ background:var(--accent-soft); color:var(--accent); border-color:color-mix(in srgb, var(--accent) 35%, transparent); }
+  .chip.version::before{ content:"◆"; }
+
+  section{ margin-top:56px; }
+  .section-label{
+    font-family:"IBM Plex Mono",ui-monospace,monospace; font-size:12px; letter-spacing:.14em;
+    text-transform:uppercase; color:var(--muted-2); display:flex; align-items:center; gap:14px; margin-bottom:16px;
+  }
+  .section-label::after{ content:""; flex:1; height:1px; background:var(--border); }
+  h2{
+    font-family:"IBM Plex Sans","Segoe UI Semibold","Segoe UI",system-ui,sans-serif;
+    font-weight:640; font-size:25px; letter-spacing:-.008em; margin:0 0 16px; color:var(--text); text-wrap:balance;
+  }
+  h3{
+    font-family:"IBM Plex Sans","Segoe UI Semibold","Segoe UI",system-ui,sans-serif;
+    font-weight:620; font-size:18px; margin:28px 0 10px; color:var(--text);
+  }
+  p{ margin:0 0 14px; max-width:72ch; }
+  .wide p{ max-width:78ch; }
+  ul,ol{ padding-left:1.3em; margin:0 0 16px; max-width:72ch; }
+  li{ margin-bottom:8px; }
+  strong{ font-weight:700; }
+  a{ color:var(--accent); }
+
+  code, .mono{
+    font-family:"IBM Plex Mono",ui-monospace,"SFMono-Regular",Menlo,Consolas,monospace;
+    font-size:.86em; background:var(--code-bg); border:1px solid var(--border);
+    border-radius:4px; padding:.05em .38em; color:var(--text);
+  }
+
+  .callout{
+    background:var(--surface); border:1px solid var(--border); border-left:3px solid var(--accent);
+    border-radius:8px; padding:18px 20px; margin:18px 0; box-shadow:var(--shadow);
+  }
+  .callout.crit{ border-left-color:var(--crit); }
+  .callout p:last-child{ margin-bottom:0; }
+  .callout ul:last-child{ margin-bottom:0; }
+  .callout-label{
+    font-family:"IBM Plex Mono",monospace; font-size:11.5px; letter-spacing:.1em;
+    text-transform:uppercase; color:var(--accent); font-weight:700; margin-bottom:8px; display:block;
+  }
+  .callout.crit .callout-label{ color:var(--crit); }
+
+  .table-scroll{
+    overflow-x:auto; border:1px solid var(--border); border-radius:10px;
+    box-shadow:var(--shadow); margin:18px 0 8px; background:var(--surface);
+  }
+  table{
+    border-collapse:collapse; width:100%;
+    font-family:"IBM Plex Sans","Segoe UI",system-ui,sans-serif; font-size:13.6px; line-height:1.5;
+  }
+  thead th{
+    position:sticky; top:0; background:var(--surface-alt); text-align:left;
+    font-weight:650; font-size:11.5px; letter-spacing:.06em; text-transform:uppercase;
+    color:var(--muted); padding:12px 14px; border-bottom:1px solid var(--border-strong); white-space:nowrap;
+  }
+  tbody td{ padding:12px 14px; border-bottom:1px solid var(--border); vertical-align:top; color:var(--text); }
+  tbody tr:last-child td{ border-bottom:none; }
+  tbody tr:nth-child(even){ background:color-mix(in srgb, var(--surface-alt) 45%, transparent); }
+  tbody tr.row-new{ background:color-mix(in srgb, var(--accent-soft) 55%, transparent); }
+  td.narrow, th.narrow{ min-width:74px; white-space:nowrap; }
+  td.id-col{ font-family:"IBM Plex Mono",monospace; font-size:12.6px; white-space:nowrap; color:var(--muted); }
+  td.wrap{ min-width:230px; }
+
+  .risk-High{ color:var(--risk-high); font-weight:700; }
+  .risk-Medium{ color:var(--risk-med); font-weight:700; }
+  .risk-Low{ color:var(--muted); font-weight:700; }
+  .risk-Critical{ color:var(--crit); font-weight:700; }
+
+  .status-pill{
+    display:inline-block; font-size:11px; font-weight:700; letter-spacing:.03em;
+    padding:2px 9px; border-radius:100px; white-space:nowrap; text-transform:uppercase;
+  }
+  .s-fixed{ background:var(--ok-soft); color:var(--ok); }
+  .s-open{ background:var(--risk-high-soft); color:var(--risk-high); }
+  .s-workaround{ background:var(--risk-med-soft); color:var(--risk-med); }
+
+  .priority-pill{
+    display:inline-block; font-size:11.5px; font-weight:700; letter-spacing:.02em;
+    padding:2px 9px; border-radius:100px; white-space:nowrap;
+  }
+  .p-critical{ background:var(--risk-high-soft); color:var(--risk-high); }
+  .p-high{ background:var(--risk-med-soft); color:var(--risk-med); }
+  .p-medium{ background:var(--accent-soft); color:var(--accent); }
+  .p-low{ background:var(--surface-alt); color:var(--muted); border:1px solid var(--border); }
+
+  .diagram-card{
+    background:var(--surface); border:1px solid var(--border); border-radius:12px;
+    box-shadow:var(--shadow); padding:8px; margin:18px 0;
+  }
+  .diagram-card .mermaid-wrap{
+    overflow-x:auto; padding:28px 20px; background:#0d1218; border-radius:8px; min-width:100%;
+  }
+  .diagram-legend{
+    display:flex; gap:22px; flex-wrap:wrap; padding:14px 20px 4px;
+    font-family:"IBM Plex Mono",monospace; font-size:12px; color:var(--muted);
+  }
+  .diagram-legend span{ display:inline-flex; align-items:center; gap:7px; }
+  .legend-line{ width:22px; height:0; border-top:2px solid var(--muted); display:inline-block; }
+  .legend-line.gap{ border-top:2px dashed var(--risk-high); }
+
+  .timeline{ list-style:none; padding:0; margin:18px 0; max-width:78ch; }
+  .timeline li{
+    position:relative; padding:2px 0 18px 26px; border-left:2px solid var(--border);
+    margin-left:6px; margin-bottom:0;
+  }
+  .timeline li:last-child{ border-left-color:transparent; padding-bottom:0; }
+  .timeline li::before{
+    content:""; position:absolute; left:-7px; top:4px; width:12px; height:12px;
+    border-radius:50%; background:var(--surface); border:2px solid var(--accent);
+  }
+  .timeline li.crit::before{ border-color:var(--crit); }
+  .timeline b{ display:block; color:var(--text); margin-bottom:2px; }
+
+  hr.rule{ border:none; border-top:1px solid var(--border); margin:56px 0 0; }
+
+  footer{
+    max-width:960px; margin:64px auto 0; padding:24px; border-top:1px solid var(--border);
+    font-family:"IBM Plex Mono",monospace; font-size:12px; color:var(--muted-2);
+    display:flex; justify-content:space-between; flex-wrap:wrap; gap:8px;
+  }
+
+  @media (max-width:640px){
+    body{ font-size:16px; }
+    header.masthead{ padding:40px 18px 24px; }
+    .doc{ padding:0 18px 72px; }
+    thead th, tbody td{ padding:10px; }
+  }
+</style>
+
+<header class="masthead">
+  <div class="eyebrow"><span class="dot"></span>Internal planning document — asterisk repo</div>
+  <h1>Deployment test suite &amp; platform feature gap analysis</h1>
+  <p class="subtitle">v0.1: the original test-suite plan, plus a real end-to-end inbound-call test that found and fixed four more bugs — including one self-inflicted production incident — and resolved a standing open question about where the call-engine lives.</p>
+  <div class="meta-row">
+    <span><b>Repo</b> e:\Projects\Velents\asterisk</span>
+    <span><b>Scope</b> test suite + gap analysis + live call test</span>
+    <span class="chip">.env fix verified live</span>
+    <span class="chip version">v0.1</span>
+  </div>
+</header>
+
+<main class="doc">
+
+  <section>
+    <div class="section-label">Context</div>
+    <p>Earlier this session we manually diagnosed a real production misconfiguration: <code>.env</code> had <code>ASTERISK_WSS_URL=wss://asterisk.velents.ai:8089/ws</code>, but port 8089 is completely unreachable externally. The working URL is <code>wss://asterisk.velents.ai/ws</code> (default 443), confirmed via a 426 Upgrade Required response carrying <code>Server: Asterisk/GIT-master-</code>. The user fixed <code>.env</code> and asked for a repeatable test suite so this class of bug — config says one thing, actual K8s routing does another — gets caught automatically going forward.</p>
+    <p>After that plan was approved and shipped, the session kept going with a real end-to-end test: onboarding a brand-new inbound SIP trunk (a carrier called Voylo) all the way through a DB migration, a DID-registry row, and a Flow — then placing real, paid international test calls to prove the whole pipeline. That test found four more real bugs, including one self-inflicted production incident, finally resolved the call-engine's location, and led to a real architecture decision about where call-routing logic and its data should live as more clients start sharing this feature — captured in a companion document.</p>
+  </section>
+
+  <section>
+    <div class="section-label">Bugs found</div>
+
+    <div class="table-scroll">
+      <table>
+        <thead>
+          <tr><th class="narrow">#</th><th>Bug</th><th>Where</th><th>Risk</th><th>Status</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="narrow">1</td>
+            <td class="wrap"><code>.env</code> <code>ASTERISK_WSS_URL</code> pointed at dead port <code>:8089</code></td>
+            <td class="id-col">.env</td>
+            <td><span class="risk-High">High</span></td>
+            <td><span class="status-pill s-fixed">Fixed</span></td>
+          </tr>
+          <tr>
+            <td class="narrow">2</td>
+            <td class="wrap">Gate A/B WSS-host detection matched a nonexistent subdomain instead of the real ingress host</td>
+            <td class="id-col">audit-call-pipeline.sh</td>
+            <td><span class="risk-Medium">Medium</span></td>
+            <td><span class="status-pill s-fixed">Fixed</span></td>
+          </tr>
+          <tr>
+            <td class="narrow">3</td>
+            <td class="wrap">Gate A's RTP-range check greps a literal range string that never matches the real NodePort listing</td>
+            <td class="id-col">audit-call-pipeline.sh</td>
+            <td><span class="risk-Medium">Medium</span></td>
+            <td><span class="status-pill s-fixed">Fixed</span></td>
+          </tr>
+          <tr>
+            <td class="narrow">4</td>
+            <td class="wrap">Gate D's transport-loaded grep anchor had an extra leading space vs. the real CLI output</td>
+            <td class="id-col">audit-call-pipeline.sh</td>
+            <td><span class="risk-Medium">Medium</span></td>
+            <td><span class="status-pill s-fixed">Fixed</span></td>
+          </tr>
+          <tr>
+            <td class="narrow">5</td>
+            <td class="wrap"><code>/healthz</code> only checked process bind, not real ARI reachability</td>
+            <td class="id-col">control_api.py</td>
+            <td><span class="risk-High">High</span></td>
+            <td><span class="status-pill s-fixed">Fixed + deployed</span></td>
+          </tr>
+          <tr>
+            <td class="narrow">6</td>
+            <td class="wrap"><code>ARI_URL=http://120.0.0.1:8088</code> looks like a <code>127.0.0.1</code> typo</td>
+            <td class="id-col">.env</td>
+            <td><span class="risk-Low">Low/Unknown</span></td>
+            <td><span class="status-pill s-open">Needs owner</span></td>
+          </tr>
+          <tr class="row-new">
+            <td class="narrow">7</td>
+            <td class="wrap"><code>identify</code> sorcery type mapped under the wrong module section — its config docs are owned by <code>res_pjsip_endpoint_identifier_ip</code>, not <code>res_pjsip</code> — so the realtime loader rejected it and the whole IP-identification module declined to load, breaking IP-based trunk recognition <strong>platform-wide</strong></td>
+            <td class="id-col">sorcery_realtime_agents.conf.sample</td>
+            <td><span class="risk-High">High</span></td>
+            <td><span class="status-pill s-fixed">Fixed + verified live</span></td>
+          </tr>
+          <tr class="row-new">
+            <td class="narrow">8</td>
+            <td class="wrap">Bug 5's <code>/healthz</code> fix was also used by <code>entrypoint.sh</code>'s boot gate, which only needs a bind-check — once <code>/healthz</code> reflected real ARI state, the entrypoint's own boot deadlocked against it</td>
+            <td class="id-col">control_api.py, entrypoint.sh</td>
+            <td><span class="risk-Critical">Critical</span></td>
+            <td><span class="status-pill s-fixed">Fixed + deployed</span></td>
+          </tr>
+          <tr class="row-new">
+            <td class="narrow">9</td>
+            <td class="wrap"><code>aws-load-balancer-controller</code> crash-looping ~5 days (EC2 metadata 401) — NLB target groups never resync on pod IP change; this session's pod replacement left traffic silently dropped until manually corrected</td>
+            <td class="id-col">Cluster infra</td>
+            <td><span class="risk-High">High, cluster-wide</span></td>
+            <td><span class="status-pill s-workaround">Worked around</span></td>
+          </tr>
+          <tr class="row-new">
+            <td class="narrow">10</td>
+            <td class="wrap">Trunk creation unconditionally wires the same auth object to both outbound and inbound, so IP-trust-only carriers get 401-challenged on calls they can never authenticate</td>
+            <td class="id-col">sip_store.py</td>
+            <td><span class="risk-Medium">Medium</span></td>
+            <td><span class="status-pill s-workaround">Worked around live</span></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <div class="section-label">Real end-to-end inbound-call test</div>
+    <p>Rather than stop at "the config looks right," the session built a real test fixture — a new carrier trunk, a DID, and a Flow that transfers to a personal number — and placed real calls against it.</p>
+    <ol class="timeline">
+      <li><b>Built the fixture</b> via a checked-in DB migration: Voylo trunk (source-IP trust only), DID <code>+966115030505</code> → tenant <code>testCallCenter</code>, a Flow that transfers to a personal number.</li>
+      <li><b>First call failed instantly</b> (<code>CHANUNAVAIL</code> in 14-64ms) — Asterisk logged "No matching endpoint found." This was Bug 7: IP-identification was silently broken platform-wide.</li>
+      <li class="crit"><b>Fixing Bug 7 required a process restart</b>, which surfaced Bug 9 (stale network path from an earlier crash/rebuild — itself caused by Bug 8, a regression from this same session's <code>/healthz</code> fix). All three fixed/worked around before re-testing.</li>
+      <li><b>Next attempt passed the network and IP-matching layers</b> cleanly, but hit a <code>401 Unauthorized</code> — Bug 10: a carrier that correctly never sends credentials, rejected by an auth requirement the trunk-creation API forces on every new trunk.</li>
+      <li><b>With all four fixed, a real call went all the way through Asterisk correctly</b> — confirmed directly in <code>call-engine</code>'s own logs: <code>inbound DID '+966115030505' -&gt; tenant=testCallCenter flow=forward-to-personal-test</code>.</li>
+      <li><b>The one remaining failure is inside <code>call-engine</code> itself</b>, not this repo — an ARI <code>"Channel not found"</code> error ~600ms after the call arrives, before the transfer completes. Narrowed to a specific, reproducible, <em>cheap-to-retest</em> symptom (about 1 second per attempt now, vs. 8-50 seconds before).</li>
+    </ol>
+    <div class="callout">
+      <span class="callout-label">See also</span>
+      <p>The companion document, <em>Worker 2 (call-engine) — architecture and data-ownership design</em>, covers what <code>call-engine</code> does in full, the discovery that its deploying repo (<code>agent-hub</code>) is architecturally a frontend, a tech-stack comparison for where the live call-handling logic should run, and the resulting data-architecture decision as more clients start sharing the call-center feature.</p>
+    </div>
+  </section>
+
+  <section class="wide">
+    <div class="section-label">Features / increments — status, effort, priority</div>
+    <p>Ordered exactly as the dossier's board order (P0 → P5). Rows touched by this session's findings are highlighted.</p>
+
+    <div class="table-scroll">
+      <table>
+        <thead>
+          <tr>
+            <th class="narrow">Phase</th><th>Increment</th><th class="narrow">Ast.?</th>
+            <th>What's changed this session</th><th>Est. effort</th><th class="narrow">Size</th><th>Priority</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr class="row-new">
+            <td class="narrow id-col">P0</td>
+            <td class="wrap"><strong>Inc 1</strong> — Voice Engine Spine<br><span class="mono">AGH-6655</span> · <em>In Progress</em></td>
+            <td class="narrow"><strong>Yes</strong></td>
+            <td class="wrap">Revised <strong>up to ~70%</strong> on the SIP-trunk piece — this session proved the full inbound path end-to-end on a <em>second</em>, independently-onboarded carrier, not just Innocalls. Session/event model is no longer blocked on locating the call-engine (found: <code>call-engine</code>) — just not yet built.</td>
+            <td class="wrap">Session/event: 4-6wk (now scopeable). AI audio bridge: 2-4wk. Screen-pop: 2-3wk. DR: 2wk+</td>
+            <td class="narrow">L</td>
+            <td><span class="priority-pill p-critical">Critical</span></td>
+          </tr>
+          <tr>
+            <td class="narrow id-col">P2</td>
+            <td class="wrap"><strong>Inc 2</strong> — Unified Agent Desktop<br><span class="mono">AGH-6656</span></td>
+            <td class="narrow">Partial</td>
+            <td class="wrap">Unchanged this session.</td>
+            <td class="wrap">6-10wk</td>
+            <td class="narrow">L</td>
+            <td><span class="priority-pill p-high">High</span></td>
+          </tr>
+          <tr>
+            <td class="narrow id-col">P1</td>
+            <td class="wrap"><strong>Inc 3</strong> — Routing &amp; ACD parity<br><span class="mono">AGH-6657</span></td>
+            <td class="narrow">No</td>
+            <td class="wrap">Unchanged this session.</td>
+            <td class="wrap">8-12wk</td>
+            <td class="narrow">XL</td>
+            <td><span class="priority-pill p-high">High</span></td>
+          </tr>
+          <tr>
+            <td class="narrow id-col">P2</td>
+            <td class="wrap"><strong>Inc 4</strong> — Supervisor live ops<br><span class="mono">AGH-6658</span></td>
+            <td class="narrow">Partial</td>
+            <td class="wrap">Unchanged this session.</td>
+            <td class="wrap">Barge/whisper: 6-10wk. Full suite: 3mo+</td>
+            <td class="narrow">XL</td>
+            <td><span class="priority-pill p-high">Med-High</span></td>
+          </tr>
+          <tr>
+            <td class="narrow id-col">P1</td>
+            <td class="wrap"><strong>Inc 5</strong> — Recording Management<br><span class="mono">AGH-6659</span></td>
+            <td class="narrow">Partial</td>
+            <td class="wrap">Unchanged this session.</td>
+            <td class="wrap">Retention 3-4wk; console 2-3wk once unblocked</td>
+            <td class="narrow">M</td>
+            <td><span class="priority-pill p-high">High</span></td>
+          </tr>
+          <tr class="row-new">
+            <td class="narrow id-col">P3</td>
+            <td class="wrap"><strong>Inc 6</strong> — Omnichannel completion<br><span class="mono">AGH-6660</span></td>
+            <td class="narrow">No</td>
+            <td class="wrap">Cross-reference: this session's telephony data-architecture decision (shared vs. tenant-DB split, synced-copy model) is a concrete worked example of "simplify <code>velents_integrations</code>' API surface," now with a precedent to follow.</td>
+            <td class="wrap">4-6wk (+1-2wk with the API simplification)</td>
+            <td class="narrow">M</td>
+            <td><span class="priority-pill p-medium">Medium</span></td>
+          </tr>
+          <tr>
+            <td class="narrow id-col">P1</td>
+            <td class="wrap"><strong>Inc 7</strong> — Agent/Workforce mgmt<br><span class="mono">AGH-6661</span></td>
+            <td class="narrow">No</td>
+            <td class="wrap">Unchanged this session.</td>
+            <td class="wrap">6-8wk</td>
+            <td class="narrow">L</td>
+            <td><span class="priority-pill p-medium">Medium</span></td>
+          </tr>
+          <tr>
+            <td class="narrow id-col">P1</td>
+            <td class="wrap"><strong>Inc 8</strong> — CC dashboards &amp; reports<br><span class="mono">AGH-6662</span></td>
+            <td class="narrow">No</td>
+            <td class="wrap">Unchanged this session.</td>
+            <td class="wrap">5-7wk</td>
+            <td class="narrow">M-L</td>
+            <td><span class="priority-pill p-medium">Medium</span></td>
+          </tr>
+          <tr class="row-new">
+            <td class="narrow id-col">P3<span style="color:var(--muted-2)"><br>(P1 groundwork)</span></td>
+            <td class="wrap"><strong>Inc 9</strong> — IVR &amp; self-service<br><span class="mono">AGH-6663</span></td>
+            <td class="narrow"><strong>Yes</strong></td>
+            <td class="wrap"><strong>Biggest correction this session.</strong> The FlowRunner does <em>not</em> "not exist" as previously written — it exists (<code>flow-runner.js</code> in <code>call-engine</code>) and was proven live: resolved a real DID, loaded the tenant's Flow, walked the node graph to the transfer step. Revised to <strong>~50% proven</strong>: engine exists and mostly works; builder UI still not found; the transfer node has one active, narrowed-down bug.</td>
+            <td class="wrap">FlowRunner: <s>5-8wk pending location</s> → small, targeted bug fix. Builder UI: unchanged, 4-6wk</td>
+            <td class="narrow">L</td>
+            <td><span class="priority-pill p-high">Med-High</span></td>
+          </tr>
+          <tr>
+            <td class="narrow id-col">P3</td>
+            <td class="wrap"><strong>Inc 10</strong> — Agent Assist &amp; Productivity<br><span class="mono">AGH-6746</span></td>
+            <td class="narrow">Partial</td>
+            <td class="wrap">Unchanged this session.</td>
+            <td class="wrap">8-12wk</td>
+            <td class="narrow">XL</td>
+            <td><span class="priority-pill p-low">Low-Med</span></td>
+          </tr>
+          <tr>
+            <td class="narrow id-col">P3</td>
+            <td class="wrap"><strong>Inc 11</strong> — Outbound &amp; Callback<br><span class="mono">AGH-6747</span></td>
+            <td class="narrow">Partial</td>
+            <td class="wrap">Unchanged this session.</td>
+            <td class="wrap">4-6wk</td>
+            <td class="narrow">M</td>
+            <td><span class="priority-pill p-low">Low</span></td>
+          </tr>
+          <tr>
+            <td class="narrow id-col">P1</td>
+            <td class="wrap"><strong>Inc 12</strong> — Governance, RBAC &amp; Audit<br><span class="mono">AGH-6748</span></td>
+            <td class="narrow">No</td>
+            <td class="wrap">Unchanged this session.</td>
+            <td class="wrap">3-5wk</td>
+            <td class="narrow">M</td>
+            <td><span class="priority-pill p-high">High</span></td>
+          </tr>
+          <tr class="row-new">
+            <td class="narrow id-col">P5</td>
+            <td class="wrap"><strong>Inc 13</strong> — Productization / 2nd-client<br><span class="mono">AGH-7309</span></td>
+            <td class="narrow">No</td>
+            <td class="wrap">Cross-reference: this session's discussion of a second client (e.g. <code>safha</code>) sharing the call-center feature through <code>velents_integrations</code>, with data ownership already decided, is directly relevant groundwork for this increment's tenantization-gap item.</td>
+            <td class="wrap">6-10wk, mostly after everything else ships</td>
+            <td class="narrow">L</td>
+            <td><span class="priority-pill p-low">Low</span></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="wide">
+    <div class="section-label">Data flow between the services involved</div>
+    <p>Same diagram as the original plan — see the companion <em>Asterisk / AI-voice call routing</em> artifact for the full zoomable version, now updated with the call-engine's resolved location.</p>
+    <div class="callout">
+      <span class="callout-label">What changed</span>
+      <p>The "Call Control Service (location TBD)" node is resolved: it's <code>call-engine</code>, deployed from <code>Velents-Technologies-UG/agent-hub</code>. One wrinkle remains — that repo's main branch is architecturally a frontend, with no visible trace of this backend at its root — see the companion Worker 2 doc for the full detail.</p>
+    </div>
+  </section>
+
+  <section>
+    <div class="section-label">Files changed / to change</div>
+    <ul>
+      <li><code>scripts/audit-call-pipeline.sh</code> — bug fixes, new gates, relabel (original plan, shipped).</li>
+      <li><code>configs/samples/sorcery_realtime_agents.conf.sample</code> — Bug 7 fix, applied and verified live.</li>
+      <li><code>deploy/control_api.py</code> — Bug 5/8 fix (<code>/healthz</code> vs <code>/readyz</code> split), applied and deployed.</li>
+      <li><code>deploy/sip_store.py</code> — Bug 10 still needs a real code fix (explicit "no inbound auth" trunk option); currently only worked around in the DB directly.</li>
+    </ul>
+  </section>
+
+</main>
+
+<footer>
+  <span>v0.1 — supersedes the original plan; original left untouched</span>
+  <span>asterisk / scripts / deploy / configs</span>
+</footer>

@@ -1,0 +1,1543 @@
+<title>Call Center Feature — Master Overview (v0.1)</title>
+<style>
+  :root{
+    --bg:#f5f7f8; --surface:#ffffff; --surface-alt:#eef1f3;
+    --text:#1a232c; --muted:#5c6b78; --muted-2:#7c8b97;
+    --border:#dde3e7; --border-strong:#c7d0d6;
+    --accent:#1f6f6b; --accent-soft:#e3f1ef;
+    --risk-high:#b3261e; --risk-high-soft:#fbe9e7;
+    --risk-med:#8a5300; --risk-med-soft:#fdf1de;
+    --ok:#1c7a4d; --ok-soft:#e6f4ec;
+    --crit:#7a1220; --crit-soft:#fbe4e2;
+    --code-bg:#eef1f3;
+    --shadow: 0 1px 2px rgba(20,30,35,.06), 0 8px 24px -12px rgba(20,30,35,.12);
+    --dot-carrier:#5b7fc4; --dot-asterisk:#3fb6ac; --dot-callengine:#3fd9b8;
+    --dot-fe:#8a72d1; --dot-be:#6f80d1; --dot-vi:#7391a3;
+    --dot-aivoice:#d1953f; --dot-vendor:#3fb673; --dot-data:#8a8a99; --dot-gap:#e5544c;
+  }
+  :root[data-theme="dark"]{
+    --bg:#0c1116; --surface:#131a21; --surface-alt:#1a222b;
+    --text:#e6ebf0; --muted:#93a2ae; --muted-2:#7c8b97;
+    --border:#232d37; --border-strong:#2d3945;
+    --accent:#5fd4c8; --accent-soft:#122b29;
+    --risk-high:#f2726b; --risk-high-soft:#2c1614;
+    --risk-med:#f0ab4d; --risk-med-soft:#2b220e;
+    --ok:#52d492; --ok-soft:#0f2419;
+    --crit:#ff8a80; --crit-soft:#331411;
+    --code-bg:#1a222b;
+    --shadow: 0 1px 2px rgba(0,0,0,.3), 0 12px 32px -16px rgba(0,0,0,.6);
+  }
+  @media (prefers-color-scheme: dark){
+    :root:not([data-theme="light"]){
+      --bg:#0c1116; --surface:#131a21; --surface-alt:#1a222b;
+      --text:#e6ebf0; --muted:#93a2ae; --muted-2:#7c8b97;
+      --border:#232d37; --border-strong:#2d3945;
+      --accent:#5fd4c8; --accent-soft:#122b29;
+      --risk-high:#f2726b; --risk-high-soft:#2c1614;
+      --risk-med:#f0ab4d; --risk-med-soft:#2b220e;
+      --ok:#52d492; --ok-soft:#0f2419;
+      --crit:#ff8a80; --crit-soft:#331411;
+      --code-bg:#1a222b;
+      --shadow: 0 1px 2px rgba(0,0,0,.3), 0 12px 32px -16px rgba(0,0,0,.6);
+    }
+  }
+
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;}
+  body{
+    background:var(--bg); color:var(--text);
+    font-family:"Source Serif Pro","Iowan Old Style","Palatino Linotype",Georgia,serif;
+    font-size:16.5px; line-height:1.6; -webkit-font-smoothing:antialiased;
+  }
+  ::selection{ background:var(--accent-soft); color:var(--text); }
+
+  .layout{ display:flex; max-width:1400px; margin:0 auto; }
+  .toc{
+    flex:0 0 240px; position:sticky; top:0; align-self:flex-start; height:100vh;
+    overflow-y:auto; padding:32px 18px 40px 24px; border-right:1px solid var(--border);
+    font-family:"IBM Plex Sans","Segoe UI",system-ui,sans-serif; font-size:12.5px;
+  }
+  .toc-title{
+    font-family:"IBM Plex Mono",monospace; font-size:10.5px; letter-spacing:.12em;
+    text-transform:uppercase; color:var(--muted-2); margin-bottom:14px;
+  }
+  .toc a{
+    display:block; color:var(--muted); text-decoration:none; padding:5px 8px; border-radius:6px;
+    margin-bottom:1px;
+  }
+  .toc a:hover{ background:var(--surface-alt); color:var(--text); }
+  .toc a.sub{ padding-left:20px; font-size:11.5px; }
+  .toc a.top{ font-weight:600; color:var(--text); margin-top:10px; }
+  .toc a.top:first-child{ margin-top:0; }
+
+  .doc{ flex:1; min-width:0; max-width:1080px; padding:0 32px 96px; }
+
+  header.masthead{ padding:48px 0 28px; border-bottom:1px solid var(--border); }
+  .eyebrow{
+    font-family:"IBM Plex Mono",ui-monospace,"SFMono-Regular",Menlo,Consolas,monospace;
+    font-size:12.5px; letter-spacing:.14em; text-transform:uppercase; color:var(--accent);
+    display:flex; align-items:center; gap:10px; margin-bottom:14px;
+  }
+  .eyebrow .dot{width:6px;height:6px;border-radius:50%;background:var(--accent);display:inline-block;}
+  h1{
+    font-family:"IBM Plex Sans","Segoe UI Semibold","Segoe UI",system-ui,sans-serif;
+    font-weight:660; font-size:clamp(28px,4vw,42px); line-height:1.1; letter-spacing:-.015em;
+    margin:0 0 12px; text-wrap:balance; color:var(--text);
+  }
+  .subtitle{
+    font-family:"IBM Plex Sans","Segoe UI",system-ui,sans-serif;
+    font-size:19px; font-weight:450; line-height:1.55;
+    color:var(--text); opacity:.82; max-width:72ch; margin:0 0 22px;
+  }
+  .meta-row{
+    display:flex; flex-wrap:wrap; gap:10px 22px;
+    font-family:"IBM Plex Mono",ui-monospace,monospace; font-size:12.5px; color:var(--muted-2);
+  }
+  .chip{
+    display:inline-flex; align-items:center; gap:6px; background:var(--accent-soft); color:var(--accent);
+    border:1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+    padding:3px 10px 3px 8px; border-radius:100px; font-size:12px; font-weight:600; letter-spacing:.02em;
+  }
+
+  section{ margin-top:60px; scroll-margin-top:24px; }
+  section.sub{ margin-top:44px; padding-top:8px; border-top:1px dashed var(--border); }
+  .part-num{
+    font-family:"IBM Plex Mono",monospace; font-size:13px; font-weight:700; color:var(--accent);
+    letter-spacing:.08em; margin-bottom:4px; display:block;
+  }
+  .section-label{
+    font-family:"IBM Plex Mono",ui-monospace,monospace; font-size:12px; letter-spacing:.14em;
+    text-transform:uppercase; color:var(--muted-2); display:flex; align-items:center; gap:14px; margin-bottom:16px;
+  }
+  .section-label::after{ content:""; flex:1; height:1px; background:var(--border); }
+  h2{
+    font-family:"IBM Plex Sans","Segoe UI Semibold","Segoe UI",system-ui,sans-serif;
+    font-weight:650; font-size:27px; letter-spacing:-.01em; margin:0 0 16px; color:var(--text); text-wrap:balance;
+  }
+  h3{
+    font-family:"IBM Plex Sans","Segoe UI Semibold","Segoe UI",system-ui,sans-serif;
+    font-weight:640; font-size:19px; margin:0 0 4px; color:var(--text);
+  }
+  h4{
+    font-family:"IBM Plex Sans","Segoe UI Semibold","Segoe UI",system-ui,sans-serif;
+    font-weight:620; font-size:14.5px; text-transform:uppercase; letter-spacing:.05em;
+    color:var(--accent); margin:22px 0 8px;
+  }
+  p{ margin:0 0 14px; max-width:76ch; }
+  ul,ol{ padding-left:1.3em; margin:0 0 16px; max-width:76ch; }
+  li{ margin-bottom:8px; }
+  strong{ font-weight:700; }
+  a{ color:var(--accent); }
+
+  code, .mono{
+    font-family:"IBM Plex Mono",ui-monospace,"SFMono-Regular",Menlo,Consolas,monospace;
+    font-size:.85em; background:var(--code-bg); border:1px solid var(--border);
+    border-radius:4px; padding:.05em .38em; color:var(--text);
+  }
+
+  .callout{
+    background:var(--surface); border:1px solid var(--border); border-left:3px solid var(--accent);
+    border-radius:8px; padding:16px 20px; margin:16px 0; box-shadow:var(--shadow);
+  }
+  .callout p:last-child, .callout ul:last-child{ margin-bottom:0; }
+  .callout-label{
+    font-family:"IBM Plex Mono",monospace; font-size:11px; letter-spacing:.1em;
+    text-transform:uppercase; color:var(--accent); font-weight:700; margin-bottom:8px; display:block;
+  }
+
+  .table-scroll{
+    overflow-x:auto; border:1px solid var(--border); border-radius:10px;
+    box-shadow:var(--shadow); margin:14px 0 8px; background:var(--surface); position:relative;
+  }
+  .table-expandable{ padding-top:44px; }
+  .table-expandable .table-toolbar{
+    position:absolute; right:8px; top:8px; z-index:5;
+    display:flex; gap:6px; align-items:center;
+  }
+  .table-expandable .table-toolbar .hint{
+    font-family:"IBM Plex Mono",monospace; font-size:10.5px; color:var(--muted-2);
+    margin-right:4px;
+  }
+  .table-expandable .table-toolbar button{
+    width:30px; height:30px; border-radius:7px; border:1px solid var(--border-strong);
+    background:var(--surface-alt); color:var(--text); font-size:15px; cursor:pointer;
+    display:flex; align-items:center; justify-content:center;
+  }
+  .table-expandable .table-toolbar button:hover{ border-color:var(--accent); color:var(--accent); }
+  .table-scroll.is-fullscreen{
+    position:fixed; inset:0; z-index:1000; border-radius:0;
+    width:100vw; height:100vh; max-height:100vh; padding:52px 16px 16px;
+    box-shadow:none;
+  }
+  body.table-fullscreen-open{ overflow:hidden; }
+  table{
+    border-collapse:collapse; width:100%;
+    font-family:"IBM Plex Sans","Segoe UI",system-ui,sans-serif; font-size:13.2px; line-height:1.5;
+  }
+  thead th{
+    position:sticky; top:0; background:var(--surface-alt); text-align:left;
+    font-weight:650; font-size:11px; letter-spacing:.06em; text-transform:uppercase;
+    color:var(--muted); padding:11px 13px; border-bottom:1px solid var(--border-strong); white-space:nowrap;
+  }
+  tbody td{ padding:11px 13px; border-bottom:1px solid var(--border); vertical-align:top; color:var(--text); }
+  tbody tr:last-child td{ border-bottom:none; }
+  tbody tr:nth-child(even){ background:color-mix(in srgb, var(--surface-alt) 45%, transparent); }
+  td.narrow, th.narrow{ min-width:64px; }
+  td.wrap{ min-width:180px; }
+  td.center{ text-align:center; }
+
+  .legend-table td{ vertical-align:middle; }
+  .swatch{
+    display:inline-block; width:12px; height:12px; border-radius:3px; margin-right:6px;
+    vertical-align:middle; border:1px solid rgba(0,0,0,.15); cursor:help;
+  }
+  .sw-carrier{ background:var(--dot-carrier); } .sw-asterisk{ background:var(--dot-asterisk); }
+  .sw-callengine{ background:var(--dot-callengine); } .sw-fe{ background:var(--dot-fe); }
+  .sw-be{ background:var(--dot-be); } .sw-vi{ background:var(--dot-vi); }
+  .sw-aivoice{ background:var(--dot-aivoice); } .sw-vendor{ background:var(--dot-vendor); }
+  .sw-data{ background:var(--dot-data); } .sw-gap{ background:var(--dot-gap); }
+
+  abbr.gloss{
+    text-decoration:underline dotted; text-decoration-color:var(--accent, #7391a3);
+    text-underline-offset:2px; cursor:help; font:inherit;
+  }
+
+  .engine-block{ margin-top:16px; padding-top:14px; border-top:1px dashed var(--border); }
+  .engine-block:first-of-type{ border-top:none; padding-top:0; margin-top:10px; }
+  .engine-label{
+    font-family:"IBM Plex Mono",monospace; font-size:12px; letter-spacing:.08em;
+    text-transform:uppercase; color:var(--accent); font-weight:700; margin:0 0 6px; display:block;
+  }
+
+  .status-pill{
+    display:inline-block; font-size:10.5px; font-weight:700; letter-spacing:.03em;
+    padding:2px 9px; border-radius:100px; white-space:nowrap; text-transform:uppercase;
+  }
+  .s-live{ background:var(--ok-soft); color:var(--ok); }
+  .s-partial{ background:var(--risk-med-soft); color:var(--risk-med); }
+  .s-none{ background:var(--surface-alt); color:var(--muted); border:1px solid var(--border); }
+  .s-blocked{ background:var(--risk-high-soft); color:var(--risk-high); }
+  .s-crit{ background:var(--crit-soft); color:var(--crit); }
+
+  .progress-bar{
+    display:flex; align-items:center; gap:14px; min-width:260px; margin:6px 0;
+  }
+  .progress-track{
+    flex:1; height:16px; background:var(--surface-alt); border-radius:100px; overflow:hidden;
+    border:1px solid var(--border-strong); min-width:140px; max-width:320px;
+  }
+  .progress-fill{
+    height:100%; background:linear-gradient(90deg, var(--accent), color-mix(in srgb, var(--accent) 70%, white 10%));
+    border-radius:100px;
+  }
+  .progress-pct{
+    font-family:"IBM Plex Mono",monospace; font-size:15px; font-weight:700;
+    color:var(--text); white-space:nowrap; min-width:5ch;
+  }
+
+  .diagram-card{
+    background:var(--surface); border:1px solid var(--border); border-radius:12px;
+    box-shadow:var(--shadow); padding:8px; margin:16px 0; position:relative;
+  }
+  .diagram-card .mermaid-wrap{
+    overflow-x:auto; padding:24px 18px; background:#0d1218; border-radius:8px; min-width:100%;
+  }
+
+  /* diagram zoom / fullscreen controls (same pattern as ai-call-flow-api-requests.html) */
+  .diagram-card .toolbar{
+    position:absolute; right:16px; top:16px; z-index:5;
+    display:flex; gap:5px; background:#131a21; border:1px solid #232f3a; border-radius:8px; padding:5px;
+  }
+  .diagram-card .toolbar button{
+    width:28px; height:28px; border-radius:6px; border:1px solid #232f3a;
+    background:#141b22; color:#e7ecf1; font-size:14px; cursor:pointer;
+    display:flex; align-items:center; justify-content:center;
+  }
+  .diagram-card .toolbar button:hover{ border-color:var(--accent); color:var(--accent); }
+  .diagram-card .toolbar .sep{ width:1px; align-self:stretch; background:#232f3a; margin:2px 1px; }
+  .diagram-card .stage{
+    overflow:auto; display:flex; align-items:flex-start; justify-content:center;
+    padding:24px 18px; background:#0d1218; border-radius:8px; min-width:100%;
+    cursor:grab; max-height:70vh;
+  }
+  .diagram-card .stage.grabbing{ cursor:grabbing; }
+  .diagram-card .zoomwrap{ transform-origin:top left; transition:transform .12s ease-out; }
+  .diagram-card.is-fullscreen{
+    position:fixed; inset:0; z-index:1000; border-radius:0;
+    width:100vw; height:100vh; background:var(--surface); padding:16px; margin:0;
+  }
+  .diagram-card.is-fullscreen .stage{ max-height:none; height:calc(100vh - 32px); }
+  body.diagram-fullscreen-open{ overflow:hidden; }
+
+  /* Mermaid sequence-diagram legibility: thicker lines, clearer loop/opt/alt frames */
+  .diagram-card .messageLine0, .diagram-card .messageLine1{ stroke-width:2px !important; }
+  .diagram-card .loopLine{ stroke:#7391a3 !important; stroke-width:2px !important; }
+  .diagram-card .labelBox{ fill:#232d37 !important; stroke:#7391a3 !important; stroke-width:1.5px !important; }
+  .diagram-card .labelText, .diagram-card .loopText, .diagram-card .loopText tspan{
+    fill:#eef2f5 !important; font-weight:600 !important;
+  }
+  .diagram-card .actor{ stroke-width:2px !important; }
+  .diagram-card line.actor-line{ stroke-width:1.5px !important; stroke:#4d5c6b !important; }
+
+  .service-card{
+    background:var(--surface); border:1px solid var(--border); border-radius:10px;
+    padding:20px 22px; margin:16px 0; box-shadow:var(--shadow);
+  }
+  .service-card .swatch-lg{
+    display:inline-block; width:10px; height:10px; border-radius:3px; margin-right:8px;
+  }
+
+  hr.rule{ border:none; border-top:1px solid var(--border); margin:56px 0 0; }
+
+  footer{
+    margin:64px 0 0; padding:24px 0; border-top:1px solid var(--border);
+    font-family:"IBM Plex Mono",monospace; font-size:12px; color:var(--muted-2);
+    display:flex; justify-content:space-between; flex-wrap:wrap; gap:8px;
+  }
+
+  .back-top{
+    position:fixed; right:24px; bottom:24px; width:40px; height:40px; border-radius:50%;
+    background:var(--surface); border:1px solid var(--border-strong); box-shadow:var(--shadow);
+    display:flex; align-items:center; justify-content:center; color:var(--accent); text-decoration:none;
+    font-size:16px; z-index:20;
+  }
+
+  @media (max-width:900px){
+    .toc{ display:none; }
+    .doc{ padding:0 20px 72px; max-width:100%; }
+  }
+</style>
+
+<div class="layout">
+  <nav class="toc">
+    <div class="toc-title">On this page</div>
+    <a class="top" href="#part1">1. General description</a>
+    <a class="top" href="#part2">2. Services &amp; DBs</a>
+    <a class="sub" href="#s21">2.1 Data stores</a>
+    <a class="top" href="#part3">3. Inbound call flows</a>
+    <a class="top" href="#part4">4. Outbound call flow</a>
+    <a class="top" href="#part5">5. Per-service detail</a>
+    <a class="sub" href="#s51">5.1 asterisk</a>
+    <a class="sub" href="#s52">5.2 call-engine</a>
+    <a class="sub" href="#s53">5.3 velentsAgents FE</a>
+    <a class="sub" href="#s54">5.4 velentsAgents BE</a>
+    <a class="sub" href="#s55">5.5 velents_integrations</a>
+    <a class="sub" href="#s56">5.6 livekit-dispatcher</a>
+    <a class="sub" href="#s57">5.7 livekit-outbound-caller</a>
+    <a class="top" href="#part6">6. Tasks tracking</a>
+    <a class="sub" href="#s61">6.1 Dependency graph</a>
+    <a class="top" href="#part7">7. Bugs</a>
+    <a class="top" href="#part8">8. Risks</a>
+    <a class="top" href="#part9">9. TBD</a>
+    <a class="top" href="#part10">10. Abbreviations</a>
+  </nav>
+
+  <div class="doc">
+    <header class="masthead">
+      <div class="eyebrow"><span class="dot"></span>Master overview — Call Center feature</div>
+      <h1>Call Center feature — master overview</h1>
+      <p class="subtitle">Everything found and decided on 2026-07-19 — test-suite fixes, the real end-to-end Voylo call test, the call-engine location resolution, and the data-ownership architecture decision — from the whole picture down to per-task tracking.</p>
+      <div class="meta-row">
+        <span class="chip">v0.1</span>
+        <span class="chip" style="opacity:.85;">Last updated 2026-07-21</span>
+        <span>Companions: feature-gap plan · AI call-flow notes · Worker 2 architecture doc</span>
+      </div>
+    </header>
+
+    <section id="part1">
+      <span class="part-num">PART 1</span>
+      <div class="section-label">General description</div>
+      <h2>The whole picture, in one paragraph</h2>
+      <p>The Call Center feature layers a full contact-center product — queues, <abbr class="gloss" title="Interactive Voice Response — an automated menu/flow before reaching an agent">IVR</abbr> flows, AI-assisted and AI-handled calls, supervisor tooling, recording, reporting — on top of infrastructure that already exists and works today: Asterisk as the <abbr class="gloss" title="Session Initiation Protocol — the signaling protocol used to set up/tear down calls">SIP</abbr>/media layer, Innocalls as the default carrier, and a Node.js <abbr class="gloss" title="Asterisk REST Interface — the WebSocket/REST protocol call-engine uses to control live calls">ARI</abbr> client (<code>call-engine</code>) that Asterisk hands every call to. Of the 13 planned increments, only <strong>Inc 1 (Voice Engine Spine)</strong> is officially in progress — but a real, paid end-to-end call test on 2026-07-19 proved substantially more of the underlying plumbing works than the dossier credited, and corrected two increments that were marked "nothing exists" when the opposite was true: Inc 1's call-engine-location blocker (it is now resolved) and Inc 9's FlowRunner (it is now proven ~50% working).</p>
+
+      <div class="callout">
+        <span class="callout-label">What's proven working, end-to-end, as of 2026-07-19</span>
+        <p>A real inbound call from an external carrier, through Asterisk's <abbr class="gloss" title="Session Initiation Protocol — the signaling protocol used to set up/tear down calls">SIP</abbr> trunk matching, into <code>call-engine</code>, resolving the dialed number to the right tenant and call-handling script, loading that script, and beginning to execute it — confirmed on a <em>second</em>, independently-onboarded carrier (Voylo), not just the original Innocalls integration. The one remaining failure was a specific, narrow bug in the transfer step (an <abbr class="gloss" title="Asterisk REST Interface — the WebSocket/REST protocol call-engine uses to control live calls">ARI</abbr> "Channel not found" race, ~600ms after the call arrives), not a design or architecture problem. <em>Root-caused and fixed in code as of 2026-07-21 — see the next callout and Part 7's Bug 11. Not yet re-verified against a live carrier call.</em></p>
+      </div>
+      <div class="callout">
+        <span class="callout-label">What's still fundamentally missing</span>
+        <p>The human-agent-facing product surface (queues, <abbr class="gloss" title="Automatic Call Distributor — routes a queued call to an available agent">ACD</abbr>, supervisor tools, dashboards, <abbr class="gloss" title="Workforce Management — agent scheduling/staffing">WFM</abbr>) — almost none of that exists as more than a UI mockup yet. AI-copilot features and the AI-agent-handled call-with-takeover flow are both still proposed designs, not built. <em>Unchanged as of 2026-07-20.</em></p>
+      </div>
+      <div class="callout">
+        <span class="callout-label">What changed on 2026-07-19 that reshapes the roadmap</span>
+        <p>The call-engine's location is resolved — it's a real, findable, mostly-working service, deployed from <code>agent-hub</code> — which unblocks scoping the session/event model and confirms the <abbr class="gloss" title="Interactive Voice Response — an automated menu/flow before reaching an agent">IVR</abbr> FlowRunner already exists rather than needing to be built from scratch. A real architecture decision was also made for how call routing and its data should be owned as more clients (not just <code>velentsAgents</code>) start using this feature. <em>As of 2026-07-20: still a design, not built — see Part 6.1.</em></p>
+      </div>
+      <div class="callout">
+        <span class="callout-label">What changed 2026-07-21</span>
+        <p>Root-caused and fixed the transfer/conference bug: <code>transferer.js</code>/<code>control-api.js</code> originated the new leg with <code>appArgs</code> that put the literal string <code>"transfer"</code>/<code>"conference"</code> where <code>ari.js</code>'s <code>dialed</code> handler expected a real channel ID, so the lookup always missed and the new leg was hung up on arrival — separately, the old agent leg was retired unconditionally right after <code>originate()</code> resolved, before the replacement was ever confirmed bridged. Fixed with two new <code>StasisStart</code> branches keyed by the call's <code>uuid</code> instead, and by deferring the old leg's hangup until the new one is confirmed in the bridge (never for a conference leg). Covered by a new unit test with a mocked <abbr class="gloss" title="Asterisk REST Interface — the WebSocket/REST protocol call-engine uses to control live calls">ARI</abbr> client — code-verified, not yet field-verified against a live carrier call. Also: ported forward Bug 5's <code>/healthz</code> fix (now checks real <abbr class="gloss" title="Asterisk REST Interface — the WebSocket/REST protocol call-engine uses to control live calls">ARI</abbr> reachability, not just process bind); found and fixed an unrelated <code>gateway.js</code> Redis-subscribe race (Bug 12); added full Velents centralized Elasticsearch logging (<code>services_logs</code>/<code>cost_logs</code>) to <code>call-engine</code>; and a standalone <code>call-engine</code> repo (renamed from the old <code>agenthub-call-engine</code> naming) now exists and is being treated as authoritative going forward — see Part 9's TBD on where its source lives within <code>agent-hub</code>.</p>
+      </div>
+    </section>
+
+    <section id="part2">
+      <span class="part-num">PART 2</span>
+      <div class="section-label">Services &amp; DBs — color code</div>
+      <h2>Master architecture</h2>
+      <p>Every diagram in this document uses the same color per service category:</p>
+      <div class="table-scroll legend-table">
+        <table>
+          <tbody>
+            <tr><td><span class="swatch sw-carrier" title="Carrier (Innocalls / Voylo)"></span>Carrier</td><td>Innocalls, Voylo</td></tr>
+            <tr><td><span class="swatch sw-asterisk" title="asterisk"></span>Asterisk</td><td><abbr class="gloss" title="The SIP stack module Asterisk uses for trunk/endpoint/identify configuration">PJSIP</abbr> trunk config, dialplan, in-pod Control <abbr class="gloss" title="Application Programming Interface">API</abbr></td></tr>
+            <tr><td><span class="swatch sw-callengine" title="call-engine"></span>call-engine</td><td><abbr class="gloss" title="Asterisk REST Interface — the WebSocket/REST protocol call-engine uses to control live calls">ARI</abbr>/Stasis service — Node.js, own pod, deployed from <code>agent-hub</code></td></tr>
+            <tr><td><span class="swatch sw-fe" title="velentsAgents — Frontend"></span>velentsAgents — Frontend</td><td>Agent Desktop UI (browser softphone)</td></tr>
+            <tr><td><span class="swatch sw-be" title="velentsAgents — Backend"></span>velentsAgents — Backend</td><td>Integrations module, Voice Calls module</td></tr>
+            <tr><td><span class="swatch sw-vi" title="velents_integrations"></span>velents_integrations</td><td>Channel/payment integrations, proposed telephony provisioning <abbr class="gloss" title="Application Programming Interface">API</abbr></td></tr>
+            <tr><td><span class="swatch sw-aivoice" title="AI voice services (livekit-dispatcher / livekit-outbound-caller)"></span>AI voice services</td><td><code>livekit-dispatcher</code>, <code>livekit-outbound-caller</code></td></tr>
+            <tr><td><span class="swatch sw-vendor" title="External AI vendors (ElevenLabs / LiveKit Cloud)"></span>External AI vendors</td><td>ElevenLabs, LiveKit Cloud</td></tr>
+            <tr><td><span class="swatch sw-data" title="Data / DBs (Postgres, MongoDB, Redis)"></span>Data / DBs</td><td>Postgres (prod realtime + nonprod tenant), MongoDB, Redis</td></tr>
+            <tr><td><span class="swatch sw-gap" title="Gap — nothing built yet"></span>Gap</td><td>Nothing built yet</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="diagram-card" id="diagram1">
+        <div class="toolbar" data-target="1">
+          <button data-act="out" title="Zoom out">−</button><button data-act="reset" title="Reset zoom">⟲</button><button data-act="in" title="Zoom in">+</button><span class="sep"></span><button data-act="fullscreen" title="Full screen">⛶</button>
+        </div>
+        <div class="stage" id="stage1">
+        <div class="zoomwrap" id="zoomwrap1">
+          <pre class="mermaid">
+%%{init: {
+  'theme': 'base',
+  'themeVariables': {
+    'fontSize': '15px',
+    'fontFamily': 'IBM Plex Sans, Segoe UI, sans-serif',
+    'primaryTextColor': '#e6ebf0',
+    'primaryBorderColor': '#4d5c6b',
+    'lineColor': '#b8c4cd',
+    'edgeLabelBackground': '#10151b'
+  },
+  'flowchart': { 'nodeSpacing': 65, 'rankSpacing': 95, 'curve': 'monotoneX' }
+}}%%
+flowchart LR
+  subgraph Carriers["Carriers"]
+    Innocalls["Innocalls\n(default carrier)"]
+    Voylo["Voylo\n(2nd carrier, onboarded 2026-07-19)"]
+  end
+
+  subgraph AsteriskSvc["asterisk"]
+    PJSIP["PJSIP trunk config\n+ identify/auth matching"]
+    Dialplan["Dialplan routing"]
+    CtrlAPI["In-pod Control API\n:8092 — trunk/DID/agent CRUD"]
+  end
+
+  subgraph CallEngineSvc["call-engine"]
+    ARI["ARI/Stasis client"]
+    DIDRes["DID resolver"]
+    FlowRun["Flow runner"]
+    QueueDisp["Queue dispatcher (ACD)"]
+    Transfer["Transferer"]
+  end
+
+  subgraph DBs["Data"]
+    PGProd[("Postgres — realtime PJSIP config")]
+    PGNonprod[("Postgres — tenant data\ndid_registry / flows / queues")]
+    Redis[("Redis\ncall-engine pub/sub")]
+  end
+
+  subgraph FEBESvc["velentsAgents"]
+    Softphone["Frontend:\nAgent Desktop UI"]
+    VAInteg["Backend:\nIntegrations module"]
+    VACalls["Backend:\nVoice Calls module"]
+  end
+
+  subgraph VISvc["velents_integrations"]
+    VITelephony["Telephony provisioning API\n(proposed, synced-copy model)"]
+  end
+
+  subgraph Peripheral["Adjacent systems — not Call Center itself"]
+    LKDispatch["livekit-dispatcher"]
+    LKOutbound["livekit-outbound-caller"]
+    ElevenLabs["ElevenLabs"]
+    LiveKitCloud["LiveKit Cloud"]
+    Mongo[("MongoDB\nAI-copilot results — proposed")]
+  end
+
+  Innocalls <-->|SIP REGISTER / INVITE| PJSIP
+  Voylo -->|INVITE, IP-trust only| PJSIP
+  PJSIP --> Dialplan --> ARI
+  ARI --> DIDRes --> FlowRun --> Transfer
+  DIDRes --> QueueDisp
+  FlowRun -.->|load Flow JSON| PGNonprod
+  DIDRes -.->|HTTP lookup| PGNonprod
+  ARI -.->|pub/sub| Redis
+  CtrlAPI <-.->|CRUD| PGProd
+  PJSIP -.->|reads realtime rows| PGProd
+
+  Softphone ==>|WSS / WebRTC| PJSIP
+  Softphone ==>|call status| VACalls
+  VAInteg ==>|legacy: direct| CtrlAPI
+  VAInteg -.->|proposed| VITelephony
+  VITelephony -.->|proposed| CtrlAPI
+
+  VAInteg -.->|AI outbound, parallel path| LKDispatch
+  LKDispatch -.-> ElevenLabs
+  LKOutbound -.-> LiveKitCloud
+  LKOutbound -.->|dormant mapping| Innocalls
+
+  classDef carrier fill:#1c2a48,stroke:#5b7fc4,color:#dbe6ff,stroke-width:2px;
+  classDef asterisk fill:#0e332f,stroke:#3fb6ac,color:#d8fbf6,stroke-width:2px;
+  classDef callengine fill:#123324,stroke:#5fd4c8,color:#e3fbea,stroke-width:2.5px;
+  classDef febe fill:#241f3d,stroke:#8a72d1,color:#ede3ff,stroke-width:2px;
+  classDef vi fill:#212b33,stroke:#7391a3,color:#d7e4ec,stroke-width:2px;
+  classDef data fill:#2a2a2e,stroke:#8a8a99,color:#eeeeee,stroke-width:2px;
+  classDef peripheral fill:#1a1c1e,stroke:#565d63,color:#9aa1a6,stroke-width:1px,stroke-dasharray:2 3;
+
+  class Innocalls,Voylo carrier;
+  class PJSIP,Dialplan,CtrlAPI asterisk;
+  class ARI,DIDRes,FlowRun,QueueDisp,Transfer callengine;
+  class Softphone,VAInteg,VACalls febe;
+  class VITelephony vi;
+  class PGProd,PGNonprod,Redis data;
+  class LKDispatch,LKOutbound,ElevenLabs,LiveKitCloud,Mongo peripheral;
+
+  linkStyle default stroke-width:2.5px;
+          </pre>
+        </div>
+        </div>
+      </div>
+      <p style="color:var(--muted); font-size:14.5px;">The live path, proven 2026-07-19, is Carrier → Asterisk → <code>call-engine</code> → Postgres (tenant data). The Control <abbr class="gloss" title="Application Programming Interface">API</abbr> → Postgres (realtime <abbr class="gloss" title="The SIP stack module Asterisk uses for trunk/endpoint/identify configuration">PJSIP</abbr> config) path (trunk provisioning) is also live. Everything from <code>velents_integrations</code>' proposed telephony <abbr class="gloss" title="Application Programming Interface">API</abbr> downward, and the MongoDB AI-copilot path, is proposed/not built — unchanged as of 2026-07-20. Grayed-out nodes (AI voice services, external vendors, AI-copilot path) are adjacent systems, not part of the Call Center feature itself.</p>
+
+      <h3 style="margin-top:36px;">Services at a glance</h3>
+      <p>Consolidates every service's type, color code, and progress in one table — detail per service is in Part 5.</p>
+      <div class="table-scroll">
+        <table>
+          <thead>
+            <tr><th>Service</th><th class="narrow">Color</th><th class="narrow">Type</th><th>Progress</th><th class="narrow">Status</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>asterisk</td><td><span class="swatch sw-asterisk" title="asterisk"></span></td><td class="narrow">Internal — core <abbr class="gloss" title="Call Center — this feature">CC</abbr></td><td><div class="progress-bar"><div class="progress-track"><div class="progress-fill" style="width:70%"></div></div><span class="progress-pct">~70%</span></div></td><td class="narrow"><span class="status-pill s-live">Live</span></td></tr>
+            <tr><td>call-engine</td><td><span class="swatch sw-callengine" title="call-engine"></span></td><td class="narrow">Internal — core <abbr class="gloss" title="Call Center — this feature">CC</abbr></td><td><div class="progress-bar"><div class="progress-track"><div class="progress-fill" style="width:60%"></div></div><span class="progress-pct">~60%</span></div></td><td class="narrow"><span class="status-pill s-partial">Partial</span></td></tr>
+            <tr><td>velentsAgents — Frontend</td><td><span class="swatch sw-fe" title="velentsAgents — Frontend"></span></td><td class="narrow">Internal — core <abbr class="gloss" title="Call Center — this feature">CC</abbr></td><td><div class="progress-bar"><div class="progress-track"><div class="progress-fill" style="width:20%"></div></div><span class="progress-pct">~20%</span></div></td><td class="narrow"><span class="status-pill s-partial">Partial</span></td></tr>
+            <tr><td>velentsAgents — Backend</td><td><span class="swatch sw-be" title="velentsAgents — Backend"></span></td><td class="narrow">Internal — core <abbr class="gloss" title="Call Center — this feature">CC</abbr></td><td><div class="progress-bar"><div class="progress-track"><div class="progress-fill" style="width:80%"></div></div><span class="progress-pct">~80%</span></div></td><td class="narrow"><span class="status-pill s-live">Live</span></td></tr>
+            <tr><td>velents_integrations</td><td><span class="swatch sw-vi" title="velents_integrations"></span></td><td class="narrow">Internal — core <abbr class="gloss" title="Call Center — this feature">CC</abbr></td><td><div class="progress-bar"><div class="progress-track"><div class="progress-fill" style="width:0%"></div></div><span class="progress-pct">0%</span></div></td><td class="narrow"><span class="status-pill s-none">Not started</span></td></tr>
+            <tr><td>livekit-dispatcher</td><td><span class="swatch sw-aivoice" title="AI voice services (livekit-dispatcher / livekit-outbound-caller)"></span></td><td class="narrow">Internal — adjacent/parallel</td><td><div class="progress-bar"><div class="progress-track"><div class="progress-fill" style="width:100%"></div></div><span class="progress-pct">Live</span></div></td><td class="narrow"><span class="status-pill s-live">Working</span></td></tr>
+            <tr><td>livekit-outbound-caller</td><td><span class="swatch sw-aivoice" title="AI voice services (livekit-dispatcher / livekit-outbound-caller)"></span></td><td class="narrow">Internal — adjacent/parallel</td><td><div class="progress-bar"><div class="progress-track"><div class="progress-fill" style="width:90%"></div></div><span class="progress-pct">~90%</span></div></td><td class="narrow"><span class="status-pill s-live">Working</span></td></tr>
+            <tr><td>Innocalls</td><td><span class="swatch sw-carrier" title="Carrier (Innocalls / Voylo)"></span></td><td class="narrow">External carrier</td><td colspan="1" style="color:var(--muted);">n/a — external</td><td class="narrow"><span class="status-pill s-live">Live</span></td></tr>
+            <tr><td>Voylo</td><td><span class="swatch sw-carrier" title="Carrier (Innocalls / Voylo)"></span></td><td class="narrow">External carrier</td><td style="color:var(--muted);">n/a — external</td><td class="narrow"><span class="status-pill s-live">Live</span></td></tr>
+            <tr><td>ElevenLabs</td><td><span class="swatch sw-vendor" title="External AI vendors (ElevenLabs / LiveKit Cloud)"></span></td><td class="narrow">External vendor</td><td style="color:var(--muted);">n/a — external</td><td class="narrow"><span class="status-pill s-live">Live</span></td></tr>
+            <tr><td>LiveKit Cloud</td><td><span class="swatch sw-vendor" title="External AI vendors (ElevenLabs / LiveKit Cloud)"></span></td><td class="narrow">External vendor</td><td style="color:var(--muted);">n/a — external</td><td class="narrow"><span class="status-pill s-live">Live</span></td></tr>
+            <tr><td>Postgres — realtime <abbr class="gloss" title="The SIP stack module Asterisk uses for trunk/endpoint/identify configuration">PJSIP</abbr> config</td><td><span class="swatch sw-data" title="Data / DBs (Postgres, MongoDB, Redis)"></span></td><td class="narrow">Data store</td><td style="color:var(--muted);">n/a — infra</td><td class="narrow"><span class="status-pill s-live">Live</span></td></tr>
+            <tr><td>Postgres — tenant data</td><td><span class="swatch sw-data" title="Data / DBs (Postgres, MongoDB, Redis)"></span></td><td class="narrow">Data store</td><td style="color:var(--muted);">n/a — infra</td><td class="narrow"><span class="status-pill s-live">Live</span></td></tr>
+            <tr><td>Redis</td><td><span class="swatch sw-data" title="Data / DBs (Postgres, MongoDB, Redis)"></span></td><td class="narrow">Data store</td><td style="color:var(--muted);">n/a — infra</td><td class="narrow"><span class="status-pill s-live">Live</span></td></tr>
+            <tr><td>MongoDB (AI-copilot store)</td><td><span class="swatch sw-data" title="Data / DBs (Postgres, MongoDB, Redis)"></span></td><td class="narrow">Data store — proposed</td><td><div class="progress-bar"><div class="progress-track"><div class="progress-fill" style="width:0%"></div></div><span class="progress-pct">0%</span></div></td><td class="narrow"><span class="status-pill s-none">Not started</span></td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3 id="s21" style="margin-top:36px;">2.1 Data stores at a glance</h3>
+      <p>Where each piece of preserved data actually lives — cross-referencing the per-service "Preserved data in DB" subsections in Part 5 with the two adjacent stores (MongoDB, Redis) that don't belong to any single one of the seven services detailed there.</p>
+      <div class="table-scroll">
+        <table>
+          <thead><tr><th class="narrow">Engine</th><th>Instance / scope</th><th>Owned by</th><th>What lives there</th><th class="narrow">Status</th></tr></thead>
+          <tbody>
+            <tr><td class="narrow">Postgres</td><td>PROD (realtime <abbr class="gloss" title="The SIP stack module Asterisk uses for trunk/endpoint/identify configuration">PJSIP</abbr> config)</td><td><code>asterisk</code> (5.1)</td><td><code>sip_trunks</code>, <code>ps_endpoints</code>, <code>ps_auths</code>, <code>ps_aors</code>, <code>ps_identify</code> (+ legacy <code>sip_providers</code>/<code>sip_trunk_accounts</code>)</td><td><span class="status-pill s-live">Live</span></td></tr>
+            <tr><td class="narrow">Postgres</td><td>NONPROD (tenant data)</td><td>velentsAgents Backend (5.4), read by <code>call-engine</code> (5.2)</td><td><code>did_registry</code>, <code>flows</code>, <code>queues</code>, <code>tenants</code></td><td><span class="status-pill s-live">Live</span></td></tr>
+            <tr><td class="narrow">Postgres</td><td>instance unspecified</td><td><code>call-engine</code> (5.2)</td><td><code>call_events</code> — call-state/<abbr class="gloss" title="Call Detail Record — a logged record of a completed call">CDR</abbr> logging</td><td><span class="status-pill s-blocked">Not persisting — DATABASE_URL unset</span></td></tr>
+            <tr><td class="narrow">Postgres</td><td>proposed shared telephony store</td><td><code>velents_integrations</code> (5.5)</td><td>synced copy of DID registry, published Flows, trunk/endpoint config</td><td><span class="status-pill s-none">Proposed, not built</span></td></tr>
+            <tr><td class="narrow">Postgres/MySQL (not confirmed)</td><td><code>velents_integrations</code>' own app database</td><td><code>velents_integrations</code> (5.5)</td><td>WhatsApp/Messenger/Instagram + Payment (MoneyHash) integration data</td><td><span class="status-pill s-live">Live, schema not documented here</span></td></tr>
+            <tr><td class="narrow">MongoDB</td><td><code>text-agent</code>'s own <code>mlapi</code> database</td><td><code>text-agent</code> (adjacent service, not one of the 7 CC services)</td><td>session/conversation persistence, DSPy prompt/log collections</td><td><span class="status-pill s-live">Live, but not CC-specific</span></td></tr>
+            <tr><td class="narrow">MongoDB</td><td>proposed AI-copilot results store</td><td>not yet owned by any service</td><td>sentiment/intent/tool/reply-rec results + KB-match % (Part 3a's human-assist flow)</td><td><span class="status-pill s-none">Proposed, not built</span></td></tr>
+            <tr><td class="narrow">Redis</td><td><code>call-engine</code> pub/sub</td><td><code>call-engine</code> (5.2)</td><td>ephemeral call-event pub/sub messaging</td><td><span class="status-pill s-partial">Live, but not a data store — nothing retained</span></td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p style="margin-top:10px;">Recordings (MixMonitor output, asterisk 5.1) are the one preserved artifact that lives in <strong>none</strong> of these — they're audio files on a Kubernetes PVC, referenced by filename/path only, not a database row anywhere.</p>
+    </section>
+
+    <section id="part3">
+      <span class="part-num">PART 3</span>
+      <div class="section-label">Inbound calls — <abbr class="gloss" title="Application Programming Interface">API</abbr> request sequence</div>
+      <h2>Two flows: human-agent-assisted, and AI-agent-handled</h2>
+      <p>Grounded in real, confirmed <code>call-engine</code> internals — not just the originally-proposed design.</p>
+
+      <h3>3a. Human-agent-assisted call</h3>
+      <div class="diagram-card" id="diagram2">
+        <div class="toolbar" data-target="2">
+          <button data-act="out" title="Zoom out">−</button><button data-act="reset" title="Reset zoom">⟲</button><button data-act="in" title="Zoom in">+</button><span class="sep"></span><button data-act="fullscreen" title="Full screen">⛶</button>
+        </div>
+        <div class="stage" id="stage2">
+        <div class="zoomwrap" id="zoomwrap2">
+          <pre class="mermaid">
+%%{init: {'theme': 'base', 'themeVariables': {'fontSize': '13px', 'fontFamily': 'IBM Plex Sans, Segoe UI, sans-serif', 'actorBkg': '#131a21', 'actorBorder': '#4d5c6b', 'actorTextColor': '#eef2f5', 'signalColor': '#9fb0ba', 'signalTextColor': '#e7ecf1', 'noteBkgColor': '#2b2010', 'noteBorderColor': '#8a6224', 'noteTextColor': '#ffe9c7'}}}%%
+sequenceDiagram
+  participant Caller
+  participant Ast as Asterisk
+  participant CE as call-engine
+  participant PG as Postgres (tenant data)
+  participant Queue as ACD Queue
+  participant FE as Agent browser
+  participant STT as Ingestion/STT (path TBD)
+  participant Assist as Sentiment/Intent/Tool/Reply svcs
+  participant Mongo as MongoDB (proposed)
+  participant BE as velentsAgents Backend
+
+  rect rgb(15, 26, 22)
+    Note over Caller,FE: PROVEN LIVE 2026-07-19
+    Caller->>Ast: INVITE (real, proven live 2026-07-19)
+    Ast->>CE: Stasis(call-engine, inbound, DID)
+    CE->>PG: resolve DID -> tenant + queue
+    CE->>Queue: enter ACD queue
+    Queue->>FE: ring available agent
+    FE->>CE: agent answers
+    CE->>Ast: bridge caller and agent (WSS/WebRTC)
+  end
+  Note over Ast,FE: raw call audio flows over the existing softphone path only
+  rect rgb(21, 23, 25)
+    Note over CE,BE: PROPOSED — not built yet
+    CE->>STT: start media tap + tenant AI-feature config
+    CE->>BE: same config, expect these results
+    loop each transcript segment
+      STT->>Assist: webhook per enabled feature
+      Assist->>Mongo: write result plus KB-match % where applicable
+      Assist->>BE: completion webhook
+      BE->>FE: push over WebSocket
+    end
+  end
+          </pre>
+        </div>
+        </div>
+      </div>
+
+      <h3>3b. AI-agent-handled call, with human takeover</h3>
+      <div class="diagram-card" id="diagram3">
+        <div class="toolbar" data-target="3">
+          <button data-act="out" title="Zoom out">−</button><button data-act="reset" title="Reset zoom">⟲</button><button data-act="in" title="Zoom in">+</button><span class="sep"></span><button data-act="fullscreen" title="Full screen">⛶</button>
+        </div>
+        <div class="stage" id="stage3">
+        <div class="zoomwrap" id="zoomwrap3">
+          <pre class="mermaid">
+%%{init: {'theme': 'base', 'themeVariables': {'fontSize': '13px', 'fontFamily': 'IBM Plex Sans, Segoe UI, sans-serif', 'actorBkg': '#131a21', 'actorBorder': '#4d5c6b', 'actorTextColor': '#eef2f5', 'signalColor': '#9fb0ba', 'signalTextColor': '#e7ecf1', 'noteBkgColor': '#2b2010', 'noteBorderColor': '#8a6224', 'noteTextColor': '#ffe9c7'}}}%%
+sequenceDiagram
+  participant Caller
+  participant Ast as Asterisk
+  participant CE as call-engine
+  participant PG as Postgres (tenant data)
+  participant Flow as Flow runner
+  participant AIPipe as AI-agent pipeline (proposed)
+  participant Assist as Sentiment/Intent svcs (proposed)
+  participant FE as Human agent browser
+  participant BE as velentsAgents Backend
+
+  rect rgb(15, 26, 22)
+    Note over Caller,Flow: PROVEN LIVE 2026-07-19, to the transfer node
+    Caller->>Ast: INVITE (real, proven live 2026-07-19)
+    Ast->>CE: Stasis(call-engine, inbound, DID)
+    CE->>PG: resolve DID -> tenant + Flow
+    CE->>Flow: load and walk Flow node graph
+    Note right of Flow: node types available - play, dtmf_collect,<br/>queue_enter, if, webhook, transfer,<br/>voicemail, business_hours, bridge_ai
+  end
+  rect rgb(21, 23, 25)
+    Note over Flow,BE: PROPOSED — not built yet
+    Flow->>AIPipe: bridge_ai node (AudioSocket tap is a stub today)
+    loop live conversation
+      AIPipe->>Caller: TTS response
+      AIPipe->>Assist: transcript segment
+      Assist->>BE: completion webhook
+      BE->>FE: push: live transcript, tools used, analysis
+    end
+    opt human reviewing
+      FE->>Ast: optional listen-in via ARI externalMedia snoop
+    end
+    FE->>BE: request takeover
+    BE->>CE: request takeover
+  end
+  rect rgb(27, 17, 16)
+    CE->>Flow: transfer node - dial/bridge target
+    Note over CE,Flow: OPEN BUG (found 2026-07-19, unchanged as of 2026-07-20) — ARI "Channel not found" ~600ms after the call arrives, before transfer completes
+  end
+          </pre>
+        </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="part4">
+      <span class="part-num">PART 4</span>
+      <div class="section-label">Outbound calls — <abbr class="gloss" title="Application Programming Interface">API</abbr> request sequence (AI-initiated)</div>
+      <h2>The only outbound path that's real today</h2>
+      <p>A human agent clicking "call" from their own softphone is a separate, unbuilt path (Inc 11).</p>
+      <div class="diagram-card" id="diagram4">
+        <div class="toolbar" data-target="4">
+          <button data-act="out" title="Zoom out">−</button><button data-act="reset" title="Reset zoom">⟲</button><button data-act="in" title="Zoom in">+</button><span class="sep"></span><button data-act="fullscreen" title="Full screen">⛶</button>
+        </div>
+        <div class="stage" id="stage4">
+        <div class="zoomwrap" id="zoomwrap4">
+          <pre class="mermaid">
+%%{init: {'theme': 'base', 'themeVariables': {'fontSize': '13px', 'fontFamily': 'IBM Plex Sans, Segoe UI, sans-serif', 'actorBkg': '#131a21', 'actorBorder': '#4d5c6b', 'actorTextColor': '#eef2f5', 'signalColor': '#9fb0ba', 'signalTextColor': '#e7ecf1', 'noteBkgColor': '#2b2010', 'noteBorderColor': '#8a6224', 'noteTextColor': '#ffe9c7'}}}%%
+sequenceDiagram
+  participant Trigger as Campaign or trigger
+  participant LKD as livekit-dispatcher
+  participant LKO as livekit-outbound-caller
+  participant EL as ElevenLabs SIP-trunk API
+  participant LKC as LiveKit Cloud
+  participant Callee as Callee PSTN
+
+  rect rgb(28, 23, 12)
+    Note over Trigger,Callee: ELEVENLABS PATH — most-used today
+    Trigger->>LKD: request outbound AI call
+    Note right of LKD: ECall worker picks up the job
+    LKD->>EL: POST outbound-call to ElevenLabs
+    EL->>Callee: places the call directly
+  end
+  rect rgb(21, 23, 25)
+    Note over Trigger,Callee: LIVEKIT PATH — dormant selection branch
+    Trigger->>LKO: request outbound AI call
+    Note right of LKO: trunk_from_phone_number hardcoded to a different trunk
+    LKO->>LKC: CreateSIPParticipantRequest
+    LKC->>Callee: places the call directly
+    Note over LKO,Callee: innocalls mapping exists in code but isn't active
+  end
+  Note over Trigger,Callee: neither path routes through Asterisk today
+          </pre>
+        </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="part5">
+      <span class="part-num">PART 5</span>
+      <div class="section-label">Per-service detail</div>
+      <h2>Only internal engineering services get a full section</h2>
+      <p>Third-party carriers/vendors and adjacent AI services (<code>text-agent</code>, <code>voice-agent</code>) appear in the diagrams above but aren't ours to report progress on.</p>
+    </section>
+
+    <section class="sub" id="s51">
+      <div class="service-card">
+        <h3><span class="swatch-lg sw-asterisk"></span>5.1 — asterisk</h3>
+        <p><strong>General description:</strong> this is the actual phone system — the layer that answers an incoming call, checks which carrier it came from, and decides where to send it next. <em>In technical terms:</em> the <abbr class="gloss" title="Session Initiation Protocol — the signaling protocol used to set up/tear down calls">SIP</abbr>/media layer, handling <abbr class="gloss" title="The SIP stack module Asterisk uses for trunk/endpoint/identify configuration">PJSIP</abbr> trunk configuration, call routing, and an in-pod Control <abbr class="gloss" title="Application Programming Interface">API</abbr> for trunk/<abbr class="gloss" title="Direct Inward Dialing — a phone number that routes inbound calls to a specific tenant/flow">DID</abbr>/agent provisioning.</p>
+        <h4>Main functions</h4>
+        <p><abbr class="gloss" title="The SIP stack module Asterisk uses for trunk/endpoint/identify configuration">PJSIP</abbr> realtime trunk/endpoint/identify management; dialplan routing (<code>from-trunk</code>, <code>from-trunk-out</code>, <code>from-wss-agents-out</code>, <code>from-flows</code>); <abbr class="gloss" title="Web Real-Time Communication — the browser protocol behind the Agent Desktop softphone">WebRTC</abbr>/<abbr class="gloss" title="WebSocket Secure — the encrypted WebSocket transport the browser softphone uses">WSS</abbr> transport; <abbr class="gloss" title="Traversal Using Relays around NAT — relay service for WebRTC media through NAT/firewalls">TURN</abbr>/coturn; recording (MixMonitor + <abbr class="gloss" title="Persistent Volume Claim — Kubernetes storage">PVC</abbr>).</p>
+        <h4>Preserved data in DB</h4>
+        <p style="color:var(--muted); font-size:14px;">See <a href="#s21">2.1</a> for the full cross-service breakdown.</p>
+        <div class="engine-block">
+          <span class="engine-label">Postgres — PROD / realtime instance</span>
+          <p>This is the layer that stores each carrier trunk's connection details and how inbound calls get matched to them — nothing about a call's content, just "who can call us and how do we recognize them." Database is <code>velentsagents</code>; schema is <code>public</code> (Postgres default — not explicitly documented as anything else).</p>
+          <div class="table-scroll">
+            <table>
+              <thead><tr><th class="narrow">Table</th><th class="narrow">DB name</th><th class="narrow">Schema</th><th>What it stores</th><th class="narrow">Status</th></tr></thead>
+              <tbody>
+                <tr><td class="narrow"><code>sip_trunks</code></td><td class="narrow"><code>velentsagents</code></td><td class="narrow"><code>public</code></td><td>One row per configured carrier trunk — name, host/IP, protocol, encrypted credentials, assigned DID numbers, channel limit. The canonical record the Control API's CRUD operates on.</td><td class="narrow"><span class="status-pill s-live">Live</span></td></tr>
+                <tr><td class="narrow"><code>ps_endpoints</code></td><td class="narrow"><code>velentsagents</code></td><td class="narrow"><code>public</code></td><td>PJSIP realtime endpoint definitions — one per trunk, or per WebRTC agent identity.</td><td class="narrow"><span class="status-pill s-live">Live</span></td></tr>
+                <tr><td class="narrow"><code>ps_auths</code></td><td class="narrow"><code>velentsagents</code></td><td class="narrow"><code>public</code></td><td>SIP authentication credentials (username/password) linked to an endpoint.</td><td class="narrow"><span class="status-pill s-live">Live</span></td></tr>
+                <tr><td class="narrow"><code>ps_aors</code></td><td class="narrow"><code>velentsagents</code></td><td class="narrow"><code>public</code></td><td>Address of Record — where to actually reach an endpoint (its contact URI).</td><td class="narrow"><span class="status-pill s-live">Live</span></td></tr>
+                <tr><td class="narrow"><code>ps_identify</code></td><td class="narrow"><code>velentsagents</code></td><td class="narrow"><code>public</code></td><td>IP-based identification rules — which source IP maps to which endpoint (the exact table Bug 7 broke).</td><td class="narrow"><span class="status-pill s-live">Live</span></td></tr>
+                <tr><td class="narrow"><code>sip_providers</code>, <code>sip_trunk_accounts</code></td><td class="narrow"><code>velentsagents</code></td><td class="narrow"><code>public</code></td><td>Pre-<code>sip_trunks</code> tables, superseded by the canonical <code>sip_trunks</code> table above.</td><td class="narrow"><span class="status-pill s-partial">Legacy — being retired</span></td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+        <div class="engine-block">
+          <span class="engine-label">Filesystem — Kubernetes PVC (not a database)</span>
+          <p>Call recordings (MixMonitor output) are stored here as audio files, referenced by filename/path only. There is no database row for the audio content itself.</p>
+        </div>
+        <h4>Call-center-specific logic</h4>
+        <p>None of the <abbr class="gloss" title="Call Center — this feature">CC</abbr> product logic lives here — this layer only recognizes a call and hands it to <code>call-engine</code> via <code>Stasis(call-engine, inbound, EXTEN)</code>.</p>
+        <h4>Inner logic</h4>
+        <div class="diagram-card" id="diagram5">
+          <div class="toolbar" data-target="5">
+            <button data-act="out" title="Zoom out">−</button><button data-act="reset" title="Reset zoom">⟲</button><button data-act="in" title="Zoom in">+</button><span class="sep"></span><button data-act="fullscreen" title="Full screen">⛶</button>
+          </div>
+          <div class="stage" id="stage5">
+          <div class="zoomwrap" id="zoomwrap5">
+            <pre class="mermaid">
+%%{init: {'theme': 'base', 'themeVariables': {'fontSize': '13px', 'fontFamily': 'IBM Plex Sans, Segoe UI, sans-serif', 'primaryTextColor': '#e6ebf0', 'primaryBorderColor': '#4d5c6b', 'lineColor': '#9fb0ba'}}}%%
+flowchart TB
+  A["INVITE arrives"] --> B{"Source IP/auth matches\na configured endpoint?"}
+  B -->|No| C["403 / No matching endpoint"]
+  B -->|Yes, IP-trust| D["identify_by=ip match"]
+  B -->|Yes, REGISTER-based| E["Contact-based match"]
+  D --> F{"Inbound auth required?"}
+  E --> F
+  F -->|Yes, carrier sends none| G["401 Unauthorized"]
+  F -->|No / satisfied| H["Dialplan: from-trunk"]
+  H --> I["Stasis(call-engine, inbound, EXTEN)"]
+  I --> J["Hand off to call-engine"]
+  classDef ok fill:#0e332f,stroke:#3fb6ac,color:#d8fbf6;
+  classDef bad fill:#2c1614,stroke:#e5544c,color:#ffb3ae,stroke-dasharray:4 4;
+  class H,I,J ok;
+  class C,G bad;
+  linkStyle default stroke-width:2.5px;
+            </pre>
+          </div>
+          </div>
+        </div>
+        <h4>Progress / status</h4>
+        <div class="progress-bar"><div class="progress-track"><div class="progress-fill" style="width:70%"></div></div><span class="progress-pct">~70%</span> <span class="status-pill s-live">Live</span></div>
+        <p style="margin-top:10px;">Trunk <abbr class="gloss" title="Create / Read / Update / Delete">CRUD</abbr>, identify-based IP-trust matching, and dialplan routing all confirmed working live on two independent carriers. Not done: AI Audio Bridge (still a stub), <code>externalMedia</code> wiring for supervisor barge/whisper.</p>
+      </div>
+    </section>
+
+    <section class="sub" id="s52">
+      <div class="service-card">
+        <h3><span class="swatch-lg sw-callengine"></span>5.2 — call-engine</h3>
+        <p><strong>General description:</strong> the decision-maker for every call — once a call arrives, this service figures out which customer it belongs to and what should happen next (play a menu, hand it to an AI agent, route it to a human queue, or transfer it elsewhere). <em>In technical terms:</em> the always-on <abbr class="gloss" title="Asterisk REST Interface — the WebSocket/REST protocol call-engine uses to control live calls">ARI</abbr>/Stasis client every call is handed to. Deployed from the <code>agent-hub</code> GitHub repo, but running as its own pod, architecturally disconnected from that repo's own frontend code.</p>
+        <h4>Main functions</h4>
+        <p><abbr class="gloss" title="Asterisk REST Interface — the WebSocket/REST protocol call-engine uses to control live calls">ARI</abbr> WebSocket client; <abbr class="gloss" title="Direct Inward Dialing — a phone number that routes inbound calls to a specific tenant/flow">DID</abbr>→tenant/Flow-or-queue resolution; Flow node-graph execution (<code>start, play, dtmf_collect, queue_enter, hangup, set_var, if, webhook, transfer, voicemail, business_hours, bridge_ai</code>); queue/<abbr class="gloss" title="Automatic Call Distributor — routes a queued call to an available agent">ACD</abbr> dispatch; transfer/bridge execution; call-state logging (not persisted); agent-facing mid-call control <abbr class="gloss" title="Application Programming Interface">API</abbr>; AudioSocket stub.</p>
+        <h4>Preserved data in DB</h4>
+        <p style="color:var(--muted); font-size:14px;">See <a href="#s21">2.1</a> for the full cross-service breakdown.</p>
+        <div class="engine-block">
+          <span class="engine-label">Postgres — instance unspecified (intended)</span>
+          <p>Intended to log what happened on every call — that logging is currently switched off in this deployment.</p>
+          <div class="table-scroll">
+            <table>
+              <thead><tr><th class="narrow">Table</th><th class="narrow">DB name</th><th class="narrow">Schema</th><th>What it stores</th><th class="narrow">Status</th></tr></thead>
+              <tbody>
+                <tr><td class="narrow"><code>call_events</code></td><td class="narrow"><em>(unspecified — DATABASE_URL unset)</em></td><td class="narrow"><em>(unspecified)</em></td><td>Meant to hold the call-state lifecycle (<code>INCOMING</code> → ... → ended) for every call this service handles — i.e. this would be the platform's <abbr class="gloss" title="Call Detail Record — a logged record of a completed call">CDR</abbr> source.</td><td class="narrow"><span class="status-pill s-blocked">Not created — DATABASE_URL unset</span></td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+        <div class="engine-block">
+          <span class="engine-label">Redis — pub/sub only, not a persisted store</span>
+          <p>Used purely as a real-time message bus. When a call event happens (e.g. a state change), it's published to a channel so anything else listening can react immediately — this is the same Redis referenced as <code>call-engine</code>'s pub/sub in the master architecture diagram (Part 2). Nothing is retained: if no subscriber happens to be listening at that exact moment, the message is gone for good, and there's no way to look up "what happened on this call" afterward the way a database table would allow. Functionally this is a live signal, not a data store.</p>
+        </div>
+        <p style="margin-top:8px;">Also <em>reads</em> (doesn't own) <code>did_registry</code> and <code>flows</code> from the tenant-data Postgres instance — see 5.4.</p>
+        <h4>Call-center-specific logic</h4>
+        <p>This service <em>is</em> the Call Center feature's runtime brain — every other service either feeds it data or is fed by it.</p>
+        <h4>Inner logic</h4>
+        <div class="diagram-card" id="diagram6">
+          <div class="toolbar" data-target="6">
+            <button data-act="out" title="Zoom out">−</button><button data-act="reset" title="Reset zoom">⟲</button><button data-act="in" title="Zoom in">+</button><span class="sep"></span><button data-act="fullscreen" title="Full screen">⛶</button>
+          </div>
+          <div class="stage" id="stage6">
+          <div class="zoomwrap" id="zoomwrap6">
+            <pre class="mermaid">
+%%{init: {'theme': 'base', 'themeVariables': {'fontSize': '13px', 'fontFamily': 'IBM Plex Sans, Segoe UI, sans-serif', 'primaryTextColor': '#e6ebf0', 'primaryBorderColor': '#4d5c6b', 'lineColor': '#9fb0ba'}}}%%
+flowchart TB
+  A["StasisStart event (proven live)"] --> B["Resolve DID to tenant\nplus flow or queue (proven live)"]
+  B --> C{"Flow or Queue?"}
+  C -->|Flow| D["Load Flow JSON (proven live)"]
+  D --> E["Walk node graph (proven to transfer node)"]
+  E --> F{"Node type"}
+  F -->|transfer| G["Dial/bridge target\nBUG: Channel not found ~600ms in"]
+  F -->|other node types| H["Execute node, continue graph\n(not exercised 2026-07-19)"]
+  C -->|Queue| I["ACD queue dispatcher\n(wired, not exercised)"]
+  G --> J["Teardown on failure (confirmed live)"]
+  H --> E
+  classDef ok fill:#123324,stroke:#5fd4c8,color:#e3fbea;
+  classDef bug fill:#2c1614,stroke:#e5544c,color:#ffb3ae,stroke-dasharray:4 4;
+  classDef unex fill:#2b2010,stroke:#8a6224,color:#ffe9c7,stroke-dasharray:3 3;
+  class A,B,D,E ok;
+  class G,J bug;
+  class H,I unex;
+  linkStyle default stroke-width:2.5px;
+            </pre>
+          </div>
+          </div>
+        </div>
+        <h4>Progress / status</h4>
+        <div class="progress-bar"><div class="progress-track"><div class="progress-fill" style="width:50%"></div></div><span class="progress-pct">~50%</span> <span class="status-pill s-partial">Partial — one open bug</span></div>
+        <p style="margin-top:10px;"><abbr class="gloss" title="Asterisk REST Interface — the WebSocket/REST protocol call-engine uses to control live calls">ARI</abbr> connection, Stasis subscription, <abbr class="gloss" title="Direct Inward Dialing — a phone number that routes inbound calls to a specific tenant/flow">DID</abbr> resolution, and Flow loading/walking confirmed live. Transfer node has one open bug. Call-state persistence disabled. True source location within <code>agent-hub</code> still not fully resolved.</p>
+      </div>
+    </section>
+
+    <section class="sub" id="s53">
+      <div class="service-card">
+        <h3><span class="swatch-lg sw-fe"></span>5.3 — velentsAgents — Frontend</h3>
+        <p><strong>General description:</strong> the screen a human agent actually works from — their in-browser softphone for answering, holding, transferring, and ending calls. <em>In technical terms:</em> the browser-based Agent Desktop UI. For <abbr class="gloss" title="Call Center — this feature">CC</abbr> specifically, this is where a human agent's softphone lives — reused infrastructure, not a <abbr class="gloss" title="Call Center — this feature">CC</abbr>-specific build.</p>
+        <h4>Main functions</h4>
+        <p><abbr class="gloss" title="The SIP stack module Asterisk uses for trunk/endpoint/identify configuration">PJSIP</abbr>-over-<abbr class="gloss" title="WebSocket Secure — the encrypted WebSocket transport the browser softphone uses">WSS</abbr> softphone connection; call controls (answer, decline, mute, hold, end, <abbr class="gloss" title="Dual-Tone Multi-Frequency — the tones sent when a caller presses a phone keypad digit">DTMF</abbr>); screen-pop/transfer UI (demo-only today).</p>
+        <h4>Preserved data in DB</h4>
+        <p>None — this is a browser UI with no database of its own. Anything it needs to remember (call history, agent notes) is fetched from and saved through the Backend (5.4). <strong>Storage engine: N/A.</strong></p>
+        <h4>Call-center-specific logic</h4>
+        <p>None built specifically for <abbr class="gloss" title="Call Center — this feature">CC</abbr> yet. Workspace shell, live call-context display, wrap-up flow, notes capture (Inc 2) not started.</p>
+        <h4>Inner logic</h4>
+        <div class="diagram-card" id="diagram7">
+          <div class="toolbar" data-target="7">
+            <button data-act="out" title="Zoom out">−</button><button data-act="reset" title="Reset zoom">⟲</button><button data-act="in" title="Zoom in">+</button><span class="sep"></span><button data-act="fullscreen" title="Full screen">⛶</button>
+          </div>
+          <div class="stage" id="stage7">
+          <div class="zoomwrap" id="zoomwrap7">
+            <pre class="mermaid">
+%%{init: {'theme': 'base', 'themeVariables': {'fontSize': '13px', 'fontFamily': 'IBM Plex Sans, Segoe UI, sans-serif', 'primaryTextColor': '#e6ebf0', 'primaryBorderColor': '#4d5c6b', 'lineColor': '#9fb0ba'}}}%%
+flowchart TB
+  A["Agent logs in"] --> B["Softphone connects WSS"]
+  B --> C["Registers as WebRTC agent endpoint"]
+  C --> D{"Call event received?"}
+  D -->|ringing| E["Answer / decline UI"]
+  D -->|none| D
+  E -->|answered| F["Bridge established"]
+  F --> G["Screen-pop / context display (not built)"]
+  F --> H["Call ends to wrap-up flow (not built)"]
+  classDef ok fill:#2c2148,stroke:#8a72d1,color:#ede3ff;
+  classDef gap fill:#2c1614,stroke:#e5544c,color:#ffb3ae,stroke-dasharray:4 4;
+  class A,B,C,D,E,F ok;
+  class G,H gap;
+  linkStyle default stroke-width:2.5px;
+            </pre>
+          </div>
+          </div>
+        </div>
+        <h4>Progress / status</h4>
+        <div class="progress-bar"><div class="progress-track"><div class="progress-fill" style="width:20%"></div></div><span class="progress-pct">Softphone only</span> <span class="status-pill s-partial">Partial</span></div>
+        <p style="margin-top:10px;">Generic <abbr class="gloss" title="Web Real-Time Communication — the browser protocol behind the Agent Desktop softphone">WebRTC</abbr>/<abbr class="gloss" title="WebSocket Secure — the encrypted WebSocket transport the browser softphone uses">WSS</abbr> connection works (carried the 2026-07-19 test calls). <abbr class="gloss" title="Call Center — this feature">CC</abbr>-specific desktop UI is demo mockup only. <em>Unchanged as of 2026-07-20.</em></p>
+      </div>
+    </section>
+
+    <section class="sub" id="s54">
+      <div class="service-card">
+        <h3><span class="swatch-lg sw-be"></span>5.4 — velentsAgents — Backend</h3>
+        <p><strong>General description:</strong> the record-keeper and provisioner — it stores which phone number belongs to which customer, which call-handling script to run for them, and is the one that talks to the phone system to set up new numbers and agents. <em>In technical terms:</em> the Laravel backend module that owns tenant/business data and talks to both Asterisk's Control <abbr class="gloss" title="Application Programming Interface">API</abbr> and the AI voice services. Also owns the central <abbr class="gloss" title="Direct Inward Dialing — a phone number that routes inbound calls to a specific tenant/flow">DID</abbr> registry and per-tenant Flow storage <code>call-engine</code> reads from.</p>
+        <h4>Main functions</h4>
+        <p>Integration module (Control <abbr class="gloss" title="Application Programming Interface">API</abbr> <abbr class="gloss" title="Create / Read / Update / Delete">CRUD</abbr>, AI Call Dispatcher calls); Voice Calls module; <code>did_registry</code> and <code>flows</code> tables (Postgres, tenant data); Conversations/Calls/Inbox modules.</p>
+        <h4>Preserved data in DB</h4>
+        <p style="color:var(--muted); font-size:14px;">See <a href="#s21">2.1</a> for the full cross-service breakdown.</p>
+        <div class="engine-block">
+          <span class="engine-label">Postgres — NONPROD / tenant-data instance</span>
+          <p>The source of truth for "which number belongs to which customer, and what should happen when it rings." Lives on a separate instance from Asterisk's own realtime-config database (same database name, different RDS instance — see <a href="#s21">2.1</a>), and is exactly what <code>call-engine</code> reads from on every call. Schema is <code>public</code> (Laravel/Postgres default — not explicitly documented as anything else).</p>
+          <div class="table-scroll">
+            <table>
+              <thead><tr><th class="narrow">Table</th><th class="narrow">DB name</th><th class="narrow">Schema</th><th>What it stores</th><th class="narrow">Status</th></tr></thead>
+              <tbody>
+                <tr><td class="narrow"><code>did_registry</code></td><td class="narrow"><code>velentsagents</code></td><td class="narrow"><code>public</code></td><td>Maps each DID (phone number) to the tenant that owns it, and to the Flow or queue that should handle it.</td><td class="narrow"><span class="status-pill s-live">Live</span></td></tr>
+                <tr><td class="narrow"><code>flows</code></td><td class="narrow"><code>velentsagents</code></td><td class="narrow"><code>public</code></td><td>Each tenant's Flow — the IVR node-graph definition <code>call-engine</code> loads and executes.</td><td class="narrow"><span class="status-pill s-live">Live</span></td></tr>
+                <tr><td class="narrow"><code>queues</code></td><td class="narrow"><code>velentsagents</code></td><td class="narrow"><code>public</code></td><td>Queue definitions for human-agent ACD routing.</td><td class="narrow"><span class="status-pill s-live">Live</span></td></tr>
+                <tr><td class="narrow"><code>tenants</code></td><td class="narrow"><code>velentsagents</code></td><td class="narrow"><code>public</code></td><td>Tenant/business records this platform serves.</td><td class="narrow"><span class="status-pill s-live">Live</span></td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+        <h4>Call-center-specific logic</h4>
+        <p>Direct owner of the <abbr class="gloss" title="Direct Inward Dialing — a phone number that routes inbound calls to a specific tenant/flow">DID</abbr>→tenant→Flow mapping <code>call-engine</code> depends on, and direct caller of Asterisk's Control <abbr class="gloss" title="Application Programming Interface">API</abbr> — used to onboard both Innocalls and, on 2026-07-19, Voylo.</p>
+        <h4>Inner logic</h4>
+        <div class="diagram-card" id="diagram8">
+          <div class="toolbar" data-target="8">
+            <button data-act="out" title="Zoom out">−</button><button data-act="reset" title="Reset zoom">⟲</button><button data-act="in" title="Zoom in">+</button><span class="sep"></span><button data-act="fullscreen" title="Full screen">⛶</button>
+          </div>
+          <div class="stage" id="stage8">
+          <div class="zoomwrap" id="zoomwrap8">
+            <pre class="mermaid">
+%%{init: {'theme': 'base', 'themeVariables': {'fontSize': '13px', 'fontFamily': 'IBM Plex Sans, Segoe UI, sans-serif', 'primaryTextColor': '#e6ebf0', 'primaryBorderColor': '#4d5c6b', 'lineColor': '#9fb0ba'}}}%%
+flowchart TB
+  A["Operator provisions trunk/DID/Flow"] --> B["Integration module"]
+  B -->|"POST /control/sip/trunks"| C["Asterisk Control API (legacy: direct — used 2026-07-19)"]
+  B -->|write| D["did_registry / flows tables"]
+  D -->|read, HTTP| E["call-engine DID resolver (proven live 2026-07-19)"]
+  B -->|AI outbound| F["livekit-dispatcher"]
+  G["Proposed: route through\nvelents_integrations instead"] -.-> B
+  classDef ok fill:#1c2348,stroke:#6f80d1,color:#dbe2ff;
+  classDef proposed fill:#161d23,stroke:#455a66,color:#d7e4ec,stroke-dasharray:3 3;
+  class A,B,C,D,E,F ok;
+  class G proposed;
+  linkStyle default stroke-width:2.5px;
+            </pre>
+          </div>
+          </div>
+        </div>
+        <h4>Progress / status</h4>
+        <div class="progress-bar"><div class="progress-track"><div class="progress-fill" style="width:80%"></div></div><span class="progress-pct">~80%</span> <span class="status-pill s-live">Live</span></div>
+        <p style="margin-top:10px;"><abbr class="gloss" title="Direct Inward Dialing — a phone number that routes inbound calls to a specific tenant/flow">DID</abbr> registry + Flow storage + Control <abbr class="gloss" title="Application Programming Interface">API</abbr> calls all confirmed functioning on 2026-07-19. Not yet done: routing through <code>velents_integrations</code> instead (decided 2026-07-19, still not built as of 2026-07-20).</p>
+      </div>
+    </section>
+
+    <section class="sub" id="s55">
+      <div class="service-card">
+        <h3><span class="swatch-lg sw-vi"></span>5.5 — velents_integrations</h3>
+        <p><strong>General description:</strong> a shared connector hub — the idea is that any product, not just one customer-facing app, talks to WhatsApp, payments, or (proposed) the phone system through this one service, instead of each product building and maintaining its own connection. <em>In technical terms:</em> a standalone Laravel service intended as the single <abbr class="gloss" title="Application Programming Interface">API</abbr> surface other services call through. Today owns WhatsApp/Messenger/Instagram and Payment; on 2026-07-19 it was decided it should also own telephony provisioning — still not built as of 2026-07-20.</p>
+        <h4>Main functions today</h4>
+        <p>WhatsApp onboarding/templates/messaging, Messenger auth/chat, Payment account/subscription/transaction management. No telephony code exists here yet — unchanged.</p>
+        <h4>Preserved data in DB</h4>
+        <p style="color:var(--muted); font-size:14px;">See <a href="#s21">2.1</a> for the full cross-service breakdown.</p>
+        <div class="engine-block">
+          <span class="engine-label">Postgres or MySQL — not confirmed in this doc</span>
+          <p>Today's integration credentials/config for the channels it already brokers.</p>
+          <div class="table-scroll">
+            <table>
+              <thead><tr><th class="narrow">Table / scope</th><th class="narrow">DB name</th><th class="narrow">Schema</th><th>What it stores</th><th class="narrow">Status</th></tr></thead>
+              <tbody>
+                <tr><td class="narrow">Channel integrations</td><td class="narrow"><em>(not documented)</em></td><td class="narrow"><em>(not documented)</em></td><td>WhatsApp/Messenger/Instagram onboarding state, templates, auth tokens — exact schema not documented in this doc.</td><td class="narrow"><span class="status-pill s-live">Live</span></td></tr>
+                <tr><td class="narrow">Payment integration</td><td class="narrow"><em>(not documented)</em></td><td class="narrow"><em>(not documented)</em></td><td>MoneyHash account/subscription/transaction records — exact schema not documented in this doc.</td><td class="narrow"><span class="status-pill s-live">Live</span></td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+        <div class="engine-block">
+          <span class="engine-label">Postgres — proposed shared telephony store</span>
+          <p>A synced copy of telephony data so any tenant backend can reach it through one API instead of talking to Asterisk directly.</p>
+          <div class="table-scroll">
+            <table>
+              <thead><tr><th class="narrow">Table / scope</th><th class="narrow">DB name</th><th class="narrow">Schema</th><th>What it stores</th><th class="narrow">Status</th></tr></thead>
+              <tbody>
+                <tr><td class="narrow">Telephony config</td><td class="narrow"><em>(TBD — not decided)</em></td><td class="narrow"><em>(TBD — not decided)</em></td><td>A synced copy of <code>did_registry</code>, published Flows, and trunk/endpoint config — written on publish, read by <code>call-engine</code> instead of the tenant DB directly.</td><td class="narrow"><span class="status-pill s-none">Proposed, not built</span></td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+        <h4>Call-center-specific logic (proposed, decided 2026-07-19, still not built as of 2026-07-20)</h4>
+        <p>Own the shared, backend-agnostic telephony config store — <abbr class="gloss" title="Direct Inward Dialing — a phone number that routes inbound calls to a specific tenant/flow">DID</abbr> registry, published Flows, trunk/endpoint config — via a synced-copy model: push on publish, <code>call-engine</code> reads through this <abbr class="gloss" title="Application Programming Interface">API</abbr>, never the shared DB directly.</p>
+        <h4>Inner logic (proposed target state)</h4>
+        <div class="diagram-card" id="diagram9">
+          <div class="toolbar" data-target="9">
+            <button data-act="out" title="Zoom out">−</button><button data-act="reset" title="Reset zoom">⟲</button><button data-act="in" title="Zoom in">+</button><span class="sep"></span><button data-act="fullscreen" title="Full screen">⛶</button>
+          </div>
+          <div class="stage" id="stage9">
+          <div class="zoomwrap" id="zoomwrap9">
+            <pre class="mermaid">
+%%{init: {'theme': 'base', 'themeVariables': {'fontSize': '13px', 'fontFamily': 'IBM Plex Sans, Segoe UI, sans-serif', 'primaryTextColor': '#e6ebf0', 'primaryBorderColor': '#4d5c6b', 'lineColor': '#9fb0ba'}}}%%
+flowchart TB
+  A["Tenant backend publishes a Flow"] --> B["POST /telephony/flows/tenant/id (proposed)"]
+  B --> C{"Validate: DID unique globally?\nvalid node graph?\nFlow exists?"}
+  C -->|fail| D["Reject write"]
+  C -->|pass| E["Write synced copy"]
+  E --> F["call-engine reads through this API"]
+  G["Backend unreachable at read-time"] -.-> H["call-engine keeps serving last synced copy"]
+  classDef proposed fill:#161d23,stroke:#455a66,color:#d7e4ec,stroke-dasharray:3 3;
+  class A,B,C,D,E,F,G,H proposed;
+  linkStyle default stroke-width:2.5px;
+            </pre>
+          </div>
+          </div>
+        </div>
+        <h4>Progress / status</h4>
+        <div class="progress-bar"><div class="progress-track"><div class="progress-fill" style="width:0%"></div></div><span class="progress-pct">0% for telephony</span> <span class="status-pill s-none">Not started</span></div>
+        <p style="margin-top:10px;">This entire section is a decided design, not code yet. Channel/payment integrations (existing scope) are live and unrelated to <abbr class="gloss" title="Call Center — this feature">CC</abbr>.</p>
+      </div>
+    </section>
+
+    <section class="sub" id="s56">
+      <div class="service-card">
+        <h3><span class="swatch-lg sw-aivoice"></span>5.6 — livekit-dispatcher</h3>
+        <p><strong>General description:</strong> the service that places outbound AI phone calls today — when an AI agent needs to call a customer, this is what actually dials out. <em>In technical terms:</em> a FastAPI dispatcher that places AI-initiated outbound calls via ElevenLabs' own <abbr class="gloss" title="Session Initiation Protocol — the signaling protocol used to set up/tear down calls">SIP</abbr>-trunk <abbr class="gloss" title="Application Programming Interface">API</abbr> — the most-used AI-outbound path today.</p>
+        <h4>Main functions</h4>
+        <p><code>ECall</code> worker — receives a dispatch request, calls ElevenLabs' <code>POST /v1/convai/sip-trunk/outbound-call</code>, monitors the resulting call.</p>
+        <h4>Preserved data in DB</h4>
+        <p>None confirmed — this service's own persistence hasn't been directly inspected. Call/job state is most likely tracked in-memory for the life of the dispatch request, with the actual call record living in ElevenLabs' own systems. <strong>Storage engine: N/A / not confirmed.</strong></p>
+        <h4>Call-center-specific logic</h4>
+        <p>A fully separate, already-working AI-outbound pipeline against the same <code>innocalls</code> carrier Asterisk's trunks use — parallel to Asterisk, not integrated with it.</p>
+        <h4>Inner logic</h4>
+        <div class="diagram-card" id="diagram10">
+          <div class="toolbar" data-target="10">
+            <button data-act="out" title="Zoom out">−</button><button data-act="reset" title="Reset zoom">⟲</button><button data-act="in" title="Zoom in">+</button><span class="sep"></span><button data-act="fullscreen" title="Full screen">⛶</button>
+          </div>
+          <div class="stage" id="stage10">
+          <div class="zoomwrap" id="zoomwrap10">
+            <pre class="mermaid">
+%%{init: {'theme': 'base', 'themeVariables': {'fontSize': '13px', 'fontFamily': 'IBM Plex Sans, Segoe UI, sans-serif', 'primaryTextColor': '#e6ebf0', 'primaryBorderColor': '#4d5c6b', 'lineColor': '#9fb0ba'}}}%%
+flowchart TB
+  A["Dispatch request received"] --> B["ECall worker picks up job"]
+  B --> C["POST outbound-call to ElevenLabs"]
+  C --> D["Monitor call state"]
+  D --> E["Call ends, report result"]
+  classDef ok fill:#4a3612,stroke:#d1953f,color:#ffe9c7;
+  class A,B,C,D,E ok;
+  linkStyle default stroke-width:2.5px;
+            </pre>
+          </div>
+          </div>
+        </div>
+        <h4>Progress / status</h4>
+        <div class="progress-bar"><div class="progress-track"><div class="progress-fill" style="width:100%"></div></div><span class="progress-pct">Live</span> <span class="status-pill s-live">Working</span></div>
+        <p style="margin-top:10px;">Live and working, unrelated to Asterisk. No bridge exists connecting this to Asterisk's AudioSocket tap (Inc 1's AI Audio Bridge gap).</p>
+      </div>
+    </section>
+
+    <section class="sub" id="s57">
+      <div class="service-card">
+        <h3><span class="swatch-lg sw-aivoice"></span>5.7 — livekit-outbound-caller</h3>
+        <p><strong>General description:</strong> a second, alternate way to place outbound AI calls — built and working, but not the path currently in active use. <em>In technical terms:</em> a LiveKit agent worker that places outbound calls via LiveKit Cloud. Has a dormant mapping to Asterisk's <code>innocalls</code> carrier that isn't on the active path.</p>
+        <h4>Main functions</h4>
+        <p><code>phone_dict</code> mapping (includes <code>"innocalls"</code>); <code>trunk_from_phone_number()</code> — currently hardcoded to a different trunk, innocalls branch commented out; <code>CreateSIPParticipantRequest</code> to LiveKit Cloud.</p>
+        <h4>Preserved data in DB</h4>
+        <p>None confirmed — same caveat as <code>livekit-dispatcher</code>. The <code>phone_dict</code> trunk-selection mapping lives in source code, not a database, and call state is handled by LiveKit Cloud. <strong>Storage engine: N/A / not confirmed.</strong></p>
+        <h4>Call-center-specific logic</h4>
+        <p>Same category as <code>livekit-dispatcher</code> — a working AI-outbound pipeline, parallel to Asterisk, with a not-yet-activated hook toward Asterisk's carrier.</p>
+        <h4>Inner logic</h4>
+        <div class="diagram-card" id="diagram11">
+          <div class="toolbar" data-target="11">
+            <button data-act="out" title="Zoom out">−</button><button data-act="reset" title="Reset zoom">⟲</button><button data-act="in" title="Zoom in">+</button><span class="sep"></span><button data-act="fullscreen" title="Full screen">⛶</button>
+          </div>
+          <div class="stage" id="stage11">
+          <div class="zoomwrap" id="zoomwrap11">
+            <pre class="mermaid">
+%%{init: {'theme': 'base', 'themeVariables': {'fontSize': '13px', 'fontFamily': 'IBM Plex Sans, Segoe UI, sans-serif', 'primaryTextColor': '#e6ebf0', 'primaryBorderColor': '#4d5c6b', 'lineColor': '#9fb0ba'}}}%%
+flowchart TB
+  A["Outbound call requested"] --> B["trunk_from_phone_number()"]
+  B --> C["Hardcoded to a different trunk\n(innocalls branch commented out)"]
+  C --> D["CreateSIPParticipantRequest"]
+  D --> E["Call placed"]
+  F["innocalls mapping exists but never runs"] -.-> B
+  classDef ok fill:#4a3612,stroke:#d1953f,color:#ffe9c7;
+  classDef dormant fill:#1e252c,stroke:#7a8590,color:#d0d8de,stroke-dasharray:2 6;
+  class A,C,D,E ok;
+  class B,F dormant;
+  linkStyle default stroke-width:2.5px;
+            </pre>
+          </div>
+          </div>
+        </div>
+        <h4>Progress / status</h4>
+        <div class="progress-bar"><div class="progress-track"><div class="progress-fill" style="width:90%"></div></div><span class="progress-pct">Live (non-innocalls path)</span> <span class="status-pill s-live">Working</span></div>
+        <p style="margin-top:10px;">Live and working for the active path. The innocalls mapping is present-but-dormant — activating it is part of Inc 1's AI Audio Bridge estimate.</p>
+      </div>
+    </section>
+
+    <section id="part6">
+      <span class="part-num">PART 6</span>
+      <div class="section-label">Tasks — increment-level tracking</div>
+      <h2>One row per increment</h2>
+      <p>Matches the dossier's board order and the feature-gap plan's table exactly. Use the expand button to view it full-screen if columns are cut off on your screen. <strong>Note (2026-07-20):</strong> the "Blocked by" column was cross-checked against the real dependency data in the Linear-derived dossier — Inc 2's and Inc 4's cells were missing a real edge (both now list Inc 3; Inc 4 now also lists Inc 1). See Part 6.1 below for the full dependency graph.</p>
+      <div class="table-scroll table-expandable" id="tasksTable">
+        <div class="table-toolbar">
+          <span class="hint">scroll sideways, or</span>
+          <button data-act="table-fullscreen" data-target="tasksTable" title="Full screen">⛶</button>
+        </div>
+        <table>
+          <thead>
+            <tr><th class="narrow">#</th><th>Increment</th><th>Services</th><th class="narrow">Progress</th><th class="narrow">Status</th><th class="wrap">Blocked by</th><th class="wrap">Est. time</th><th class="wrap">Modify existing?</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td class="narrow">Inc 1</td>
+              <td class="wrap">Voice Engine Spine (P0)</td>
+              <td><span class="swatch sw-asterisk" title="asterisk"></span><span class="swatch sw-callengine" title="call-engine"></span><span class="swatch sw-aivoice" title="AI voice services (livekit-dispatcher / livekit-outbound-caller)"></span></td>
+              <td class="narrow center">~70%</td>
+              <td class="narrow"><span class="status-pill s-live">In progress</span></td>
+              <td class="wrap">AI bridge needs cross-repo change</td>
+              <td class="wrap">4-6wk + 2-4wk + 2-3wk + 2wk+</td>
+              <td class="wrap"><strong>Yes</strong> — activate dormant innocalls branch; build call-state persistence. <em>2026-07-20: ElevenLabs path is the live AI-outbound path today; LiveKit/innocalls branch still dormant, unchanged.</em></td>
+            </tr>
+            <tr>
+              <td class="narrow">Inc 2</td>
+              <td class="wrap">Unified Agent Desktop (P2)</td>
+              <td><span class="swatch sw-fe" title="velentsAgents — Frontend"></span><span class="swatch sw-asterisk" title="asterisk"></span></td>
+              <td class="narrow center">0%</td>
+              <td class="narrow"><span class="status-pill s-none">Not started</span></td>
+              <td class="wrap">Inc 1, Inc 3</td>
+              <td class="wrap">6-10wk</td>
+              <td class="wrap">No — net new</td>
+            </tr>
+            <tr>
+              <td class="narrow">Inc 3</td>
+              <td class="wrap">Routing &amp; <abbr class="gloss" title="Automatic Call Distributor — routes a queued call to an available agent">ACD</abbr> parity (P1)</td>
+              <td><span class="swatch sw-be" title="velentsAgents — Backend"></span></td>
+              <td class="narrow center">0%</td>
+              <td class="narrow"><span class="status-pill s-none">Not started</span></td>
+              <td class="wrap">Blocks Inc 2, Inc 4</td>
+              <td class="wrap">8-12wk</td>
+              <td class="wrap">No — net new</td>
+            </tr>
+            <tr>
+              <td class="narrow">Inc 4</td>
+              <td class="wrap">Supervisor live ops (P2)</td>
+              <td><span class="swatch sw-asterisk" title="asterisk"></span><span class="swatch sw-fe" title="velentsAgents — Frontend"></span></td>
+              <td class="narrow center">~10%</td>
+              <td class="narrow"><span class="status-pill s-none">Not started</span></td>
+              <td class="wrap">Inc 1, Inc 3</td>
+              <td class="wrap">6-10wk; full suite 3mo+</td>
+              <td class="wrap"><strong>Yes</strong> — wire existing externalMedia primitive</td>
+            </tr>
+            <tr>
+              <td class="narrow">Inc 5</td>
+              <td class="wrap">Recording Management (P1)</td>
+              <td><span class="swatch sw-asterisk" title="asterisk"></span></td>
+              <td class="narrow center">~30%</td>
+              <td class="narrow"><span class="status-pill s-blocked">Ext. blocked</span></td>
+              <td class="wrap"><abbr class="gloss" title="Linear issue-key prefix used for every ticket tracked in the contact-center dossier">AGH</abbr>-6685 (<abbr class="gloss" title="(Saudi) National Cybersecurity Authority">NCA</abbr>/<abbr class="gloss" title="(Saudi) Personal Data Protection Law">PDPL</abbr> ref, due 2026-07-19 — <strong>now past due</strong>)</td>
+              <td class="wrap">3-4wk + 2-3wk once unblocked</td>
+              <td class="wrap">No, once unblocked</td>
+            </tr>
+            <tr>
+              <td class="narrow">Inc 6</td>
+              <td class="wrap">Omnichannel completion (P3)</td>
+              <td><span class="swatch sw-be" title="velentsAgents — Backend"></span><span class="swatch sw-vi" title="velents_integrations"></span></td>
+              <td class="narrow center">~40%</td>
+              <td class="narrow"><span class="status-pill s-none">Not started</span></td>
+              <td class="wrap">—</td>
+              <td class="wrap">4-6wk (+1-2wk)</td>
+              <td class="wrap"><strong>Yes</strong> — same velents_integrations simplification decided 2026-07-19 for telephony. <em>Unchanged as of 2026-07-20 — still a decision, not code.</em></td>
+            </tr>
+            <tr>
+              <td class="narrow">Inc 7</td>
+              <td class="wrap">Agent/Workforce mgmt (P1)</td>
+              <td><span class="swatch sw-be" title="velentsAgents — Backend"></span></td>
+              <td class="narrow center">~10%</td>
+              <td class="narrow"><span class="status-pill s-none">Not started</span></td>
+              <td class="wrap">Blocks Inc 8</td>
+              <td class="wrap">6-8wk</td>
+              <td class="wrap">No — net new <abbr class="gloss" title="Workforce Management — agent scheduling/staffing">WFM</abbr> engine</td>
+            </tr>
+            <tr>
+              <td class="narrow">Inc 8</td>
+              <td class="wrap"><abbr class="gloss" title="Call Center — this feature">CC</abbr> dashboards &amp; reports (P1)</td>
+              <td><span class="swatch sw-be" title="velentsAgents — Backend"></span></td>
+              <td class="narrow center">0%</td>
+              <td class="narrow"><span class="status-pill s-none">Not started</span></td>
+              <td class="wrap">Inc 7, Inc 1</td>
+              <td class="wrap">5-7wk</td>
+              <td class="wrap">No — net new</td>
+            </tr>
+            <tr>
+              <td class="narrow">Inc 9</td>
+              <td class="wrap"><abbr class="gloss" title="Interactive Voice Response — an automated menu/flow before reaching an agent">IVR</abbr> &amp; self-service (P3/P1)</td>
+              <td><span class="swatch sw-asterisk" title="asterisk"></span><span class="swatch sw-callengine" title="call-engine"></span></td>
+              <td class="narrow center">~50%<br><em style="font-size:11px;opacity:.75;">corrected up 2026-07-19 — was "doesn't exist"</em></td>
+              <td class="narrow"><span class="status-pill s-live">In progress</span></td>
+              <td class="wrap">Builder UI just unstarted</td>
+              <td class="wrap">Small fix + 4-6wk builder</td>
+              <td class="wrap"><strong>Yes</strong> — fix transfer-node bug; builder UI is net new</td>
+            </tr>
+            <tr>
+              <td class="narrow">Inc 10</td>
+              <td class="wrap">Agent Assist &amp; Productivity (P3)</td>
+              <td><span class="swatch sw-be" title="velentsAgents — Backend"></span></td>
+              <td class="narrow center">0%</td>
+              <td class="narrow"><span class="status-pill s-none">Not started</span></td>
+              <td class="wrap">—</td>
+              <td class="wrap">8-12wk</td>
+              <td class="wrap">No — net new</td>
+            </tr>
+            <tr>
+              <td class="narrow">Inc 11</td>
+              <td class="wrap">Outbound &amp; Callback (P3)</td>
+              <td><span class="swatch sw-aivoice" title="AI voice services (livekit-dispatcher / livekit-outbound-caller)"></span></td>
+              <td class="narrow center">~60%</td>
+              <td class="narrow"><span class="status-pill s-partial">Partial</span></td>
+              <td class="wrap">Inc 9's callback dependency</td>
+              <td class="wrap">4-6wk for human path</td>
+              <td class="wrap">No — additive, not modification. <em>Unchanged as of 2026-07-20 — human path not started since this estimate.</em></td>
+            </tr>
+            <tr>
+              <td class="narrow">Inc 12</td>
+              <td class="wrap">Governance, <abbr class="gloss" title="Role-Based Access Control">RBAC</abbr> &amp; Audit (P1)</td>
+              <td><span class="swatch sw-be" title="velentsAgents — Backend"></span></td>
+              <td class="narrow center">~20%</td>
+              <td class="narrow"><span class="status-pill s-none">Not started</span></td>
+              <td class="wrap">—</td>
+              <td class="wrap">3-5wk</td>
+              <td class="wrap">No — net new <abbr class="gloss" title="Call Center — this feature">CC</abbr> wiring</td>
+            </tr>
+            <tr>
+              <td class="narrow">Inc 13</td>
+              <td class="wrap">Productization / 2nd-client (P5)</td>
+              <td><span class="swatch sw-be" title="velentsAgents — Backend"></span><span class="swatch sw-vi" title="velents_integrations"></span></td>
+              <td class="narrow center">~15%</td>
+              <td class="narrow"><span class="status-pill s-none">Not started</span></td>
+              <td class="wrap">Inc 2</td>
+              <td class="wrap">6-10wk, mostly last</td>
+              <td class="wrap">No — the 2026-07-19 decision resolved the hardest design question; still just a design as of 2026-07-20</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3 id="s61">6.1 Dependency graph</h3>
+      <p>Built from the real Linear dependency data in the contact-center dossier (not re-derived from this doc's own prose) — which is how the Inc 2/Inc 4 gaps above were caught. Nodes are colored by phase (P0-P5); solid edges are hard increment-to-increment blockers, the single dashed edge is the one external (non-increment) compliance blocker.</p>
+      <div class="diagram-card" id="diagram12">
+        <div class="toolbar" data-target="12">
+          <button data-act="out" title="Zoom out">−</button><button data-act="reset" title="Reset zoom">⟲</button><button data-act="in" title="Zoom in">+</button><span class="sep"></span><button data-act="fullscreen" title="Full screen">⛶</button>
+        </div>
+        <div class="stage" id="stage12">
+        <div class="zoomwrap" id="zoomwrap12">
+          <pre class="mermaid">
+%%{init: {
+  'theme': 'base',
+  'themeVariables': {
+    'fontSize': '14px',
+    'fontFamily': 'IBM Plex Sans, Segoe UI, sans-serif',
+    'primaryTextColor': '#e6ebf0',
+    'primaryBorderColor': '#4d5c6b',
+    'lineColor': '#9fb0ba',
+    'edgeLabelBackground': '#10151b'
+  },
+  'flowchart': { 'nodeSpacing': 45, 'rankSpacing': 65, 'curve': 'basis' }
+}}%%
+flowchart LR
+  Inc1["Inc 1 — Voice Engine Spine (P0)"]
+  Inc2["Inc 2 — Unified Agent Desktop (P2)"]
+  Inc3["Inc 3 — Routing &amp; ACD parity (P1)"]
+  Inc4["Inc 4 — Supervisor live ops (P2)"]
+  Inc5["Inc 5 — Recording Mgmt (P1)"]
+  Inc6["Inc 6 — Omnichannel completion (P3)"]
+  Inc7["Inc 7 — Agent/Workforce mgmt (P1)"]
+  Inc8["Inc 8 — CC dashboards &amp; reports (P1)"]
+  Inc9["Inc 9 — IVR &amp; self-service (P3)"]
+  Inc10["Inc 10 — Agent Assist (P3)"]
+  Inc11["Inc 11 — Outbound &amp; Callback (P3)"]
+  Inc12["Inc 12 — Governance/RBAC/Audit (P1)"]
+  Inc13["Inc 13 — Productization (P5)"]
+  AGH6685["AGH-6685\nNCA/PDPL retention ref\n(external, past due)"]
+
+  Inc1 --> Inc2
+  Inc1 --> Inc4
+  Inc1 --> Inc8
+  Inc1 --> Inc9
+  Inc1 --> Inc11
+  Inc3 --> Inc2
+  Inc3 --> Inc4
+  Inc7 --> Inc8
+  Inc2 --> Inc13
+  Inc9 --> Inc11
+  AGH6685 -.->|external blocker| Inc5
+
+  classDef p0 fill:#123324,stroke:#5fd4c8,color:#e3fbea,stroke-width:2px;
+  classDef p1 fill:#1c2348,stroke:#6f80d1,color:#dbe2ff,stroke-width:1.5px;
+  classDef p2 fill:#2c2148,stroke:#8a72d1,color:#ede3ff,stroke-width:1.5px;
+  classDef p3 fill:#4a3612,stroke:#d1953f,color:#ffe9c7,stroke-width:1.5px;
+  classDef p5 fill:#2a2a2e,stroke:#8a8a99,color:#eeeeee,stroke-width:1.5px;
+  classDef ext fill:#2c1614,stroke:#e5544c,color:#ffb3ae,stroke-width:1.5px,stroke-dasharray:4 4;
+
+  class Inc1 p0;
+  class Inc3,Inc5,Inc7,Inc8,Inc12 p1;
+  class Inc2,Inc4 p2;
+  class Inc6,Inc9,Inc10,Inc11 p3;
+  class Inc13 p5;
+  class AGH6685 ext;
+
+  linkStyle default stroke-width:2.5px;
+  linkStyle 10 stroke:#e5544c,stroke-width:2px,stroke-dasharray:5 4;
+          </pre>
+        </div>
+        </div>
+      </div>
+      <p style="margin-top:14px;"><strong>Inc # ↔ Phase ↔ dependency-order crosswalk:</strong></p>
+      <div class="table-scroll">
+        <table>
+          <thead><tr><th class="narrow">Inc #</th><th class="narrow">Phase</th><th>Depends on</th><th>Unblocks</th></tr></thead>
+          <tbody>
+            <tr><td class="narrow">Inc 1</td><td class="narrow">P0</td><td>— (root)</td><td>Inc 2, Inc 4, Inc 8, Inc 9, Inc 11</td></tr>
+            <tr><td class="narrow">Inc 3</td><td class="narrow">P1</td><td>— (root)</td><td>Inc 2, Inc 4</td></tr>
+            <tr><td class="narrow">Inc 7</td><td class="narrow">P1</td><td>— (root)</td><td>Inc 8</td></tr>
+            <tr><td class="narrow">Inc 5</td><td class="narrow">P1</td><td><abbr class="gloss" title="Linear issue-key prefix used for every ticket tracked in the contact-center dossier">AGH</abbr>-6685 (external)</td><td>—</td></tr>
+            <tr><td class="narrow">Inc 9</td><td class="narrow">P3</td><td>Inc 1</td><td>Inc 11</td></tr>
+            <tr><td class="narrow">Inc 2</td><td class="narrow">P2</td><td>Inc 1, Inc 3</td><td>Inc 13</td></tr>
+            <tr><td class="narrow">Inc 4</td><td class="narrow">P2</td><td>Inc 1, Inc 3</td><td>—</td></tr>
+            <tr><td class="narrow">Inc 8</td><td class="narrow">P1</td><td>Inc 1, Inc 7</td><td>—</td></tr>
+            <tr><td class="narrow">Inc 11</td><td class="narrow">P3</td><td>Inc 1, Inc 9</td><td>—</td></tr>
+            <tr><td class="narrow">Inc 13</td><td class="narrow">P5</td><td>Inc 2</td><td>—</td></tr>
+            <tr><td class="narrow">Inc 6, 10, 12</td><td class="narrow">P3 / P1</td><td>— (no tracked edges)</td><td>—</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="part7">
+      <span class="part-num">PART 7</span>
+      <div class="section-label">Bugs (found 2026-07-19, status as of 2026-07-20)</div>
+      <h2>Ten bugs, six fixed, two worked around, two need an owner</h2>
+      <div class="table-scroll">
+        <table>
+          <thead><tr><th class="narrow">#</th><th>Bug</th><th class="narrow">Risk</th><th class="narrow">Status</th></tr></thead>
+          <tbody>
+            <tr><td class="narrow">1</td><td class="wrap"><code>.env</code> <code>ASTERISK_WSS_URL</code> pointed at dead port <code>:8089</code></td><td><span class="status-pill s-blocked">High</span></td><td><span class="status-pill s-live">Fixed</span></td></tr>
+            <tr><td class="narrow">2</td><td class="wrap">Gate A/B <abbr class="gloss" title="WebSocket Secure — the encrypted WebSocket transport the browser softphone uses">WSS</abbr>-host detection matched a nonexistent subdomain</td><td><span class="status-pill s-partial">Medium</span></td><td><span class="status-pill s-live">Fixed</span></td></tr>
+            <tr><td class="narrow">3</td><td class="wrap">Gate A's RTP-range check never matched the real NodePort listing</td><td><span class="status-pill s-partial">Medium</span></td><td><span class="status-pill s-live">Fixed</span></td></tr>
+            <tr><td class="narrow">4</td><td class="wrap">Gate D's transport-loaded grep anchor had an extra leading space</td><td><span class="status-pill s-partial">Medium</span></td><td><span class="status-pill s-live">Fixed</span></td></tr>
+            <tr><td class="narrow">5</td><td class="wrap"><code>/healthz</code> only checked process bind, not real <abbr class="gloss" title="Asterisk REST Interface — the WebSocket/REST protocol call-engine uses to control live calls">ARI</abbr> reachability</td><td><span class="status-pill s-blocked">High</span></td><td><span class="status-pill s-live">Fixed + deployed</span></td></tr>
+            <tr><td class="narrow">6</td><td class="wrap"><code>ARI_URL=http://120.0.0.1:8088</code> looks like a typo</td><td><span class="status-pill s-none">Low</span></td><td><span class="status-pill s-none">Needs owner</span></td></tr>
+            <tr><td class="narrow">7</td><td class="wrap"><code>identify</code> sorcery type mapped under the wrong module — broke IP-trunk recognition <strong>platform-wide</strong></td><td><span class="status-pill s-blocked">High</span></td><td><span class="status-pill s-live">Fixed + verified live</span></td></tr>
+            <tr><td class="narrow">8</td><td class="wrap">Bug 5's fix deadlocked <code>entrypoint.sh</code>'s boot gate — crash-looped production</td><td><span class="status-pill s-crit">Critical</span></td><td><span class="status-pill s-live">Fixed + deployed</span></td></tr>
+            <tr><td class="narrow">9</td><td class="wrap"><code>aws-load-balancer-controller</code> crash-looping ~5 days; <abbr class="gloss" title="Network Load Balancer">NLB</abbr> never resyncs on pod IP change</td><td><span class="status-pill s-blocked">High, cluster-wide</span></td><td><span class="status-pill s-partial">Worked around</span></td></tr>
+            <tr><td class="narrow">10</td><td class="wrap">Trunk creation forces inbound auth even on IP-trust-only carriers</td><td><span class="status-pill s-partial">Medium</span></td><td><span class="status-pill s-partial">Worked around live</span></td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="part8">
+      <span class="part-num">PART 8</span>
+      <div class="section-label">Risks</div>
+      <h2>What could still go wrong</h2>
+      <p style="opacity:.8;font-style:italic;">Status below reflects 2026-07-20 — all items were identified 2026-07-19 and none have been revisited since, so "still open" is the expected default, called out explicitly per item rather than left implicit.</p>
+      <ul>
+        <li><strong><code>aws-load-balancer-controller</code> instability (Bug 9) is a live, recurring risk</strong> — any pod restart, for any service, can silently drop traffic until manually corrected. <em>Still open as of 2026-07-20</em> — worked around, not fixed.</li>
+        <li><strong><code>call-engine</code>'s call-state persistence is disabled</strong> — no <abbr class="gloss" title="Call Detail Record — a logged record of a completed call">CDR</abbr>/call-history data is currently being captured for any live call through this pipeline, <abbr class="gloss" title="Call Center — this feature">CC</abbr> or otherwise. A silent gap, not a loud failure. <em>Still open as of 2026-07-20.</em></li>
+        <li><strong><code>sip_store.py</code>'s auth-forcing gap (Bug 10) will recur</strong> for the next IP-trust-only carrier onboarded, until fixed in code. <em>Still open as of 2026-07-20</em> — no code fix has landed.</li>
+        <li><strong><code>call-engine</code>'s true source location within <code>agent-hub</code> is still not fully resolved</strong> — a maintainability/ownership risk. <em>Still open as of 2026-07-20.</em></li>
+        <li><strong>Single point of failure in the Flow-runner's transfer step</strong> — worth auditing the other node types for similar races before building on top of them. <em>Still open as of 2026-07-20</em> — no further audit has happened.</li>
+        <li><strong>Compliance dependency (Inc 5, <abbr class="gloss" title="Linear issue-key prefix used for every ticket tracked in the contact-center dossier">AGH</abbr>-6685)</strong> — recording retention/redaction policy externally blocked, due date of 2026-07-19 is <strong>now past due as of 2026-07-20</strong>.</li>
+        <li><strong>Multi-tenant data-ownership complexity increases as a second client comes online</strong> — the 2026-07-19 synced-copy design addresses the architecture, but it's still a design, not running code as of 2026-07-20; the actual migration hasn't started.</li>
+      </ul>
+    </section>
+
+    <section id="part9">
+      <span class="part-num">PART 9</span>
+      <div class="section-label">TBD</div>
+      <h2>Open decisions, not yet resolved</h2>
+      <ul>
+        <li><strong><abbr class="gloss" title="Speech-to-Text">STT</abbr> ingestion path</strong> for the human-assist pipeline — direct tap vs. LiveKit room subscriber. Explicitly deferred.</li>
+        <li><strong>Which service performs <code>tool_recommendation</code>'s <abbr class="gloss" title="Knowledge Base">KB</abbr> lookup</strong> — resolved for <code>reply_recommendation</code> (via <code>voice-agent</code>), still open here.</li>
+        <li><strong>Whether the AI-copilot results store shares <code>text-agent</code>'s MongoDB instance</strong> or gets a dedicated one.</li>
+        <li><strong>Where exactly <code>call-engine</code>'s source lives within <code>agent-hub</code></strong> — which repo deploys it is answered, the precise branch/path is not.</li>
+        <li><strong>Whether/when to activate <code>livekit-outbound-caller</code>'s dormant innocalls branch</strong>, and whether that's the chosen path for Inc 1's AI Audio Bridge at all.</li>
+        <li><strong>Whether the Flow-runner's other node types have similar timing bugs</strong> to the transfer node — not audited on 2026-07-19. <em>Unchanged as of 2026-07-20.</em></li>
+        <li><strong>Bug 6</strong> — still needs a human to confirm intent. <em>Unchanged as of 2026-07-20.</em></li>
+      </ul>
+    </section>
+
+    <section id="part10">
+      <span class="part-num">PART 10</span>
+      <div class="section-label">Abbreviations</div>
+      <h2>Terms used throughout this doc</h2>
+      <div class="table-scroll legend-table">
+        <table>
+          <tbody>
+            <tr><td><strong>ACD</strong></td><td>Automatic Call Distributor — routes a queued call to an available agent</td></tr>
+            <tr><td><strong>AGH</strong></td><td>Linear issue-key prefix used for every ticket tracked in the contact-center dossier</td></tr>
+            <tr><td><strong>API</strong></td><td>Application Programming Interface</td></tr>
+            <tr><td><strong>ARI</strong></td><td>Asterisk REST Interface — the WebSocket/REST protocol <code>call-engine</code> uses to control live calls</td></tr>
+            <tr><td><strong>CC</strong></td><td>Call Center — this feature</td></tr>
+            <tr><td><strong>CDR</strong></td><td>Call Detail Record — a logged record of a completed call (time, duration, parties, outcome)</td></tr>
+            <tr><td><strong>CRUD</strong></td><td>Create / Read / Update / Delete</td></tr>
+            <tr><td><strong>CXM</strong></td><td>Customer Experience Management — the umbrella product/Linear project this feature lives under</td></tr>
+            <tr><td><strong>DID</strong></td><td>Direct Inward Dialing — a phone number that routes inbound calls to a specific tenant/flow</td></tr>
+            <tr><td><strong>DTMF</strong></td><td>Dual-Tone Multi-Frequency — the tones sent when a caller presses a phone keypad digit</td></tr>
+            <tr><td><strong>E.164</strong></td><td>The international standard format for phone numbers (e.g. <code>+9661XXXXXXXX</code>)</td></tr>
+            <tr><td><strong>IVR</strong></td><td>Interactive Voice Response — an automated menu/flow a caller navigates before reaching an agent</td></tr>
+            <tr><td><strong>KB</strong></td><td>Knowledge Base</td></tr>
+            <tr><td><strong>KPI</strong></td><td>Key Performance Indicator</td></tr>
+            <tr><td><strong>LLM</strong></td><td>Large Language Model</td></tr>
+            <tr><td><strong>NAT</strong></td><td>Network Address Translation</td></tr>
+            <tr><td><strong>NCA</strong></td><td>(Saudi) National Cybersecurity Authority</td></tr>
+            <tr><td><strong>NLB</strong></td><td>Network Load Balancer</td></tr>
+            <tr><td><strong>PDPL</strong></td><td>(Saudi) Personal Data Protection Law</td></tr>
+            <tr><td><strong>PJSIP</strong></td><td>The SIP stack module Asterisk uses for trunk/endpoint/identify configuration</td></tr>
+            <tr><td><strong>PSTN</strong></td><td>Public Switched Telephone Network — the regular phone network calls ultimately traverse</td></tr>
+            <tr><td><strong>PVC</strong></td><td>Persistent Volume Claim — Kubernetes storage backing MixMonitor recordings</td></tr>
+            <tr><td><strong>RBAC</strong></td><td>Role-Based Access Control</td></tr>
+            <tr><td><strong>SIP</strong></td><td>Session Initiation Protocol — the signaling protocol used to set up/tear down calls</td></tr>
+            <tr><td><strong>SLA</strong></td><td>Service-Level Agreement — a target response/handling time</td></tr>
+            <tr><td><strong>STT</strong></td><td>Speech-to-Text</td></tr>
+            <tr><td><strong>TTS</strong></td><td>Text-to-Speech</td></tr>
+            <tr><td><strong>TURN</strong></td><td>Traversal Using Relays around NAT — relay service that lets WebRTC media traverse NAT/firewalls</td></tr>
+            <tr><td><strong>WebRTC</strong></td><td>Web Real-Time Communication — the browser protocol behind the Agent Desktop softphone</td></tr>
+            <tr><td><strong>WFM</strong></td><td>Workforce Management — agent scheduling/staffing</td></tr>
+            <tr><td><strong>WSS</strong></td><td>WebSocket Secure — the encrypted WebSocket transport the browser softphone uses</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <footer>
+      <span>v0.1 — new master doc</span>
+      <span>asterisk / call-engine / velentsAgents / velents_integrations</span>
+    </footer>
+  </div>
+</div>
+
+<a class="back-top" href="#part1" title="Back to top">↑</a>
+
+<script>
+  (function(){
+    // Diagram zoom / pan / fullscreen — one instance per .diagram-card with a [data-target] toolbar.
+    document.querySelectorAll('.diagram-card').forEach(function(box){
+      var toolbar = box.querySelector('.toolbar');
+      if (!toolbar) return;
+      var id = toolbar.getAttribute('data-target');
+      var stage = box.querySelector('#stage' + id);
+      var wrap = box.querySelector('#zoomwrap' + id);
+      if (!stage || !wrap) return;
+      var scale = 1;
+      var fitScale = 1;
+      function apply(){ wrap.style.transform = 'scale(' + scale + ')'; }
+
+      // Auto-fit: once mermaid swaps <pre> for a rendered <svg>, shrink the
+      // initial view so the whole diagram fits the stage width instead of
+      // opening zoomed past the box.
+      var fitted = false;
+      function tryFit(){
+        var svg = wrap.querySelector('svg');
+        if (!svg || fitted) return;
+        var svgWidth = svg.getBoundingClientRect().width || svg.viewBox.baseVal.width;
+        var stageWidth = stage.clientWidth - 24;
+        if (svgWidth > 0 && stageWidth > 0 && svgWidth > stageWidth) {
+          fitScale = Math.max(0.35, Math.min(1, stageWidth / svgWidth));
+          scale = fitScale;
+          apply();
+          fitted = true;
+        } else if (svgWidth > 0) {
+          fitted = true;
+        }
+      }
+      var mo = new MutationObserver(tryFit);
+      mo.observe(wrap, { childList:true, subtree:true });
+      tryFit();
+      setTimeout(tryFit, 400);
+      setTimeout(tryFit, 1200);
+
+      toolbar.querySelectorAll('button').forEach(function(btn){
+        btn.addEventListener('click', function(){
+          var act = btn.getAttribute('data-act');
+          if (act === 'in') scale = Math.min(scale + 0.15, 3);
+          else if (act === 'out') scale = Math.max(scale - 0.15, 0.3);
+          else if (act === 'reset') scale = fitScale;
+          else if (act === 'fullscreen') { toggleFullscreen(); return; }
+          apply();
+        });
+      });
+
+      stage.addEventListener('wheel', function(e){
+        if (!e.ctrlKey && !e.metaKey) return;
+        e.preventDefault();
+        scale = Math.min(3, Math.max(0.4, scale + (e.deltaY < 0 ? 0.08 : -0.08)));
+        apply();
+      }, { passive:false });
+
+      var isDown = false, startX, startY, scrollLeft, scrollTop;
+      stage.addEventListener('mousedown', function(e){
+        isDown = true; stage.classList.add('grabbing');
+        startX = e.pageX; startY = e.pageY;
+        scrollLeft = stage.scrollLeft; scrollTop = stage.scrollTop;
+      });
+      window.addEventListener('mouseup', function(){ isDown = false; stage.classList.remove('grabbing'); });
+      window.addEventListener('mousemove', function(e){
+        if (!isDown) return;
+        stage.scrollLeft = scrollLeft - (e.pageX - startX);
+        stage.scrollTop = scrollTop - (e.pageY - startY);
+      });
+
+      var fsBtn = toolbar.querySelector('[data-act="fullscreen"]');
+      function exitFullscreen(){
+        box.classList.remove('is-fullscreen');
+        document.body.classList.remove('diagram-fullscreen-open');
+        if (fsBtn) { fsBtn.textContent = '⛶'; fsBtn.title = 'Full screen'; }
+      }
+      function toggleFullscreen(){
+        var goingFullscreen = !box.classList.contains('is-fullscreen');
+        document.querySelectorAll('.diagram-card.is-fullscreen').forEach(function(other){
+          if (other !== box && other._exitFullscreen) other._exitFullscreen();
+        });
+        if (goingFullscreen) {
+          box.classList.add('is-fullscreen');
+          document.body.classList.add('diagram-fullscreen-open');
+          if (fsBtn) { fsBtn.textContent = '✕'; fsBtn.title = 'Exit full screen'; }
+        } else {
+          exitFullscreen();
+        }
+      }
+      box._exitFullscreen = exitFullscreen;
+    });
+
+    document.addEventListener('keydown', function(e){
+      if (e.key !== 'Escape') return;
+      document.querySelectorAll('.diagram-card.is-fullscreen').forEach(function(box){
+        if (box._exitFullscreen) box._exitFullscreen();
+      });
+      document.querySelectorAll('.table-scroll.is-fullscreen').forEach(function(t){
+        if (t._exitFullscreen) t._exitFullscreen();
+      });
+    });
+
+    // Table fullscreen toggle (tasks table, or any .table-expandable)
+    document.querySelectorAll('[data-act="table-fullscreen"]').forEach(function(btn){
+      var target = document.getElementById(btn.getAttribute('data-target'));
+      if (!target) return;
+      function exitFullscreen(){
+        target.classList.remove('is-fullscreen');
+        document.body.classList.remove('table-fullscreen-open');
+        btn.textContent = '⛶'; btn.title = 'Full screen';
+      }
+      target._exitFullscreen = exitFullscreen;
+      btn.addEventListener('click', function(){
+        var goingFullscreen = !target.classList.contains('is-fullscreen');
+        if (goingFullscreen) {
+          target.classList.add('is-fullscreen');
+          document.body.classList.add('table-fullscreen-open');
+          btn.textContent = '✕'; btn.title = 'Exit full screen';
+        } else {
+          exitFullscreen();
+        }
+      });
+    });
+  })();
+</script>

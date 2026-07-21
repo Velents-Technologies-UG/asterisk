@@ -1,0 +1,351 @@
+<title>Worker 2 (call-engine) — architecture &amp; data design</title>
+<style>
+  :root{
+    --bg:#f5f7f8; --surface:#ffffff; --surface-alt:#eef1f3;
+    --text:#1a232c; --muted:#5c6b78; --muted-2:#7c8b97;
+    --border:#dde3e7; --border-strong:#c7d0d6;
+    --accent:#1f6f6b; --accent-soft:#e3f1ef;
+    --code-bg:#eef1f3;
+    --shadow: 0 1px 2px rgba(20,30,35,.06), 0 8px 24px -12px rgba(20,30,35,.12);
+  }
+  :root[data-theme="dark"]{
+    --bg:#0c1116; --surface:#131a21; --surface-alt:#1a222b;
+    --text:#e6ebf0; --muted:#93a2ae; --muted-2:#7c8b97;
+    --border:#232d37; --border-strong:#2d3945;
+    --accent:#5fd4c8; --accent-soft:#122b29;
+    --code-bg:#1a222b;
+    --shadow: 0 1px 2px rgba(0,0,0,.3), 0 12px 32px -16px rgba(0,0,0,.6);
+  }
+  @media (prefers-color-scheme: dark){
+    :root:not([data-theme="light"]){
+      --bg:#0c1116; --surface:#131a21; --surface-alt:#1a222b;
+      --text:#e6ebf0; --muted:#93a2ae; --muted-2:#7c8b97;
+      --border:#232d37; --border-strong:#2d3945;
+      --accent:#5fd4c8; --accent-soft:#122b29;
+      --code-bg:#1a222b;
+      --shadow: 0 1px 2px rgba(0,0,0,.3), 0 12px 32px -16px rgba(0,0,0,.6);
+    }
+  }
+
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;}
+  body{
+    background:var(--bg); color:var(--text);
+    font-family:"Source Serif Pro","Iowan Old Style","Palatino Linotype",Georgia,serif;
+    font-size:17px; line-height:1.62; -webkit-font-smoothing:antialiased;
+  }
+  ::selection{ background:var(--accent-soft); color:var(--text); }
+
+  .doc{ max-width:960px; margin:0 auto; padding:0 24px 96px; }
+  .wide{ max-width:1180px; }
+
+  header.masthead{
+    max-width:960px; margin:0 auto; padding:56px 24px 28px; border-bottom:1px solid var(--border);
+  }
+  .eyebrow{
+    font-family:"IBM Plex Mono",ui-monospace,"SFMono-Regular",Menlo,Consolas,monospace;
+    font-size:12.5px; letter-spacing:.14em; text-transform:uppercase; color:var(--accent);
+    display:flex; align-items:center; gap:10px; margin-bottom:14px;
+  }
+  .eyebrow .dot{width:6px;height:6px;border-radius:50%;background:var(--accent);display:inline-block;}
+  h1{
+    font-family:"IBM Plex Sans","Segoe UI Semibold","Segoe UI",system-ui,sans-serif;
+    font-weight:650; font-size:clamp(28px,4vw,40px); line-height:1.12; letter-spacing:-.015em;
+    margin:0 0 12px; text-wrap:balance; color:var(--text);
+  }
+  .subtitle{ font-size:17px; color:var(--muted); max-width:64ch; margin:0 0 22px; }
+  .meta-row{
+    display:flex; flex-wrap:wrap; gap:10px 22px;
+    font-family:"IBM Plex Mono",ui-monospace,monospace; font-size:12.5px; color:var(--muted-2);
+  }
+  .meta-row span b{ color:var(--text); font-weight:600; }
+  .chip{
+    display:inline-flex; align-items:center; gap:6px;
+    background:var(--accent-soft); color:var(--accent);
+    border:1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+    padding:3px 10px 3px 8px; border-radius:100px; font-size:12px; font-weight:600; letter-spacing:.02em;
+  }
+
+  section{ margin-top:56px; }
+  .part-num{
+    font-family:"IBM Plex Mono",monospace; font-size:44px; font-weight:700;
+    color:var(--accent-soft); -webkit-text-stroke:1.5px var(--accent);
+    line-height:1; margin-bottom:-6px; opacity:.85;
+  }
+  .section-label{
+    font-family:"IBM Plex Mono",ui-monospace,monospace; font-size:12px; letter-spacing:.14em;
+    text-transform:uppercase; color:var(--muted-2); display:flex; align-items:center; gap:14px; margin-bottom:16px;
+  }
+  .section-label::after{ content:""; flex:1; height:1px; background:var(--border); }
+  h2{
+    font-family:"IBM Plex Sans","Segoe UI Semibold","Segoe UI",system-ui,sans-serif;
+    font-weight:640; font-size:26px; letter-spacing:-.008em; margin:0 0 16px; color:var(--text); text-wrap:balance;
+  }
+  h3{
+    font-family:"IBM Plex Sans","Segoe UI Semibold","Segoe UI",system-ui,sans-serif;
+    font-weight:620; font-size:18px; margin:28px 0 10px; color:var(--text);
+  }
+  p{ margin:0 0 14px; max-width:72ch; }
+  .wide p{ max-width:80ch; }
+  ul,ol{ padding-left:1.3em; margin:0 0 16px; max-width:72ch; }
+  li{ margin-bottom:8px; }
+  strong{ font-weight:700; }
+  a{ color:var(--accent); }
+
+  code, .mono{
+    font-family:"IBM Plex Mono",ui-monospace,"SFMono-Regular",Menlo,Consolas,monospace;
+    font-size:.86em; background:var(--code-bg); border:1px solid var(--border);
+    border-radius:4px; padding:.05em .38em; color:var(--text);
+  }
+  pre.codeblock{
+    background:var(--code-bg); border:1px solid var(--border); border-radius:8px;
+    padding:14px 16px; overflow-x:auto; font-family:"IBM Plex Mono",monospace; font-size:13px;
+    line-height:1.6; color:var(--text); margin:14px 0 18px;
+  }
+
+  .callout{
+    background:var(--surface); border:1px solid var(--border); border-left:3px solid var(--accent);
+    border-radius:8px; padding:18px 20px; margin:18px 0; box-shadow:var(--shadow);
+  }
+  .callout p:last-child{ margin-bottom:0; }
+  .callout ul:last-child{ margin-bottom:0; }
+  .callout-label{
+    font-family:"IBM Plex Mono",monospace; font-size:11.5px; letter-spacing:.1em;
+    text-transform:uppercase; color:var(--accent); font-weight:700; margin-bottom:8px; display:block;
+  }
+
+  .table-scroll{
+    overflow-x:auto; border:1px solid var(--border); border-radius:10px;
+    box-shadow:var(--shadow); margin:18px 0 8px; background:var(--surface);
+  }
+  table{
+    border-collapse:collapse; width:100%;
+    font-family:"IBM Plex Sans","Segoe UI",system-ui,sans-serif; font-size:13.6px; line-height:1.5;
+  }
+  thead th{
+    position:sticky; top:0; background:var(--surface-alt); text-align:left;
+    font-weight:650; font-size:11.5px; letter-spacing:.06em; text-transform:uppercase;
+    color:var(--muted); padding:12px 14px; border-bottom:1px solid var(--border-strong); white-space:nowrap;
+  }
+  tbody td{ padding:12px 14px; border-bottom:1px solid var(--border); vertical-align:top; color:var(--text); }
+  tbody tr:last-child td{ border-bottom:none; }
+  tbody tr:nth-child(even){ background:color-mix(in srgb, var(--surface-alt) 45%, transparent); }
+  td.narrow, th.narrow{ min-width:74px; }
+  td.wrap{ min-width:200px; }
+  tr.recommended td:first-child{ border-left:3px solid var(--accent); }
+
+  .flow-steps{ counter-reset:step; list-style:none; padding:0; margin:18px 0; max-width:74ch; }
+  .flow-steps li{
+    counter-increment:step; position:relative; padding:2px 0 16px 40px; margin-bottom:0;
+  }
+  .flow-steps li::before{
+    content:counter(step); position:absolute; left:0; top:0;
+    width:26px; height:26px; border-radius:50%; background:var(--accent-soft); color:var(--accent);
+    font-family:"IBM Plex Mono",monospace; font-size:12.5px; font-weight:700;
+    display:flex; align-items:center; justify-content:center; border:1px solid color-mix(in srgb, var(--accent) 40%, transparent);
+  }
+  .flow-steps b{ display:block; color:var(--text); margin-bottom:2px; }
+
+  hr.rule{ border:none; border-top:1px solid var(--border); margin:56px 0 0; }
+
+  footer{
+    max-width:960px; margin:64px auto 0; padding:24px; border-top:1px solid var(--border);
+    font-family:"IBM Plex Mono",monospace; font-size:12px; color:var(--muted-2);
+    display:flex; justify-content:space-between; flex-wrap:wrap; gap:8px;
+  }
+
+  @media (max-width:640px){
+    body{ font-size:16px; }
+    header.masthead{ padding:40px 18px 24px; }
+    .doc{ padding:0 18px 72px; }
+    thead th, tbody td{ padding:10px; }
+  }
+</style>
+
+<header class="masthead">
+  <div class="eyebrow"><span class="dot"></span>Internal design doc — asterisk repo, companion to the v0.1 plan</div>
+  <h1>Worker 2 (call-engine) — architecture &amp; data-ownership design</h1>
+  <p class="subtitle">What call-engine actually does, why its deploying repo is architecturally a frontend, a tech-stack comparison for where its live event loop should run, and the resulting decision on data ownership as more clients share the call-center feature.</p>
+  <div class="meta-row">
+    <span><b>Repo</b> Velents-Technologies-UG/agent-hub (deploys it) · e:\Projects\Velents\asterisk (consumes it)</span>
+    <span class="chip">v0.1 — new doc</span>
+  </div>
+</header>
+
+<main class="doc">
+
+  <section>
+    <div class="part-num">01</div>
+    <div class="section-label">Why this doc exists</div>
+    <p>The feature-gap plan had an open question for weeks: where does the ARI/Stasis "call-engine" that every Asterisk dialplan hook routes into actually live? A real end-to-end call test this session finally answered it — it's <code>call-engine</code>, deployed from the <code>Velents-Technologies-UG/agent-hub</code> GitHub repo. That answer immediately raised a bigger one: <code>agent-hub</code>'s own main branch is a Next.js <strong>frontend</strong>, with no trace of this backend service at its root. That mismatch — and the fact that more clients, not just <code>velentsAgents</code>, will eventually want to use the same call-center feature — is what this doc works through.</p>
+  </section>
+
+  <section>
+    <div class="part-num">02</div>
+    <div class="section-label">What call-engine does on an inbound call</div>
+    <p>In plain terms: it's the always-on process that Asterisk hands every live call to, and which decides what happens to that call. Asterisk's own dialplan does almost nothing itself — it recognizes an inbound call and hands the channel off:</p>
+    <pre class="codeblock">NoOp(inbound ${CALLERID(num)} -&gt; ${EXTEN})
+Set(__CALLED_DID=${EXTEN})
+Stasis(call-engine, inbound, ${EXTEN})
+Hangup()</pre>
+    <p>Confirmed directly from the service's own boot log this session:</p>
+    <pre class="codeblock">ARI connected url=http://asterisk:8088 app=call-engine
+ARI Stasis app 'call-engine' subscribed and ready</pre>
+
+    <h3>The sequence, step by step</h3>
+    <ol class="flow-steps">
+      <li><b>StasisStart arrives</b> with the call's args. Confirmed: <code>Flow StasisStart ... flow=forward-to-personal-test caller=voylo_locat did=+966115030505 source=inbound</code>.</li>
+      <li><b>DID resolution</b> — an HTTP call to the central DID registry to find which tenant owns the number and what handles it. Confirmed: <code>inbound DID '+966115030505' -&gt; tenant=testCallCenter flow=forward-to-personal-test</code>.</li>
+      <li><b>Branch: Flow vs. Queue</b> — a DID either runs a scripted Flow or routes straight to a live human-agent ACD queue.</li>
+      <li><b>Flow execution</b> — <code>flow-runner.js</code> loads the tenant's Flow (a JSON node graph) and walks it. Node types: <code>start</code>, <code>play</code>, <code>dtmf_collect</code>, <code>queue_enter</code>, <code>hangup</code>, <code>set_var</code>, <code>if</code>, <code>webhook</code>, <code>transfer</code>, <code>voicemail</code>, <code>business_hours</code>, <code>bridge_ai</code>.</li>
+      <li><b>Transfer execution</b> — <code>transferer.js</code> dials/bridges to an agent, extension, or e164 number.</li>
+      <li><b>Call-state tracking</b> — a lifecycle state machine intended to feed persistence; currently disabled in this deployment (no DB configured), so nothing is actually saved, only logged.</li>
+    </ol>
+
+    <div class="callout">
+      <span class="callout-label">Where it broke, precisely</span>
+      <p>~600ms after <code>StasisStart</code>, before the transfer completed: <code>flow run failed (inbound forward-to-personal-test): "Channel not found"</code> → immediate teardown. An ARI command against the channel — almost certainly the flow's first real action — was rejected because the channel had already stopped existing on Asterisk's side. A timing/race bug internal to the flow-runner, not the dialplan or PJSIP layer.</p>
+    </div>
+
+    <h3>Other subsystems wired at boot</h3>
+    <ul>
+      <li><code>Queue dispatcher wired (ACD enabled)</code> — human-agent queue routing, the parallel path to Flows.</li>
+      <li><code>Outbound router wired</code> — agent-initiated outbound calls.</li>
+      <li><code>AudioSocket stub listening on 0.0.0.0:8090</code> — backs the Flow's <code>bridge_ai</code> node; still just a 3-second-tone placeholder, not a real AI-audio bridge.</li>
+      <li>Redis pub/sub — likely for pushing live call state to a frontend; a <code>gateway</code> component is explicitly disabled in this deployment.</li>
+      <li>Its own internal Control API on <code>127.0.0.1:8092</code> — a <em>different</em> API from <code>deploy/control_api.py</code>'s trunk-CRUD API (same port number, different pod, coincidence). This one exposes agent-facing mid-call actions like <code>/control/calls/:uuid/transfer</code>.</li>
+    </ul>
+
+    <h3>API surface, summarized</h3>
+    <p><strong>Calls out:</strong> DID resolution (<code>GET .../Did/Resolve/&lt;number&gt;</code>), Flow fetch (<code>GET .../Flows/&lt;id&gt;</code>), call-event writes (currently no-ops), Flow <code>webhook</code> nodes (arbitrary, per-flow), and ARI commands to Asterisk itself.</p>
+    <p><strong>Exposes:</strong> <code>/control/calls/:id/transfer</code> (and likely hold/hangup) for agent-triggered mid-call actions.</p>
+  </section>
+
+  <section>
+    <div class="part-num">03</div>
+    <div class="section-label">The architecture mismatch</div>
+    <p><code>agent-hub</code>'s own <code>package.json</code> (root, main branch) is a plain Next.js frontend — <code>next dev</code>/<code>build</code>/<code>start</code>, dependencies like <code>@dnd-kit</code> and <code>@fullcalendar</code>. No ARI client, no WebSocket server, nothing resembling <code>call-engine</code>.</p>
+    <div class="callout">
+      <span class="callout-label">The one real clue</span>
+      <p>A commit in that repo's own history: <em>"refactor(voice): remove Asterisk/Twilio telephony runtime from the UI."</em> This backend likely used to live bundled inside the frontend and was split out at some point — but the deployed Jenkins build checks out a different branch (<code>claude/innov2-sip-auth-error-pjgbng</code>, not main), so whether that split finished, or landed anywhere permanent, is still unclear.</p>
+    </div>
+  </section>
+
+  <section class="wide">
+    <div class="part-num">04</div>
+    <div class="section-label">Tech-stack comparison — the live call event loop</div>
+    <p>"Worker 2" is really two kinds of work: provisioning/lookup APIs (normal request/response REST — a good fit for <code>velents_integrations</code>, a Laravel app) and the <strong>live call event loop</strong> — holding an open ARI connection, reacting in real time, sub-second timing sensitivity. That second half needs a long-running, event-driven process, which is why the current build is Node.js, not PHP. The comparison below is specifically for that second half.</p>
+
+    <div class="table-scroll">
+      <table>
+        <thead>
+          <tr><th>Stack</th><th>Performance</th><th>Effort</th><th class="narrow">Est. time</th><th>Key risks</th></tr>
+        </thead>
+        <tbody>
+          <tr class="recommended">
+            <td class="wrap"><strong>Node.js — relocate</strong> current code to its own dedicated repo</td>
+            <td class="wrap">Proven live this session — ARI connect, Stasis subscribe, DID resolve, Flow load all worked against real production traffic.</td>
+            <td class="wrap"><strong>Low</strong> — no rewrite, extraction + CI/CD + one known bug fix</td>
+            <td class="narrow">1–2 wk</td>
+            <td class="wrap">Inherits whatever else is unfinished/undocumented (disabled DB writes, disabled gateway) — needs auditing.</td>
+          </tr>
+          <tr>
+            <td class="wrap">Node.js — clean rewrite, same language</td>
+            <td class="wrap">Same ceiling, cleaner internals.</td>
+            <td class="wrap">Medium-High — full rewrite of ARI client, flow-runner, transferer, resolver</td>
+            <td class="narrow">4–8 wk</td>
+            <td class="wrap">Re-introduces bugs already solved once.</td>
+          </tr>
+          <tr>
+            <td class="wrap">PHP + Laravel Octane (Swoole) inside velents_integrations</td>
+            <td class="wrap">Swoole gives a real async loop — capable, but ARI-for-PHP is a small, unproven ecosystem.</td>
+            <td class="wrap">High — new runtime mode, ARI client/engine built from scratch</td>
+            <td class="narrow">6–10 wk</td>
+            <td class="wrap">Little Octane experience on the team; small community for support.</td>
+          </tr>
+          <tr>
+            <td class="wrap">PHP + custom ReactPHP daemon (no Octane)</td>
+            <td class="wrap">Workable async I/O, hand-rolled reconnect/event handling.</td>
+            <td class="wrap">High — same from-scratch build, plus your own daemon supervision</td>
+            <td class="narrow">6–9 wk</td>
+            <td class="wrap">Bespoke infra = its own class of subtle bugs (this session alone found four).</td>
+          </tr>
+          <tr>
+            <td class="wrap">Python (ari-py + asyncio), new dedicated service</td>
+            <td class="wrap">Solid async support, smaller/less-maintained ARI ecosystem than Node's.</td>
+            <td class="wrap">High — full rewrite, new language for this domain</td>
+            <td class="narrow">6–10 wk</td>
+            <td class="wrap">Smallest community of these options for ARI specifically.</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="callout">
+      <span class="callout-label">Recommendation</span>
+      <p><strong>Don't rewrite — relocate.</strong> The current Node.js code got 90% of the way there, live, this session, against production Asterisk. That's a small, fixable bug in working code, not evidence the stack is wrong. Rewriting elsewhere to satisfy "it should live somewhere else" throws away something that already works, for an ecosystem with less Asterisk/ARI tooling support.</p>
+    </div>
+  </section>
+
+  <section class="wide">
+    <div class="part-num">05</div>
+    <div class="section-label">Data-ownership design (decided)</div>
+    <p><code>velents_integrations</code> will eventually serve more than just <code>velentsAgents</code> — other backends, for other clients (e.g. <code>safha</code>), sharing the same call-center feature. That forces a decision, per piece of data: tenant DB (owned by whichever backend serves that client), or a shared, backend-agnostic telephony store?</p>
+
+    <div class="callout">
+      <span class="callout-label">Precedent already in place</span>
+      <p>Two Postgres databases already exist, both named <code>velentsagents</code>, on two different RDS instances — a working example of roughly this split. <strong>PROD</strong> has <code>sip_trunks</code>/<code>ps_endpoints</code>/<code>ps_auths</code>/<code>ps_aors</code>/<code>ps_identify</code> — realtime PJSIP config Asterisk reads directly. <strong>NONPROD</strong> has <code>did_registry</code>/<code>flows</code>/<code>queues</code>/<code>tenants</code> — tenant/business data owned by velentsAgents' Laravel app.</p>
+    </div>
+
+    <h3>The decision rule</h3>
+    <p><em>Does Asterisk/call-engine need to read this at call-time, fast, without depending on a specific tenant's backend being up?</em> Yes → shared telephony config, via <code>velents_integrations</code>. No, it's about the tenant's business → stays in that tenant's own backend.</p>
+
+    <div class="table-scroll">
+      <table>
+        <thead><tr><th>Shared (velents_integrations)</th><th>Tenant-owned (velentsAgents, safha's BE, ...)</th></tr></thead>
+        <tbody>
+          <tr>
+            <td class="wrap">DID registry — number → tenant + Flow/queue (must be globally unique across clients)</td>
+            <td class="wrap">Flow authoring — drafts, versions, edit history, unpublished changes</td>
+          </tr>
+          <tr>
+            <td class="wrap">SIP trunk/endpoint/identify config (already the case today)</td>
+            <td class="wrap">Agent profiles, business rules beyond routing, CRM/customer context</td>
+          </tr>
+          <tr>
+            <td class="wrap">Current <em>published</em> Flow (runtime definition only, not history)</td>
+            <td class="wrap">Conversation history, analytics, billing</td>
+          </tr>
+          <tr>
+            <td class="wrap">Queue definitions for live routing (or a synced, low-latency copy)</td>
+            <td class="wrap">Anything gated by that backend's own auth/permissions model</td>
+          </tr>
+          <tr>
+            <td class="wrap">Call-detail/event write path</td>
+            <td class="wrap">—</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3>The synced-copy model — decided, with refinements</h3>
+    <p>For Flows (and anything else a tenant backend authors into the shared store): <strong>push a synced copy on publish</strong>, not a live fetch, not a webhook/polling scheme.</p>
+    <ul>
+      <li><strong>Trigger</strong> — explicit, on publish. A tenant backend calls a <code>velents_integrations</code> write endpoint right when something is published (e.g. <code>POST /telephony/flows/{tenant}/{flow_id}</code>). Publishing is already deliberate and low-frequency — no webhook infra or polling needed.</li>
+      <li><strong>Read path</strong> — call-engine reads <em>through</em> <code>velents_integrations</code>' API, never the shared DB directly. That's the whole point: validation and constraints get enforced once, not re-implemented by every consumer.</li>
+      <li><strong>Constraints enforced on every write</strong> — DID uniqueness globally, across every tenant/client; Flow schema validation (valid graph, no dangling references); a DID's referenced Flow must exist and be published before the mapping is accepted.</li>
+      <li><strong>Failure handling</strong> — call-engine is never blocked by an unreachable tenant backend; it keeps serving the last synced copy until the next publish succeeds. One client's backend outage can never take down another client's live calls.</li>
+    </ul>
+
+    <div class="callout">
+      <span class="callout-label">Why synced-copy over live-fetch</span>
+      <p>Live-fetch (today's model) is simpler and always current, but couples call-time reliability to every backend's uptime — exactly the cross-service dependency this design exists to avoid. Synced-copy costs an extra push at publish time and a brief window of possible staleness, in exchange for call-time reads never depending on any one tenant backend being reachable. Given the whole point is supporting multiple independent backends sharing one call-center feature, that tradeoff was the deciding factor.</p>
+    </div>
+  </section>
+
+</main>
+
+<footer>
+  <span>v0.1 — new companion doc</span>
+  <span>agent-hub / asterisk / velents_integrations</span>
+</footer>

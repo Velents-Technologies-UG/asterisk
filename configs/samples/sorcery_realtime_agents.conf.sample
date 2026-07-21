@@ -7,15 +7,32 @@
 ;
 ; SECTION HEADERS MATTER. Asterisk's sorcery_realtime loader keys each
 ; type lookup on the section header, which must equal the name of the
-; module that registered the sorcery type via ast_sorcery_open():
+; module that registered the sorcery type's config documentation via
+; ast_sorcery_apply_config() — NOT just whichever .c file conceptually
+; "owns" the type. Confirmed against this image's own
+; /usr/share/asterisk/documentation/core-en_US.xml:
 ;
-;   res_pjsip.c                       -> system, global, endpoint, auth,
-;                                        aor, contact, domain_alias,
-;                                        transport, identify
-;   res_pjsip_outbound_registration.c -> registration
+;   res_pjsip.c                          -> system, global, endpoint, auth,
+;                                            aor, contact, domain_alias,
+;                                            transport
+;   res_pjsip_outbound_registration.c    -> registration
+;   res_pjsip_endpoint_identifier_ip.c   -> identify
 ;
-; If `registration` is placed under [res_pjsip] (as it was before this
-; revision), sorcery_realtime logs:
+; `identify` looks like a core res_pjsip type (it's configured in
+; pjsip.conf right alongside endpoint/aor/auth) but its <configInfo> block
+; is registered by the separate res_pjsip_endpoint_identifier_ip module.
+; Placing it under [res_pjsip] (as an earlier revision of this file did)
+; makes sorcery_realtime log:
+;   Cannot update type 'identify' in module 'res_pjsip' because it has
+;   no existing documentation!
+; ...which makes res_pjsip_endpoint_identifier_ip.so decline to load
+; entirely (module show like identifier -> Not Running), so NO
+; IP-based/carrier_ip trunk can ever be recognized on inbound, no
+; matter how correct its ps_identify row is — carrier_ip-configured
+; trunks silently reject all inbound with "No matching endpoint found".
+;
+; Likewise, if `registration` is placed under [res_pjsip] (as it was
+; before an earlier revision), sorcery_realtime logs:
 ;   Cannot update type 'registration' in module 'res_pjsip'
 ; ...and silently drops the mapping, so res_pjsip_outbound_registration
 ; can't find its rows via realtime.
@@ -25,7 +42,9 @@
 endpoint=realtime,ps_endpoints
 auth=realtime,ps_auths
 aor=realtime,ps_aors
-identify=realtime,ps_identify
 
 [res_pjsip_outbound_registration]
 registration=realtime,ps_registrations
+
+[res_pjsip_endpoint_identifier_ip]
+identify=realtime,ps_identify

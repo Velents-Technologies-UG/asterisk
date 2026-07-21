@@ -11,6 +11,11 @@
 enabled = yes
 pretty = yes
 allowed_origins = *
+; Uncomment if asterisk.velents.ai's basePath (GET /ari/api-docs/resources.json)
+; reports "http://" instead of "https://" and the fronting proxy doesn't send
+; X-Forwarded-Proto (Asterisk honors that header automatically otherwise) --
+; see ari.conf.sample's external_scheme comment for the full explanation.
+;external_scheme = https
 
 [asterisk]
 type = user

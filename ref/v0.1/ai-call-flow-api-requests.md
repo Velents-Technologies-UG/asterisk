@@ -1,7 +1,13 @@
 # AI call flow — API request sequence (notes behind the diagram)
 
-Companion notes for `ai-call-flow-api-requests.html` (published artifact:
-https://claude.ai/code/artifact/ee29f731-c96f-49ba-9b69-f46f47d64317). Captured 2026-07-19.
+**Version:** v0.1 — carried over from `ref/ai-call-flow-api-requests.md` unchanged, plus the
+addendum at the bottom noting that this doc's biggest open question (the call-engine's location)
+is now resolved.
+
+Companion notes for `ai-call-flow-api-requests.html` (v0.1 published artifact:
+https://claude.ai/code/artifact/6f7c4d34-9512-4fbe-9eb2-33080ea2ffc2 — regenerated from the
+original at https://claude.ai/code/artifact/ee29f731-c96f-49ba-9b69-f46f47d64317). Captured
+2026-07-19.
 The user proposed an inbound-call flow (tenant IVR → AI/human queue → per-tenant AI-copilot
 webhook fan-out → MongoDB → velentsAgents backend → frontend, plus an AI-agent-handled call a
 human can take over); this doc is the critique, the open questions raised, the user's answers,
@@ -176,6 +182,6 @@ under "What the diagram ended up showing"): "tenant IVR (FlowRunner not built)" 
 **Relevant, not yet reconciled**: this session's FlowRunner is a simple linear node-graph (start →
 transfer, in the test case), not the AI-queue/human-queue/TTS branching this doc's proposed flow
 describes. The engine's node types (`play`, `dtmf_collect`, `queue_enter`, `if`, `webhook`,
-`bridge_ai`, etc. — see the companion `ref/v0.1/worker2-call-engine-architecture-and-data-design.md`)
-suggest it's *capable* of the branching this doc proposes, but that specific routing logic wasn't
-exercised or verified this session — worth a follow-up test once the transfer-node bug is fixed.
+`bridge_ai`, etc. — see the companion `worker2-call-engine-architecture-and-data-design.md`) suggest
+it's *capable* of the branching this doc proposes, but that specific routing logic wasn't exercised
+or verified this session — worth a follow-up test once the transfer-node bug is fixed.

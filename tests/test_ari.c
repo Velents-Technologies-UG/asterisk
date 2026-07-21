@@ -230,6 +230,45 @@ AST_TEST_DEFINE(get_docs)
 	return AST_TEST_PASS;
 }
 
+AST_TEST_DEFINE(get_docs_forwarded_proto_https)
+{
+	RAII_VAR(struct ast_ari_response *, response, NULL, response_free);
+	RAII_VAR(struct ast_variable *, headers, NULL, ast_variables_destroy);
+	struct ast_variable *forwarded_proto;
+	struct ast_json *basePathJson;
+	const char *basePath;
+
+	switch (cmd) {
+	case TEST_INIT:
+		info->name = __func__;
+		info->category = "/res/ari/";
+		info->summary = "Test basePath scheme behind a TLS-terminating reverse proxy.";
+		info->description =
+			"A reverse proxy that terminates TLS and forwards plain HTTP to Asterisk "
+			"should still get an https:// basePath back, via X-Forwarded-Proto, "
+			"instead of the scheme always defaulting to http://.";
+		return AST_TEST_NOT_RUN;
+	case TEST_EXECUTE:
+		break;
+	}
+
+	response = response_alloc();
+	headers = ast_variable_new("Host", "stasis.asterisk.org", __FILE__);
+	forwarded_proto = ast_variable_new("X-Forwarded-Proto", "https", __FILE__);
+	forwarded_proto->next = headers;
+	headers = forwarded_proto;
+
+	ast_ari_get_docs("resources.json", "", headers, response);
+	ast_test_validate(test, 200 == response->response_code);
+
+	basePathJson = ast_json_object_get(response->message, "basePath");
+	ast_test_validate(test, NULL != basePathJson);
+	basePath = ast_json_string_get(basePathJson);
+	ast_test_validate(test, 0 == strcmp("https://stasis.asterisk.org/ari", basePath));
+
+	return AST_TEST_PASS;
+}
+
 AST_TEST_DEFINE(get_docs_nohost)
 {
 	RAII_VAR(struct ast_ari_response *, response, NULL, response_free);
@@ -543,6 +582,7 @@ AST_TEST_DEFINE(invoke_not_found)
 static int unload_module(void)
 {
 	AST_TEST_UNREGISTER(get_docs);
+	AST_TEST_UNREGISTER(get_docs_forwarded_proto_https);
 	AST_TEST_UNREGISTER(get_docs_nohost);
 	AST_TEST_UNREGISTER(get_docs_notfound);
 	AST_TEST_UNREGISTER(get_docs_hackerz);
@@ -558,6 +598,7 @@ static int unload_module(void)
 static int load_module(void)
 {
 	AST_TEST_REGISTER(get_docs);
+	AST_TEST_REGISTER(get_docs_forwarded_proto_https);
 	AST_TEST_REGISTER(get_docs_nohost);
 	AST_TEST_REGISTER(get_docs_notfound);
 	AST_TEST_REGISTER(get_docs_hackerz);

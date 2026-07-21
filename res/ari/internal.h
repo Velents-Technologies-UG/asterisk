@@ -64,6 +64,13 @@ struct ari_conf_general {
 		AST_STRING_FIELD(auth_realm);
 		/*! Channel variables */
 		AST_STRING_FIELD(channelvars);
+		/*! Scheme ("http" or "https") to report in self-described basePath
+		 * URLs (e.g. GET /ari/api-docs/resources.json), overriding both the
+		 * hardcoded "http" default and any inbound X-Forwarded-Proto header.
+		 * Needed when a TLS-terminating reverse proxy in front of Asterisk
+		 * doesn't send X-Forwarded-Proto. Empty (default) defers to
+		 * X-Forwarded-Proto, then falls back to "http". */
+		AST_STRING_FIELD(external_scheme);
 	);
 	/*! Enabled by default, disabled if false. */
 	int enabled;

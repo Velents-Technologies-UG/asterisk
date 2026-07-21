@@ -734,8 +734,10 @@ void ast_ari_get_docs(const char *uri, const char *prefix, struct ast_variable *
 	RAII_VAR(struct ast_str *, absolute_path_builder, NULL, ast_free);
 	RAII_VAR(char *, absolute_api_dirname, NULL, ast_std_free);
 	RAII_VAR(char *, absolute_filename, NULL, ast_std_free);
+	RAII_VAR(struct ari_conf_general *, general, ari_conf_get_general(), ao2_cleanup);
 	struct ast_json *obj = NULL;
 	struct ast_variable *host = NULL;
+	struct ast_variable *forwarded_proto = NULL;
 	struct ast_json_error error = {};
 	struct stat file_stat;
 
@@ -828,20 +830,49 @@ void ast_ari_get_docs(const char *uri, const char *prefix, struct ast_variable *
 
 	/* Update the basePath properly */
 	if (ast_json_object_get(obj, "basePath") != NULL) {
+		const char *scheme = "http";
+
 		for (host = headers; host; host = host->next) {
 			if (strcasecmp(host->name, "Host") == 0) {
 				break;
 			}
 		}
+
+		/*
+		 * Asterisk's own HTTP server has no notion of "I'm being reached
+		 * over HTTPS via a TLS-terminating reverse proxy" -- if the proxy
+		 * decrypts and forwards plain HTTP internally (the common case for
+		 * e.g. an nginx/ingress in front of Asterisk), this handler would
+		 * otherwise always report basePath as http://, mismatching the
+		 * scheme the client actually used to fetch this very document and
+		 * breaking any Swagger/ARI client that trusts basePath for
+		 * subsequent requests. Prefer an explicit operator override
+		 * (general/external_scheme in ari.conf) when set; otherwise honor
+		 * a standard X-Forwarded-Proto header from the proxy; otherwise
+		 * keep the historical "http" default for direct/unproxied access.
+		 */
+		if (general != NULL && !ast_strlen_zero(general->external_scheme)) {
+			scheme = general->external_scheme;
+		} else {
+			for (forwarded_proto = headers; forwarded_proto; forwarded_proto = forwarded_proto->next) {
+				if (strcasecmp(forwarded_proto->name, "X-Forwarded-Proto") == 0) {
+					break;
+				}
+			}
+			if (forwarded_proto != NULL && strcasecmp(forwarded_proto->value, "https") == 0) {
+				scheme = "https";
+			}
+		}
+
 		if (host != NULL) {
 			if (prefix != NULL && strlen(prefix) > 0) {
 				ast_json_object_set(
 					obj, "basePath",
-					ast_json_stringf("http://%s%s/ari", host->value,prefix));
+					ast_json_stringf("%s://%s%s/ari", scheme, host->value, prefix));
 			} else {
 				ast_json_object_set(
 					obj, "basePath",
-					ast_json_stringf("http://%s/ari", host->value));
+					ast_json_stringf("%s://%s/ari", scheme, host->value));
 			}
 		} else {
 			/* Without the host, we don't have the basePath */

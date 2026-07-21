@@ -737,6 +737,7 @@ static int ari_conf_init(void)
 	ast_sorcery_register_sf(general, ari_conf_general, auth_realm, auth_realm, "Asterisk REST Interface");
 	ast_sorcery_register_sf(general, ari_conf_general, allowed_origins, allowed_origins, "");
 	ast_sorcery_register_sf(general, ari_conf_general, channelvars, channelvars, "");
+	ast_sorcery_register_sf(general, ari_conf_general, external_scheme, external_scheme, "");
 	ast_sorcery_register_bool(general, ari_conf_general, enabled, enabled, "yes");
 	ast_sorcery_register_cust(general, pretty, "no");
 	ast_sorcery_register_int(general, ari_conf_general, websocket_write_timeout, write_timeout,

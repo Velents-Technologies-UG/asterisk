@@ -8,6 +8,22 @@ enabled = yes       ; When set to no, ARI support is disabled.
 ;auth_realm =       ; Realm to use for authentication. Defaults to Asterisk
 ;                   ; REST Interface.
 ;
+;external_scheme =  ; Scheme ("http" or "https") to report in self-described
+;                   ; basePath URLs (GET /ari/api-docs/resources.json), for
+;                   ; deployments where a reverse proxy terminates TLS in
+;                   ; front of Asterisk and forwards plain HTTP internally.
+;                   ; Without this, Asterisk has no way to know it's being
+;                   ; reached over HTTPS and always reports basePath as
+;                   ; http://<host>/ari, which breaks Swagger/ARI clients
+;                   ; that trust basePath for subsequent requests (they
+;                   ; fetched the doc over https but get told to call back
+;                   ; over http). Leave unset to instead honor a standard
+;                   ; X-Forwarded-Proto header sent by the proxy (the more
+;                   ; portable option, since most reverse proxies set it by
+;                   ; default); set explicitly only if your proxy doesn't
+;                   ; send that header. Has no effect on direct/unproxied
+;                   ; access, which still defaults to "http".
+;
 ; Default write timeout to set on websockets. This value may need to be adjusted
 ; for connections where Asterisk must write a substantial amount of data and the
 ; receiving clients are slow to process the received information. Value is in
