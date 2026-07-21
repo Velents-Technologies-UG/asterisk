@@ -111,7 +111,7 @@ RUN ldconfig
 # username/password inline (the `%`-mangling concern is neutralised
 # by Python's unquote() before the value hits the file).
 COPY configs/samples/extensions_ai_runtime.conf.sample        /etc/asterisk/extensions_ai_runtime.conf
-COPY configs/samples/ari_call_engine.conf.sample              /etc/asterisk/ari.conf
+COPY configs/samples/ari.conf.template                       /etc/asterisk/ari.conf.template
 COPY configs/samples/http_wss.conf.sample                     /etc/asterisk/http.conf
 COPY configs/samples/pjsip_wss_agents.conf.sample             /etc/asterisk/pjsip_wss_agents.conf
 COPY configs/samples/pjsip_trunks.conf.sample                 /etc/asterisk/pjsip_trunks.conf

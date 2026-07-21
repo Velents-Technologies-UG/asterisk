@@ -110,6 +110,17 @@ for tmpl in /etc/asterisk/*.conf.template; do
   log "rendered $tmpl -> $out"
 done
 
+# 3a. Guard: envsubst silently renders an unset var as an empty string,
+# with no error and no log line — a blank ARI password would otherwise
+# boot "successfully" with authentication silently broken. Fail loudly
+# instead if ari.conf ended up with an empty password (i.e. ARI_PASSWORD
+# wasn't set in the pod environment when ari.conf.template was rendered).
+if [ -f /etc/asterisk/ari.conf ] && grep -qE '^password[[:space:]]*=[[:space:]]*$' /etc/asterisk/ari.conf; then
+  log "FATAL: /etc/asterisk/ari.conf rendered with an empty password — ARI_PASSWORD is not set in the pod environment." >&2
+  log "       Asterisk would boot with ARI auth silently broken; set ARI_PASSWORD (K8s Secret) and redeploy." >&2
+  exit 1
+fi
+
 # 3b. Inject external_media_address / external_signaling_address into
 # each PJSIP transport section when ASTERISK_EXTERNAL_MEDIA_ADDRESS is
 # set. Needed when the pod sits behind a NAT/NLB: without this, the

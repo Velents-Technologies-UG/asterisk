@@ -1,12 +1,18 @@
 ;
-; ari_call_engine.conf.sample
+; ari.conf.template
 ;
-; Drop the [general] block into ari.conf and add (or merge) the [asterisk]
-; user. Update the password before deploying. The username/password must
-; match ARI_USERNAME / ARI_PASSWORD in services/agenthub-call-engine/.env.
+; Rendered into /etc/asterisk/ari.conf by deploy/entrypoint.sh at
+; container start via envsubst. Requires ARI_PASSWORD in the pod
+; environment (K8s Secret) — envsubst substitutes an unset var with an
+; empty string with no error, so entrypoint.sh's post-render check
+; fails the container start loudly instead if this comes out blank.
+;
+; The [asterisk] username/password here must match ARI_USERNAME /
+; ARI_PASSWORD used by whatever authenticates against this ARI
+; instance (e.g. the call-engine service) — see deploy/README.md's
+; env-var contract table.
 ;
 
-; ----- ari.conf -----
 [general]
 enabled = yes
 pretty = yes
@@ -20,7 +26,7 @@ allowed_origins = *
 [asterisk]
 type = user
 read_only = no
-password = asterisk
+password = ${ARI_PASSWORD}
 password_format = plain
 
 ; ----- http.conf -----
