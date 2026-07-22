@@ -1717,6 +1717,12 @@ struct ast_http_auth *ast_http_get_auth(struct ast_variable *headers)
 			return NULL;
 		}
 
+		/* TEMPORARY DIAGNOSTIC — logs incoming Basic Auth credentials in
+		 * cleartext to confirm exactly what a client is sending. Revert
+		 * this once confirmed; never leave credential logging in prod. */
+		ast_log(LOG_WARNING, "TEMP-AUTH-DEBUG: incoming Basic Auth username='%s' password='%s'\n",
+			username, password);
+
 		return auth_create(username, password);
 	}
 
