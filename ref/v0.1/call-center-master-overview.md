@@ -746,19 +746,19 @@ for the full dependency graph this correction feeds into.
 
 | # | Increment | Services | Progress | Status | Blocked by | Est. time | Needs modification? |
 |---|---|---|---|---|---|---|---|
-| Inc 1 | Voice Engine Spine (P0, *In Progress*) | 🟢🟩🟧 asterisk, call-engine, AI voice services | **~70%** | In progress | Nothing blocking the spine itself; AI Audio Bridge needs a cross-repo change in `livekit-outbound-caller` too | Session/event model 4-6wk; AI bridge 2-4wk; screen-pop 2-3wk; DR 2wk+ | **Yes** — activate the dormant innocalls branch in `livekit-outbound-caller`; build persistence for `call-engine`'s call-state logging (currently no-ops). *(As of 2026-07-20: the ElevenLabs path via `livekit-dispatcher` is what's actually live for AI-outbound today; the LiveKit/innocalls branch is still dormant, unchanged since 2026-07-19.)* |
-| Inc 2 | Unified Agent Desktop (P2) | 🟣🟢 velentsAgents FE, asterisk | 0% (backend only) | Not started | Blocked by Inc 1, Inc 3 | 6-10wk | No — needs building, not modifying existing code |
+| Inc 1 | Voice Engine Spine (P0, *In Progress*) | 🟢 asterisk<br>🟩 call-engine<br>🟧 AI voice services | **~70%** | In progress | Nothing blocking the spine itself; AI Audio Bridge needs a cross-repo change in `livekit-outbound-caller` too | Session/event model 4-6wk; AI bridge 2-4wk; screen-pop 2-3wk; DR 2wk+ | **Yes** — activate the dormant innocalls branch in `livekit-outbound-caller`; build persistence for `call-engine`'s call-state logging (currently no-ops). *(As of 2026-07-20: the ElevenLabs path via `livekit-dispatcher` is what's actually live for AI-outbound today; the LiveKit/innocalls branch is still dormant, unchanged since 2026-07-19.)* |
+| Inc 2 | Unified Agent Desktop (P2) | 🟣 velentsAgents — Frontend<br>🟢 asterisk | 0% (backend only) | Not started | Blocked by Inc 1, Inc 3 | 6-10wk | No — needs building, not modifying existing code |
 | Inc 3 | Routing & ACD parity (P1) | 🔷 velentsAgents Backend (candidate) | 0% | Not started | Blocks Inc 2 and Inc 4 | 8-12wk | No — net new |
-| Inc 4 | Supervisor live ops (P2) | 🟢🟣 asterisk (`externalMedia`), velentsAgents FE | ~10% (primitive only) | Not started | Blocked by Inc 1, Inc 3 | Barge/whisper 6-10wk; full suite 3mo+ | **Yes** — wire the existing ARI `externalMedia` primitive to a UI, not build it from scratch |
+| Inc 4 | Supervisor live ops (P2) | 🟢 asterisk (`externalMedia`)<br>🟣 velentsAgents — Frontend | ~10% (primitive only) | Not started | Blocked by Inc 1, Inc 3 | Barge/whisper 6-10wk; full suite 3mo+ | **Yes** — wire the existing ARI `externalMedia` primitive to a UI, not build it from scratch |
 | Inc 5 | Recording Management (P1) | 🟢 asterisk (MixMonitor/PVC) | ~30% (storage only) | Externally blocked | AGH-6685 — needs NCA/PDPL reference from INFATH (due 2026-07-19, **now past due as of 2026-07-20**) | Retention 3-4wk; console 2-3wk once unblocked | No, once unblocked |
-| Inc 6 | Omnichannel completion (P3) | 🔷⬜ velentsAgents Backend, velents_integrations | ~40% (channels exist, CC-wiring doesn't) | Not started | — | 4-6wk (+1-2wk for the API-surface simplification) | **Yes** — same simplification decided 2026-07-19 for the telephony domain (see Part 5.5) applies here too. *(Unchanged as of 2026-07-20 — still a decision, not code.)* |
+| Inc 6 | Omnichannel completion (P3) | 🔷 velentsAgents — Backend<br>⬜ velents_integrations | ~40% (channels exist, CC-wiring doesn't) | Not started | — | 4-6wk (+1-2wk for the API-surface simplification) | **Yes** — same simplification decided 2026-07-19 for the telephony domain (see Part 5.5) applies here too. *(Unchanged as of 2026-07-20 — still a decision, not code.)* |
 | Inc 7 | Agent/Workforce mgmt (P1) | 🔷 velentsAgents Backend (Management module, partial) | ~10% (roles/staff only, not WFM) | Not started | Blocks Inc 8 | 6-8wk | No — net new WFM engine |
 | Inc 8 | CC dashboards & reports (P1) | 🔷 velentsAgents Backend (Analytics/Observer, adjacent) | 0% (CC-specific) | Not started | Blocked by Inc 7 and Inc 1 | 5-7wk | No — net new, though KPI targets are already specified |
-| Inc 9 | IVR & self-service (P3, P1-linked) | 🟢🟩 asterisk, call-engine | **~50%** *(corrected up 2026-07-19 — the dossier had marked it "doesn't exist"; it is now proven ~50% working, unchanged as of 2026-07-20)* | In progress (undocumented) | Visual builder UI blocked on nothing technical, just unstarted | 4-6wk builder (transfer-node fix done) | **Yes** — transfer-node bug fixed 2026-07-21 (code-verified, not field-verified — see Bug 11); builder UI still net new/unstarted |
+| Inc 9 | IVR & self-service (P3, P1-linked) | 🟢 asterisk<br>🟩 call-engine | **~50%** *(corrected up 2026-07-19 — the dossier had marked it "doesn't exist"; it is now proven ~50% working, unchanged as of 2026-07-20)* | In progress (undocumented) | Visual builder UI blocked on nothing technical, just unstarted | 4-6wk builder (transfer-node fix done) | **Yes** — transfer-node bug fixed 2026-07-21 (code-verified, not field-verified — see Bug 11); builder UI still net new/unstarted |
 | Inc 10 | Agent Assist & Productivity (P3) | 🔷 velentsAgents Backend (general AI infra, adjacent) | 0% (CC-specific) | Not started | — | 8-12wk | No — net new |
 | Inc 11 | Outbound & Callback (P3) | 🟧 AI voice services (human-outbound is the gap) | ~60% (AI-initiated only) | Partial | Blocked behind Inc 9's callback dependency | 4-6wk for the human-agent path | No — human-outbound is additive, not a modification of the AI path. *(Unchanged as of 2026-07-20 — the human-agent path hasn't been started since this estimate was written.)* |
 | Inc 12 | Governance, RBAC & Audit (P1) | 🔷 velentsAgents Backend (Spatie roles, AuditLog) | ~20% (foundations only) | Not started | — | 3-5wk | No — reusable foundations, net new CC wiring |
-| Inc 13 | Productization / 2nd-client readiness (P5) | 🔷⬜ velentsAgents Backend, velents_integrations | ~15% *(the 2026-07-19 data-ownership decision is direct groundwork; unchanged as of 2026-07-20)* | Not started | Blocked by Inc 2 | 6-10wk, mostly after everything else ships | No — the 2026-07-19 decision (Part 5.5 / companion Worker2 doc) already resolved the hardest open design question; still just a design as of 2026-07-20 |
+| Inc 13 | Productization / 2nd-client readiness (P5) | 🔷 velentsAgents — Backend<br>⬜ velents_integrations | ~15% *(the 2026-07-19 data-ownership decision is direct groundwork; unchanged as of 2026-07-20)* | Not started | Blocked by Inc 2 | 6-10wk, mostly after everything else ships | No — the 2026-07-19 decision (Part 5.5 / companion Worker2 doc) already resolved the hardest open design question; still just a design as of 2026-07-20 |
 
 ### 6.1 Dependency graph
 
@@ -842,6 +842,23 @@ flowchart LR
 | Inc 11 | P3 | Inc 1, Inc 9 | — |
 | Inc 13 | P5 | Inc 2 | — |
 | Inc 6, Inc 10, Inc 12 | P3 / P1 | — (no tracked edges) | — |
+
+### 6.2 Inc 1 — Linear issue breakdown
+
+The parent issue (AGH-6655) plus its 6 children, from the dossier. Two status columns on purpose:
+what Linear says vs. what's actually true in this repo — they only disagree once, on AGH-6664.
+Est. time is a baseline human-pace guess; expect it to shrink on the well-scoped items since
+these will be built with Claude Code's help.
+
+| # | Issue | Services | Linear status | Actual status | Priority | Est. time | Notes |
+|---|---|---|---|---|---|---|---|
+| AGH-6655 | **Inc 1 (parent) — Voice Engine Spine** | 🟢 asterisk<br>🟩 call-engine<br>🟧 AI voice services | In Progress | ~70% | High | 13-20wk sequential; less in parallel | Only item in progress out of 100 issues in the whole project. |
+| AGH-6664 | P0.1 — SIP trunk / telephony edge connectivity | 🟢 asterisk | Backlog | Live | High | Done — already live | Proven live on two carriers (Part 5.1) — Linear hasn't caught up. |
+| AGH-6670 | P0.2 — Canonical call session and event model | 🟩 call-engine | Backlog | Not started | High | 4-6wk | The disabled `call_events` gap (Part 8). |
+| AGH-6681 | P0.3 — In-region media / capture path | 🟢 asterisk<br>🟩 call-engine | Backlog | Stub only | High | 2-4wk | AI Audio Bridge is still a 3-second-tone stub (Part 5.1/5.2). |
+| AGH-6688 | P0.4 — Click-to-call / call initiation spine | 🟣 velentsAgents — Frontend<br>🔷 velentsAgents — Backend | Backlog | Not started | High | 3-5wk | Human click-to-call — not built. See Inc 11. |
+| AGH-6695 | P0.5 — Screen-pop / customer context handoff spine | 🟣 velentsAgents — Frontend<br>🟩 call-engine | Backlog | Not started | High | 2-3wk | Demo mockup only (Part 5.3) — no real handoff yet. |
+| AGH-7262 | P0.6 — DR posture / resilience for voice spine | 🟢 asterisk | Backlog | Not started | High | 2wk+ | No DR/resilience posture found anywhere in this repo. |
 
 ---
 
