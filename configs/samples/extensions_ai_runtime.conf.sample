@@ -53,13 +53,22 @@ exten => _X.,1,NoOp(ai-runtime: unmatched ${EXTEN})
 ; [from-trunk]: inbound calls from PSTN/SIP trunks (Gap A).
 ;------------------------------------------------------------
 [from-trunk]
+; Answer() here, before Stasis(), rather than leaving it to call-engine's
+; ARI answer() call. Some trunks (observed: voylo) send SIP CANCEL for
+; the inbound leg within ~1-2s of the INVITE, well before call-engine's
+; async flow lookup + REST round-trip can land an answer — Asterisk
+; then reports "Channel not found" and the call is lost. A CANCEL only
+; has effect on a still-pending INVITE; once we've sent a local, instant
+; 200 OK here, a same-origin CANCEL is inapplicable and the call stays up.
 exten => _+X.,1,NoOp(inbound ${CALLERID(num)} -> ${EXTEN})
  same => n,Set(__CALLED_DID=${EXTEN})
+ same => n,Answer()
  same => n,Stasis(call-engine,inbound,${EXTEN})
  same => n,Hangup()
 
 exten => _X.,1,NoOp(inbound ${CALLERID(num)} -> ${EXTEN})
  same => n,Set(__CALLED_DID=${EXTEN})
+ same => n,Answer()
  same => n,Stasis(call-engine,inbound,${EXTEN})
  same => n,Hangup()
 
