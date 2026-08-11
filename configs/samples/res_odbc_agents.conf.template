@@ -21,4 +21,15 @@ password => ${ODBC_PASSWORD}
 pre-connect => no
 sanitysql => SELECT 1
 backslash_is_escape => yes
-max_connections => 5
+;
+; Pool safety. This connection is on the inbound SIP path — PJSIP
+; endpoint/aor/auth/identify are all sorcery realtime, so every inbound
+; INVITE does an ODBC lookup during endpoint identification, before a
+; channel exists. A blocked lookup means the INVITE never reaches the
+; dialplan and the call is lost. max_wait_time is the important one: it
+; bounds the wait for a free connection, which is otherwise unbounded.
+;
+max_connections => 20
+max_wait_time => 5
+connect_timeout => 3
+negative_connection_cache => 10

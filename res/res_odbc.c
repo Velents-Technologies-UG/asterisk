@@ -77,6 +77,9 @@ struct odbc_class
 	unsigned int isolation;              /*!< Flags for how the DB should deal with data in other, uncommitted transactions */
 	unsigned int conntimeout;            /*!< Maximum time the connection process should take */
 	unsigned int maxconnections;         /*!< Maximum number of allowed connections */
+	/*! Maximum time, in seconds, to wait for a connection to become available
+	 *  before failing the request. 0 restores the legacy unbounded wait. */
+	unsigned int maxwaittime;
 	/*! When a connection fails, cache that failure for how long? */
 	struct timeval negative_connection_cache;
 	/*! When a connection fails, when did that last occur? */
@@ -564,8 +567,8 @@ static int load_odbc_config(void)
 	struct ast_variable *v;
 	char *cat;
 	const char *dsn, *username, *password, *sanitysql;
-	int enabled, bse, conntimeout, forcecommit, isolation, maxconnections, logging, slowquerylimit;
-	struct timeval ncache = { 0, 0 };
+	int enabled, bse, conntimeout, forcecommit, isolation, maxconnections, maxwaittime, logging, slowquerylimit;
+	struct timeval ncache = { 10, 0 };
 	int preconnect = 0, res = 0, cache_is_queue = 0;
 	struct ast_flags config_flags = { 0 };
 	unsigned int max_cache_size;
@@ -589,10 +592,12 @@ static int load_odbc_config(void)
 			enabled = 1;
 			preconnect = 0;
 			bse = 1;
-			conntimeout = 10;
+			conntimeout = 3;
 			forcecommit = 0;
 			isolation = SQL_TXN_READ_COMMITTED;
-			maxconnections = 1;
+			maxconnections = 20;
+			maxwaittime = 5;
+			ncache = ast_tv(10, 0);
 			logging = 0;
 			slowquerylimit = 5000;
 			cache_is_queue = 0;
@@ -620,14 +625,13 @@ static int load_odbc_config(void)
 				} else if (!strcasecmp(v->name, "connect_timeout")) {
 					if (sscanf(v->value, "%d", &conntimeout) != 1 || conntimeout < 1) {
 						ast_log(LOG_WARNING, "connect_timeout must be a positive integer\n");
-						conntimeout = 10;
+						conntimeout = 3;
 					}
 				} else if (!strcasecmp(v->name, "negative_connection_cache")) {
 					double dncache;
 					if (sscanf(v->value, "%lf", &dncache) != 1 || dncache < 0) {
 						ast_log(LOG_WARNING, "negative_connection_cache must be a non-negative integer\n");
-						/* 5 minutes sounds like a reasonable default */
-						ncache.tv_sec = 300;
+						ncache.tv_sec = 10;
 						ncache.tv_usec = 0;
 					} else {
 						ncache.tv_sec = (int)dncache;
@@ -643,8 +647,13 @@ static int load_odbc_config(void)
 				} else if (!strcasecmp(v->name, "max_connections")) {
 					if (sscanf(v->value, "%30d", &maxconnections) != 1 || maxconnections < 1) {
 						ast_log(LOG_WARNING, "max_connections must be a positive integer\n");
-						maxconnections = 1;
+						maxconnections = 20;
                                         }
+				} else if (!strcasecmp(v->name, "max_wait_time")) {
+					if (sscanf(v->value, "%30d", &maxwaittime) != 1 || maxwaittime < 0) {
+						ast_log(LOG_WARNING, "max_wait_time must be a non-negative integer\n");
+						maxwaittime = 5;
+					}
 				} else if (!strcasecmp(v->name, "logging")) {
 					logging = ast_true(v->value);
 				} else if (!strcasecmp(v->name, "slow_query_limit")) {
@@ -688,6 +697,7 @@ static int load_odbc_config(void)
 				new->conntimeout = conntimeout;
 				new->negative_connection_cache = ncache;
 				new->maxconnections = maxconnections;
+				new->maxwaittime = maxwaittime;
 				new->logging = logging;
 				new->slowquerylimit = slowquerylimit;
 				new->cache_is_queue = cache_is_queue;
@@ -960,11 +970,15 @@ struct odbc_obj *_ast_odbc_request_obj2(const char *name, struct ast_flags flags
 {
 	struct odbc_obj *obj = NULL;
 	struct odbc_class *class;
+	struct timeval wait_start;
+	int timed_out = 0;
 
 	if (!(class = ao2_callback(class_container, 0, aoro2_class_cb, (char *) name))) {
 		ast_debug(1, "Class '%s' not found!\n", name);
 		return NULL;
 	}
+
+	wait_start = ast_tvnow();
 
 	while (!obj) {
 		ast_mutex_lock(&class->lock);
@@ -1012,15 +1026,45 @@ struct odbc_obj *_ast_odbc_request_obj2(const char *name, struct ast_flags flags
 				ast_debug(2, "Created ODBC handle %p on class '%s', new count is %zd\n", obj,
 					name, class->connection_cnt);
 
-			} else {
+			} else if (class->maxwaittime) {
 				/* Otherwise if we're not allowed to create a new one we
 				 * wait for another thread to give up the connection they
 				 * own.
+				 *
+				 * Bounded on purpose. If every connection is checked out by
+				 * a thread that is itself wedged - a query stuck on a
+				 * silently dead socket, say, where no ODBC-level timeout
+				 * applies - an unbounded wait here parks this caller for as
+				 * long as that lasts. Callers include realtime sorcery
+				 * lookups on the inbound SIP path, so that stalls endpoint
+				 * identification and INVITEs never reach the dialplan.
+				 * Failing the request lets the caller surface an error
+				 * instead of hanging. The deadline is absolute so the total
+				 * wait stays bounded across loop iterations.
 				 */
+				struct timeval deadline = ast_tvadd(wait_start, ast_tv(class->maxwaittime, 0));
+				struct timespec ts = {
+					.tv_sec = deadline.tv_sec,
+					.tv_nsec = deadline.tv_usec * 1000,
+				};
+
+				if (ast_cond_timedwait(&class->cond, &class->lock, &ts) == ETIMEDOUT) {
+					timed_out = 1;
+				}
+			} else {
+				/* max_wait_time = 0 keeps the legacy unbounded wait. */
 				ast_cond_wait(&class->cond, &class->lock);
 			}
 
 			ast_mutex_unlock(&class->lock);
+
+			if (timed_out) {
+				ast_log(LOG_WARNING, "Timed out after %u seconds waiting for a connection to "
+					"class '%s'; all %u connections are in use. Failing this request rather "
+					"than blocking the caller indefinitely.\n",
+					class->maxwaittime, name, class->maxconnections);
+				break;
+			}
 
 		} else if (connection_dead(obj, class)) {
 			/* If the connection is dead try to grab another functional one from the

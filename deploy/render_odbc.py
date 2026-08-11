@@ -150,6 +150,21 @@ except (KeyError, OSError) as exc:
 
 # res_odbc.conf — includes URL-decoded creds inline.
 #
+# The four pool-safety settings below exist because this connection sits on
+# the inbound SIP path: PJSIP endpoint/aor/auth/identify are all sorcery
+# realtime (see configs/samples/sorcery_realtime_agents.conf.sample), so every
+# inbound INVITE does an ODBC lookup during endpoint identification, before a
+# channel exists. If that lookup blocks, the INVITE never reaches the dialplan
+# and the caller hangs up long before Asterisk gets around to answering.
+#
+#   max_connections           - a wider pool takes more stuck queries to exhaust
+#   max_wait_time             - bounds the wait for a free connection; without
+#                               it a wedged pool blocks callers indefinitely
+#   connect_timeout           - bounds the connect itself
+#   negative_connection_cache - after a failed connect, fail fast for N seconds
+#                               instead of re-attempting a dead server on every
+#                               single call
+#
 # WARNING about future-proofing: Asterisk's config_options parser
 # historically mangles literal `%` characters in `password =>` lines.
 # We avoid the hazard here because pwd_str is URL-decoded by
@@ -169,7 +184,10 @@ password => {pwd_str}
 pre-connect => yes
 sanitysql => SELECT 1
 backslash_is_escape => yes
-max_connections => 5
+max_connections => 20
+max_wait_time => 5
+connect_timeout => 3
+negative_connection_cache => 10
 """
 _write_and_verify(RES_ODBC_PATH, res_odbc, "[general]")
 
