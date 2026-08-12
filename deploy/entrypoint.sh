@@ -177,12 +177,19 @@ fi
 
 # 4. Runtime dirs - idempotent. PVCs / emptyDirs may mask the image's
 # pre-created versions, so re-create on every start.
+#
+# cdr-csv/ and cdr-custom/ matter more than they look: cdr_csv.c does NOT
+# create its own directory, so without them every single call ends with
+#   cdr_csv.c:275 writefile: Unable to open /var/log/asterisk//cdr-csv//Master.csv
+# and no call detail record is written at all - no billing data, no history.
 for d in \
     /var/spool/asterisk/recording \
     /var/spool/asterisk/voicemail \
     /var/lib/asterisk/sounds/custom \
     /etc/asterisk/keys \
     /var/log/asterisk \
+    /var/log/asterisk/cdr-csv \
+    /var/log/asterisk/cdr-custom \
     /var/run/asterisk
 do
   mkdir -p "$d"
