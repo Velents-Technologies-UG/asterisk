@@ -103,7 +103,17 @@ exten => _agent_X.,1,NoOp(Ringing staff_${EXTEN:6} for queue call)
 ;             can resolve which staff member is dialing
 ;------------------------------------------------------------
 [from-wss-agents-out]
+; Two patterns, same body: `X` in Asterisk dialplan syntax matches digits
+; 0-9 ONLY, not `+` - a bare _X. silently rejects any E.164-formatted dial
+; (e.g. +201121750740) with "extension not found", even though it's a
+; perfectly valid number. _+X. covers the international-dialing case;
+; _X. keeps working for numbers dialed without a leading +.
 exten => _X.,1,NoOp(Outbound from ${CHANNEL(endpoint)} -> ${EXTEN})
+ same => n,Set(__AGENT_ENDPOINT=${CHANNEL(endpoint)})
+ same => n,Set(__DIALED_NUMBER=${EXTEN})
+ same => n,Stasis(call-engine,outbound_human,${EXTEN},${CHANNEL(endpoint)})
+ same => n,Hangup()
+exten => _+X.,1,NoOp(Outbound from ${CHANNEL(endpoint)} -> ${EXTEN})
  same => n,Set(__AGENT_ENDPOINT=${CHANNEL(endpoint)})
  same => n,Set(__DIALED_NUMBER=${EXTEN})
  same => n,Stasis(call-engine,outbound_human,${EXTEN},${CHANNEL(endpoint)})
