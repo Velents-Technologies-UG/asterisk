@@ -139,9 +139,22 @@ exten => _+X.,1,NoOp(Outbound from ${CHANNEL(endpoint)} -> ${EXTEN})
 ; Channel variables (set by call-engine .originate({variables:{...}})):
 ;   TRUNK_ENDPOINT       e.g. 'trunk-out' or 'usa-trunk'
 ;   OUTBOUND_CALLER_ID   E.164 string, may be empty
+;
+; Two patterns, same body, same reason as [from-wss-agents-out]'s pair:
+; `X` matches digits 0-9 ONLY, not `+` - a bare _X. silently rejected any
+; E.164-formatted dial (e.g. +201112235924) with "No such extension/
+; context ... while calling Local channel", so the trunk leg never even
+; originated even though the agent's own leg was already answered and
+; bridged - looked like a live call in the UI with total silence on the
+; PSTN side. _+X. covers the international-dialing case; _X. keeps
+; working for numbers dialed without a leading +.
 ;------------------------------------------------------------
 [from-trunk-out]
 exten => _X.,1,NoOp(Trunk leg via ${TRUNK_ENDPOINT} -> ${EXTEN})
+ same => n,ExecIf($[!${ISNULL(${OUTBOUND_CALLER_ID})}]?Set(CALLERID(num)=${OUTBOUND_CALLER_ID}))
+ same => n,Dial(PJSIP/${EXTEN}@${TRUNK_ENDPOINT},60)
+ same => n,Hangup()
+exten => _+X.,1,NoOp(Trunk leg via ${TRUNK_ENDPOINT} -> ${EXTEN})
  same => n,ExecIf($[!${ISNULL(${OUTBOUND_CALLER_ID})}]?Set(CALLERID(num)=${OUTBOUND_CALLER_ID}))
  same => n,Dial(PJSIP/${EXTEN}@${TRUNK_ENDPOINT},60)
  same => n,Hangup()
