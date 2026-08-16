@@ -79,9 +79,20 @@ exten => _X.,1,NoOp(inbound ${CALLERID(num)} -> ${EXTEN})
 ; Originated by the call-engine as Local/agent_<staff_id>@from-agents/n.
 ; This is the INBOUND ring target, NOT where outbound from agents
 ; goes; outbound is in [from-wss-agents-out] below.
+;
+; Pattern is _agent_. (not _agent_X.) - X in Asterisk dialplan pattern
+; syntax matches digits 0-9 ONLY. call-engine's AgentSipStore.provisionAgent()
+; accepts an arbitrary string agentId (e.g. a tenant-scoped slug like
+; "velentsagents_testCallCenter_2", not necessarily a bare numeric staff
+; id), so a digits-only pattern silently rejected every such agent with
+; "No such extension/context ... while calling Local channel" - breaking
+; every feature that rings an agent this way: transfer, conference,
+; consult, snoop, and queue-routed inbound alike. `.` matches one or
+; more characters of any kind, so it covers both plain numeric ids and
+; string slugs.
 ;------------------------------------------------------------
 [from-agents]
-exten => _agent_X.,1,NoOp(Ringing staff_${EXTEN:6} for queue call)
+exten => _agent_.,1,NoOp(Ringing staff_${EXTEN:6} for queue call)
  same => n,Dial(PJSIP/staff_${EXTEN:6},20)
  same => n,Hangup()
 
