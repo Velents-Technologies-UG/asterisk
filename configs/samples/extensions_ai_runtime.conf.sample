@@ -80,19 +80,33 @@ exten => _X.,1,NoOp(inbound ${CALLERID(num)} -> ${EXTEN})
 ; This is the INBOUND ring target, NOT where outbound from agents
 ; goes; outbound is in [from-wss-agents-out] below.
 ;
-; Pattern is _agent_. (not _agent_X.) - X in Asterisk dialplan pattern
-; syntax matches digits 0-9 ONLY. call-engine's AgentSipStore.provisionAgent()
-; accepts an arbitrary string agentId (e.g. a tenant-scoped slug like
-; "velentsagents_testCallCenter_2", not necessarily a bare numeric staff
-; id), so a digits-only pattern silently rejected every such agent with
-; "No such extension/context ... while calling Local channel" - breaking
-; every feature that rings an agent this way: transfer, conference,
-; consult, snoop, and queue-routed inbound alike. `.` matches one or
-; more characters of any kind, so it covers both plain numeric ids and
-; string slugs.
+; Pattern is _age[n]t_. (not _agent_X. or a bare _agent_.) - two distinct
+; Asterisk pattern gotchas stacked here:
+;   1. X in Asterisk dialplan pattern syntax matches digits 0-9 ONLY.
+;      call-engine's AgentSipStore.provisionAgent() accepts an arbitrary
+;      string agentId (e.g. a tenant-scoped slug like
+;      "velentsagents_testCallCenter_2", not necessarily a bare numeric
+;      staff id), so a digits-only pattern silently rejected every such
+;      agent with "No such extension/context ... while calling Local
+;      channel" - breaking every feature that rings an agent this way:
+;      transfer, conference, consult, snoop, and queue-routed inbound
+;      alike. `.` matches one or more characters of any kind, fixing
+;      that part - but:
+;   2. Asterisk's pattern matcher treats the letters x/z/n (lowercase
+;      too, not just X/Z/N) as digit-class wildcards ANYWHERE they
+;      appear in a pattern, not just as literal characters - "agent"
+;      contains a literal 'n', which Asterisk silently reinterprets as
+;      [2-9], so a bare _agent_. pattern never matches the literal
+;      word "agent" at all (confirmed via `dialplan add extension` +
+;      `dialplan show` isolation testing - "flow"/"staf"/"hello" all
+;      matched fine as literal prefixes in the same position; "agent"
+;      and "xyz" never did, for exactly this reason). Wrapping the n in
+;      a single-character class - [n] - forces literal matching,
+;      bypassing the wildcard reinterpretation, same as it would for
+;      any literal x/z/n a future pattern needs here.
 ;------------------------------------------------------------
 [from-agents]
-exten => _agent_.,1,NoOp(Ringing staff_${EXTEN:6} for queue call)
+exten => _age[n]t_.,1,NoOp(Ringing staff_${EXTEN:6} for queue call)
  same => n,Dial(PJSIP/staff_${EXTEN:6},20)
  same => n,Hangup()
 
