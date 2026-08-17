@@ -135,14 +135,24 @@ All three should be `Running`.
 
 ## Call-engine control API ingress (cross-cluster)
 
-The call-engine runs as a Python sidecar process inside the Asterisk
+The control API runs as a Python sidecar process inside the Asterisk
 pod (`deploy/control_api.py`, launched by `entrypoint.sh`). It binds
-**TCP 8092** for `/control/*` and `/healthz`. It is a sensitive admin
-surface: it will provision PJSIP trunks, disposition calls, drive the
-dialplan over ARI, and expose operational telemetry. The current
-checked-in version is a stub: `/healthz` works and bearer auth is
-enforced on `/control/*`, but the real ARI/AMI plumbing for each
-endpoint lands incrementally.
+**TCP 8092** for `/control/*`, `/healthz` and `/readyz`. It is a
+sensitive admin surface: it provisions PJSIP trunks, providers and
+trunk accounts, issues per-agent SIP credentials, originates calls, and
+reloads Asterisk modules.
+
+This is **fully implemented**, not a stub — every route in the table
+below performs real Postgres writes and/or ARI calls. It is also the
+**live** SIP-trunk CRUD path in prod: `CALL_ENGINE_CONTROL_URL` points
+at `http://asterisk:8092` (this pod), not at the call-engine pod. The
+`call-engine` repo's `src/control-api.js` carries a smaller, older,
+**tenant-blind** `/control/sip/*` block that this supersedes — see the
+reconciliation table in the repo-root `CLAUDE.md` before wiring
+anything against either.
+
+Note that everything on this port is `/control/*`-only: any other path,
+`/ari/*` included, gets a flat 404. ARI itself is on **8088**.
 
 Required env in the pod spec:
 
@@ -526,5 +536,10 @@ short message. The call-engine should respond with:
 - `configs/samples/README.call-engine.md` — install steps for a
   non-containerised host. The Asterisk-side docs there explain each
   config fragment we ship.
-- `agent-hub/services/agenthub-call-engine/README.md` — companion
-  service that talks ARI to this Asterisk.
+- the standalone **`call-engine`** repo (sibling checkout `../call-engine`)
+  — companion service that talks ARI to this Asterisk. Its `CLAUDE.md` is
+  the current map; its `README.md` predates the queue/gateway/flow-runner
+  modules. The old `agent-hub/services/agenthub-call-engine/` path is dead.
+- the repo-root `CLAUDE.md` — Velents-owned surface of this tree, the two
+  Asterisk dialplan pattern-matching gotchas, and the control-api
+  reconciliation (this sidecar vs. call-engine's Node one).
