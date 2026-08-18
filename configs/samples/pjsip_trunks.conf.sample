@@ -27,6 +27,20 @@
 type=transport
 protocol=udp
 bind=0.0.0.0:5060
+; The NLB in front of this pod has NO UDP listener on 5060 - external
+; SIP/UDP arrives on 5062 and is forwarded to 5060 (5060 itself is
+; taken by the TCP listener; a single NLB port can't carry both
+; protocols until the LB controller supports TCP_UDP listeners - see
+; devops asterisk values.yaml). Without this override, the Contact
+; header in our 200 OKs advertises :5060, so the carrier's in-dialog
+; requests (the ACK for our 200 OK, the BYE when the caller hangs up)
+; are silently dropped at the NLB. Missing ACK => Asterisk retransmits
+; the 200 OK and tears the call down at 64*T1 = 32s ("inbound calls
+; die at ~30s", confirmed live 2026-08-18 with duplicated 200 OKs in
+; every inbound trace); missing BYE => the agent side never learns the
+; caller hung up. Only meaningful once external_signaling_address is
+; injected at boot (entrypoint.sh); harmless without it.
+external_signaling_port=5062
 ; Transport-level source ACL, evaluated before endpoint identification.
 ; This matters twice over: (1) endpoint identification on this
 ; deployment is realtime/ODBC, so every packet that gets past the
