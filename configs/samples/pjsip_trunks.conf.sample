@@ -14,22 +14,49 @@
 ; from pjsip_wss_agents.conf.sample and the TLS transport from
 ; pjsip_transport_tls.conf.template.
 ;
+; NOTE for editors: deploy/entrypoint.sh sed-injects
+; external_media_address/external_signaling_address lines DIRECTLY
+; under each [transport-*] header at boot. Keep the deny/permit lines
+; below the header (anywhere in the section is fine - the injection
+; targets the header line itself), and never hand-add an
+; external_media_address line here (it would defeat the injection's
+; per-file idempotency check).
+;
 
 [transport-udp]
 type=transport
 protocol=udp
 bind=0.0.0.0:5060
-; Restrict source ranges in production. Trunk providers publish their
-; signalling IPs - put them in a deny/permit pair below.
-; deny=0.0.0.0/0
-; permit=54.172.60.0/23   ; example: Twilio US East
+; Transport-level source ACL, evaluated before endpoint identification.
+; This matters twice over: (1) endpoint identification on this
+; deployment is realtime/ODBC, so every packet that gets past the
+; transport costs a Postgres round-trip on the inbound SIP path; and
+; (2) the NLB's public IPs get hammered around the clock by internet
+; SIP scanners (hundreds of REGISTER/INVITEs a minute from random
+; sources, observed live 2026-08-18 drowning out real call traces).
+; deny-then-permit: everything is denied unless a permit matches.
+;   167.172.191.79 - Voylo signalling (resolved voylo.ai; their
+;                    sip.uae.voylo.ai is NXDOMAIN - see
+;                    ps_endpoints.outbound_proxy). Their monitoring
+;                    OPTIONS pings come from this same IP.
+;   10.0.0.0/8     - in-VPC (NLB health checks arrive with their
+;                    private source preserved under target-type=ip).
+; Adding a new trunk carrier => add its published signalling range
+; here BEFORE pointing the carrier at this deployment, or its INVITEs
+; are silently dropped at the transport.
+deny=0.0.0.0/0
+permit=167.172.191.79/32
+permit=10.0.0.0/8
 
 [transport-tcp]
 type=transport
 protocol=tcp
 bind=0.0.0.0:5060
-; Same deny/permit guidance as transport-udp above. Carriers that
-; only accept TCP (e.g. innocalls cu622.sip.innocalls.net:50760) use
-; this transport; the source port the kernel picks for outbound is
-; ephemeral, but binding here gives the transport a stable name that
-; the realtime ps_endpoints.transport column can reference.
+; Same ACL rationale as transport-udp above. Carriers that only accept
+; TCP (e.g. innocalls cu622.sip.innocalls.net:50760) use this
+; transport - innocalls' resolved IP must be added as a permit before
+; that trunk is exercised (hostname deliberately not pre-resolved here;
+; resolve at rollout time, DNS-pinned IPs go stale).
+deny=0.0.0.0/0
+permit=167.172.191.79/32
+permit=10.0.0.0/8
