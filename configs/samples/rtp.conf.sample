@@ -6,11 +6,25 @@
 ; any port in 10000-20000 and most RTP packets get dropped at the
 ; NLB — symptom is "call connects, no audio one or both ways".
 ;
-; Capacity: 4 ports = 1-2 concurrent calls (each call needs one
-; RTP + one RTCP port, RTCP-mux halves that). The range was trimmed
-; from 50 because AWS's default 60-rules-per-SG quota was hit when
-; the NLB tried to register 50 listeners (each listener => 1 SG
-; rule for health-check + 1 per pod-target). To raise the ceiling,
+; Capacity: Asterisk binds a PORT PAIR per RTP instance (RTP on the
+; even port, RTCP on the odd one) at allocation time - rtcp_mux only
+; changes what is signalled in SDP, not what is reserved. So the
+; usable figure is (rtpend - rtpstart + 1) / 2 concurrent RTP
+; instances, and one leg of one call is one instance.
+;
+; That makes 4 ports = 2 instances = ONE two-party call, with nothing
+; left for a third leg. Transfer, consult and conference each need a
+; third instance, so with 4 ports they failed 100% of the time while
+; a call was up: "rtp_allocate_transport: Oh dear... we couldn't
+; allocate a port" -> "create_local_sdp: Couldn't add sdp streams" ->
+; the agent's phone never rang and call-engine still reported the
+; transfer as queued. Confirmed live 2026-08-20 (channels -38..-3b).
+;
+; 30 ports = 15 instances = ~5 concurrent three-party calls. The range
+; was previously trimmed from 50 because AWS's default 60-rules-per-SG
+; quota was hit when the NLB tried to register 50 listeners (each
+; listener => 1 SG rule for health-check + 1 per pod-target); 30 RTP
+; listeners + 1 for SIP stays comfortably under that. To go beyond ~50,
 ; request a service-quota increase on EC2-VPC
 ; "Inbound or outbound rules per security group" first, then widen
 ; both this range AND the NLB Service's port list together; the two
@@ -22,7 +36,7 @@
 
 [general]
 rtpstart=10000
-rtpend=10003
+rtpend=10029
 
 ; STUN server for WebRTC ICE candidate discovery. Without this,
 ; ICE-enabled endpoints (ps_endpoints.ice_support=yes — every WSS
