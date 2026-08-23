@@ -89,3 +89,95 @@ In `asterisk deploy/control_api.py` endpoint provisioning + `Dockerfile.prod`:
 ARI Stasis reconnection loop; the routing decision that consumes `sipStatus`;
 outbound trunk **selection**. Build the in-repo half (data, endpoints, config) and
 hand these off to the call-engine.
+
+## Trunk failover & DR posture (AGH-7262)
+
+**State of play: failover-READY, not automatic.** No secondary trunk or carrier is
+contracted, so nothing consults trunk health at originate time and no code path
+switches carriers on its own. Everything below is either shipped detection or a
+procedure a human runs. Do not read `priority` on a trunk as "the system will fail
+over" — it records the intended order for the manual procedure and nothing more.
+When a second trunk exists, build the deferred design at the end of this section
+and delete this paragraph.
+
+### What detects a problem, and where it surfaces
+
+| Layer | Mechanism | Where it shows |
+|---|---|---|
+| Reachability sweep | `control_api.py` status feeder, every ~5s: `pjsip show endpoints/identifies/aors` → `cx:trunks:status:{tenantId}` + `cx:trunks:checked_at` | Trunk health card, trunks list |
+| Staleness | `trunkPosture()` demotes a `connected` posture to `degraded` when the last sweep is older than the freshness window | Health card badge |
+| Drop / restore edge | Feeder POSTs `Webhook/CallEngine/TrunkStatusChanged` (bearer `CALL_ENGINE_WEBHOOK_SECRET`) | Audit log (`TRUNK_CONNECTION_LOST` / `_RESTORED`), in-app notification to Owners+Admins, Owner email when `TRUNK_ALERT_MAIL_ENABLED` |
+| Outbound attempt while down | Server-side guard on the API path; posture pre-check on the header dialpad | Toast to the agent, not a failed call |
+| Inbound while the engine is down | `[from-trunk]` plays an all-circuits-busy treatment instead of falling to `Hangup()` | The caller hears something |
+
+**The honest boundary.** When the trunk's own REGISTER lapses, inbound INVITEs never
+reach us — what the caller hears is the carrier's, and no configuration here changes
+it. The treatments above cover the cases we do control: engine down, flow crash,
+unmapped DID, outbound leg failure. Say this plainly to anyone reading AC-1.1.4 as a
+promise about the dead-air case.
+
+### Manual switch-over procedure
+
+Preconditions: a second trunk exists in Settings → CS Agent → Trunks, is `enabled`,
+and has been proved with a test call (see step 5 — prove it BEFORE you need it).
+
+1. **Confirm the failure is the trunk.** Health card posture `disconnected`, and the
+   audit log shows `TRUNK_CONNECTION_LOST` for the trunk you expect. A `degraded`
+   posture with a stale `checked_at` means the *feeder* is down, not the trunk —
+   check the Asterisk pod before touching carrier config.
+2. **Raise the standby's precedence.** Set the standby trunk's priority below the
+   failed one's (lower = preferred). This is recorded as `TRUNK_CONFIG_CHANGED` in
+   the audit log; it does not itself move any traffic.
+3. **Repoint outbound.** Outbound trunk choice comes from the tenant's
+   `outbound_rules` rows, each naming a `trunk_endpoint` — priority is not consulted.
+   Update the matching rules to the standby's endpoint id. Until this step, outbound
+   still tries the dead trunk.
+4. **Inbound is the carrier's to move.** Either the carrier re-points the DID at the
+   standby, or both trunks register and they load-share. There is no switch on our
+   side; if the numbers are contracted to a single carrier, inbound stays down until
+   they act. Know this before the incident, not during it.
+5. **Prove it.** One inbound call to a DID that reaches routing, one outbound call
+   through the standby. Confirm the health card reads `connected` and the audit trail
+   shows the config change and the restore.
+6. **Failback** reverses steps 2–3 after a `TRUNK_CONNECTION_RESTORED`. Do not
+   failback on a single restore event — wait out one full staleness window so a
+   flapping registration does not move traffic twice.
+
+### RPO / RTO
+
+- **Detection:** ≤ ~5s (feeder sweep) + one webhook round trip.
+- **RTO, outbound:** human-bound — the `outbound_rules` edit and its verification
+  call. There is no automatic path; budget minutes, not seconds.
+- **RTO, inbound:** carrier-bound, and outside our control entirely.
+- **RPO, call records:** call rows and events are written per transition, so at most
+  the in-flight transition is lost.
+- **RPO, recordings:** see the recording pipeline's upload queue — a storage outage
+  queues uploads and alerts rather than writing out-of-region, so the exposure is
+  the un-uploaded tail on the Asterisk pod's spool. That pipeline, not this section,
+  owns the guarantee.
+
+### Deferred design — build this when a second trunk is contracted
+
+- `outbound-router` consults trunk health before returning a rule, and retries the
+  next-priority enabled trunk when placement fails. Today it returns the first
+  matching enabled rule regardless of reachability.
+- A `trunk.failover.switched` event on the bus so the switch is visible in the
+  supervisor surfaces and the audit trail without a config diff.
+- Inbound: dual-REGISTER both trunks, or a documented carrier DID re-point SLA.
+- Provider-IP-allowlist carriers (Twilio/Telnyx style, no REGISTER) are out of the
+  current trunk model — `ps_identify` has no writer here. Adding a non-registering
+  carrier is a prerequisite change, not a config change.
+
+### Go-live gates that invalidate a failover test until fixed
+
+- **RTP range must move in lockstep** across `configs/samples/rtp.conf.sample` and
+  both helm values files (§Ops-1). A failover test that "passes" while the range
+  caps concurrency at a couple of legs has proved nothing about capacity.
+- **opus** must be enabled in the build *and* the endpoint allow-list together, or
+  neither (§Asterisk provisioning) — a half-applied change breaks working alaw calls.
+- **K8s probes + an ARI-aware `/healthz`** (§Ops-3), or a half-up pod stays in the
+  load-balancer pool and looks like a trunk problem.
+- A DNS resolution check on the trunk's `serverUri` belongs in the health sweep: a
+  provider-supplied hostname that NXDOMAINs presents exactly like a dead trunk, and
+  cost real debugging time before. Not built; worth adding with the first
+  non-registering carrier.

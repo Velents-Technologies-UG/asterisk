@@ -185,6 +185,13 @@ CREATE TABLE IF NOT EXISTS sip_trunks (
     expiration_seconds     INTEGER NOT NULL DEFAULT 3600,
     description            TEXT,
     enabled                BOOLEAN NOT NULL DEFAULT TRUE,
+    -- Failover ORDER, not a failover mechanism (AGH-7262): lower =
+    -- preferred. Nothing reads it at originate time — only one trunk is
+    -- contracted, so there is nothing to fail over TO, and the
+    -- switch-over is a manual runbook procedure. The column exists so
+    -- the operator's stated preference is recorded and ordered now,
+    -- rather than being invented at the moment a second trunk lands.
+    priority               INTEGER NOT NULL DEFAULT 100,
     created_at             TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at             TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     -- (tenant_id, id) lets tenants share a trunk slug; the PJSIP
@@ -200,6 +207,8 @@ CREATE TABLE IF NOT EXISTS sip_trunks (
         CHECK (channel_limit BETWEEN 1 AND 1000),
     CONSTRAINT sip_trunks_expiration_range
         CHECK (expiration_seconds BETWEEN 60 AND 86400),
+    CONSTRAINT sip_trunks_priority_range
+        CHECK (priority BETWEEN 1 AND 1000),
     CONSTRAINT sip_trunks_ip_required_for_ip_trunk
         CHECK (register_enabled OR carrier_ip IS NOT NULL)
 );
@@ -227,6 +236,31 @@ BEGIN
     END IF;
 END $$;
 CREATE INDEX IF NOT EXISTS sip_trunks_tenant_idx ON sip_trunks(tenant_id);
+"""
+
+# Migration patch for databases that predate the failover-priority column.
+# Same shape as the tenant migration above, and applied at every sidecar
+# boot for the same reason: this store is the sidecar's, and the
+# call-engine pod has no migration step that could ever run against it.
+# The CHECK is guarded because ADD CONSTRAINT — unlike ADD COLUMN — has no
+# IF NOT EXISTS form and would abort the whole patch on the second boot.
+_DDL_TRUNKS_PRIORITY_MIGRATION = r"""
+ALTER TABLE sip_trunks ADD COLUMN IF NOT EXISTS priority INTEGER;
+UPDATE sip_trunks SET priority = 100 WHERE priority IS NULL;
+ALTER TABLE sip_trunks ALTER COLUMN priority SET NOT NULL;
+ALTER TABLE sip_trunks ALTER COLUMN priority SET DEFAULT 100;
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'sip_trunks_priority_range'
+          AND conrelid = 'sip_trunks'::regclass
+    ) THEN
+        ALTER TABLE sip_trunks
+            ADD CONSTRAINT sip_trunks_priority_range
+            CHECK (priority BETWEEN 1 AND 1000);
+    END IF;
+END $$;
 """
 
 # Stock Asterisk realtime tables size *.id at VARCHAR(40), which is
@@ -413,9 +447,13 @@ def bootstrap(db_conn_factory) -> None:
             # tenant_id column. Safe on a fresh DB too — every step is
             # IF NOT EXISTS / IF the old PK is still in place.
             cur.execute(_DDL_TRUNKS_TENANT_MIGRATION)
+            # Failover-priority column for sip_trunks predating it. Same
+            # every-boot, IF-NOT-EXISTS contract as the tenant migration.
+            cur.execute(_DDL_TRUNKS_PRIORITY_MIGRATION)
             cur.execute(_SEED_INNOCALLS)
         log.info(
-            "sip_store.bootstrap: sip_trunks ensured + tenant_id migration applied"
+            "sip_store.bootstrap: sip_trunks ensured + tenant_id and "
+            "priority migrations applied"
         )
     except Exception as exc:
         log.error("sip_store.bootstrap (trunks/providers/accounts) failed: %s", exc)
@@ -1231,6 +1269,22 @@ def validate_trunk_input(body: dict, partial: bool = False) -> tuple[dict, Optio
             raise StoreError("expirationSeconds must be 60..86400")
         out["expiration_seconds"] = es
 
+    if "priority" in body or not partial:
+        # An omitted priority takes the column default, but 0 or "high" is
+        # a value the operator typed and got wrong — reject it rather than
+        # substituting 100, which would read back as a preference nobody
+        # expressed (channelLimit's `or 50` above has exactly that flaw).
+        v = body.get("priority")
+        if v is None:
+            v = 100
+        try:
+            pr = int(v)
+        except (TypeError, ValueError):
+            raise StoreError("priority must be an integer")
+        if not 1 <= pr <= 1000:
+            raise StoreError("priority must be 1..1000")
+        out["priority"] = pr
+
     if "enabled" in body:
         out["enabled"] = _bool_or_default(body.get("enabled"), True)
 
@@ -1255,7 +1309,7 @@ _TRUNK_COLUMNS = (
     "from_user", "from_domain", "realm",
     "register_enabled", "carrier_ip",
     "channel_limit", "expiration_seconds",
-    "description", "enabled", "created_at", "updated_at",
+    "description", "enabled", "priority", "created_at", "updated_at",
 )
 
 
@@ -1287,6 +1341,10 @@ def _row_to_trunk(row) -> dict:
         "expirationSeconds": row["expiration_seconds"],
         "description":      row["description"],
         "enabled":          bool(row["enabled"]),
+        # Failover order only — see the column comment on _DDL_TRUNKS.
+        # Serialized so the UI can show and edit the recorded preference;
+        # no caller treats it as a routing decision.
+        "priority":         row["priority"],
         "createdAt":        row["created_at"].isoformat() if row["created_at"] else None,
         "updatedAt":        row["updated_at"].isoformat() if row["updated_at"] else None,
     }
@@ -1310,8 +1368,13 @@ def list_trunks(db_conn_factory, tenant_id: str) -> list[dict]:
     with db_conn_factory() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
             cur.execute(
+                # Preferred trunk first, so the list reads in the order the
+                # operator would switch over in. id breaks the tie the
+                # shared default 100 creates, keeping the order stable
+                # across calls (name used to do that job alone).
                 f"SELECT {', '.join(_TRUNK_COLUMNS)} "
-                "FROM sip_trunks WHERE tenant_id = %s ORDER BY name, id",
+                "FROM sip_trunks WHERE tenant_id = %s "
+                "ORDER BY priority ASC, id",
                 (tenant_id,),
             )
             return [_row_to_trunk(r) for r in cur.fetchall()]
@@ -1441,14 +1504,14 @@ def upsert_trunk(
                      from_user, from_domain, realm,
                      register_enabled, carrier_ip,
                      channel_limit, expiration_seconds,
-                     description, enabled, updated_at)
+                     description, enabled, priority, updated_at)
                 VALUES (%(tenant_id)s, %(id)s, %(name)s, %(address)s, %(protocol)s,
                         %(media_encryption)s, %(auth_username)s,
                         %(auth_password_enc)s, %(numbers)s,
                         %(from_user)s, %(from_domain)s, %(realm)s,
                         %(register_enabled)s, %(carrier_ip)s,
                         %(channel_limit)s, %(expiration_seconds)s,
-                        %(description)s, %(enabled)s, NOW())
+                        %(description)s, %(enabled)s, %(priority)s, NOW())
                 ON CONFLICT (tenant_id, id) DO UPDATE SET
                     name               = EXCLUDED.name,
                     address            = EXCLUDED.address,
@@ -1466,6 +1529,7 @@ def upsert_trunk(
                     expiration_seconds = EXCLUDED.expiration_seconds,
                     description        = EXCLUDED.description,
                     enabled            = EXCLUDED.enabled,
+                    priority           = EXCLUDED.priority,
                     updated_at         = NOW()
                 """,
                 {
@@ -1487,6 +1551,7 @@ def upsert_trunk(
                     "expiration_seconds": cols["expiration_seconds"],
                     "description":        cols.get("description"),
                     "enabled":            cols.get("enabled", True),
+                    "priority":           cols["priority"],
                 },
             )
 

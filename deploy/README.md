@@ -273,7 +273,7 @@ verify on a live pod when a call doesn't connect.
 | # | From | To | Why it matters |
 |---|------|----|----|
 | 1 | `ps_endpoints.id` | trunk id from POST body | Dialplan `[from-trunk-out]` (`configs/samples/extensions_ai_runtime.conf.sample:113`) dials `PJSIP/${EXTEN}@${TRUNK_ENDPOINT}` — the endpoint name has to match the trunk id the call-engine puts in `TRUNK_ENDPOINT`. |
-| 2 | `ps_endpoints.context` | `from-trunk` (or `TRUNK_INBOUND_CONTEXT`) | Inbound INVITEs from the provider land in dialplan `[from-trunk]` (`extensions_ai_runtime.conf.sample:55`), which fires `Stasis(call-engine, inbound, ${EXTEN})`. Wrong context = inbound calls dropped. |
+| 2 | `ps_endpoints.context` | `from-trunk` (or `TRUNK_INBOUND_CONTEXT`) | Inbound INVITEs from the provider land in dialplan `[from-trunk]` (that section of `configs/samples/extensions_ai_runtime.conf.sample` — cited by name, not line number, because the line moved the first time the file grew a header), which fires `Stasis(call-engine, inbound, ${EXTEN})`. Wrong context = inbound calls dropped. |
 | 3 | `ps_endpoints.aors` | trunk id (same string) | The endpoint resolves contact info via the matching `ps_aors` row. |
 | 4 | `ps_endpoints.auth` + `outbound_auth` | `<trunk-id>-auth` | Asterisk authenticates inbound (challenge) and outbound (sending INVITE) via this auth row. |
 | 5 | `ps_aors.contact` | trunk `serverUri` | When Asterisk dials out via `PJSIP/${EXTEN}@<trunk_id>`, it appends EXTEN to this contact. |
