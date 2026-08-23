@@ -69,6 +69,13 @@ STATUS_FEEDER_AGENTS_KEY = os.environ.get("STATUS_FEEDER_AGENTS_KEY", "cx:agents
 STATUS_FEEDER_CHECKED_AT_KEY = os.environ.get(
     "STATUS_FEEDER_CHECKED_AT_KEY", "cx:trunks:checked_at"
 )
+# Server-side trunk drop/restore alerts (AGH-6664). When a known trunk
+# crosses online<->offline the feeder POSTs TrunkStatusChanged here, so
+# the alert fires with no browser open (the previously shipped alert was
+# a client-side hook — no admin on the page meant no alert ever fired).
+# Unset URL = feature off; the feeder skips silently.
+TRUNK_STATUS_WEBHOOK_URL = os.environ.get("TRUNK_STATUS_WEBHOOK_URL", "").strip()
+CALL_ENGINE_WEBHOOK_SECRET = os.environ.get("CALL_ENGINE_WEBHOOK_SECRET", "").strip()
 MAX_BODY_BYTES = 64 * 1024
 
 # ASTERISK_EXTERNAL_IP is the master NAT switch. If it's unset but a public
@@ -829,7 +836,7 @@ def _state_to_status(state):
 
 
 def _build_trunk_id_reverse_map():
-    """Map PJSIP realtime endpoint ids back to user-facing trunk slugs.
+    """Map PJSIP realtime endpoint ids back to their sip_trunks rows.
 
     Realtime ps_endpoints.id for trunks is now `t<tenant_prefix>_<slug>`
     (the namespaced form sip_store.pjsip_trunk_endpoint_id produces),
@@ -837,20 +844,29 @@ def _build_trunk_id_reverse_map():
     (`innov2`, not `tdefault_innov2`). Without the reverse, the
     trunk badge in the UI stays grey/"unknown" even when the trunk
     is happily registered. Query sip_trunks once per feeder tick and
-    return realtime_id -> slug.
+    return realtime_id -> (tenant_id, slug, name) — the tenant places
+    the slug in the right per-tenant status hash, the name is what the
+    drop/restore webhook calls the trunk in words.
+
+    Returns None when the store is unavailable or the query fails —
+    deliberately distinct from {} (no trunks): the feeder treats the
+    map as the roster of trunks that exist, and a transient DB error
+    must not read as "every trunk was deleted".
     """
     if not HAS_SIP_STORE or not _db_enabled():
-        return {}
+        return None
     try:
         with _db_conn() as conn, conn.cursor() as cur:
-            cur.execute("SELECT tenant_id, id FROM sip_trunks")
+            cur.execute("SELECT tenant_id, id, name FROM sip_trunks")
             rows = cur.fetchall()
     except Exception as exc:  # noqa: BLE001
         log.warning("status feeder: trunk reverse map query failed: %s", exc)
-        return {}
+        return None
     out = {}
-    for tenant_id, slug in rows:
-        out[sip_store.pjsip_trunk_endpoint_id(tenant_id, slug)] = slug
+    for tenant_id, slug, name in rows:
+        out[sip_store.pjsip_trunk_endpoint_id(tenant_id, slug)] = (
+            tenant_id, slug, name,
+        )
     return out
 
 
@@ -932,6 +948,42 @@ def _user_facing_agent_id(pjsip_id):
     return f"staff_{m.group('rest')}"
 
 
+def _post_trunk_status_webhook(tenant_id, trunk_id, trunk_name, status):
+    """Notify Laravel that a known trunk crossed online<->offline.
+
+    One attempt with a 3s cap, failures logged and swallowed — the
+    status feeder must keep sweeping regardless of what the webhook
+    endpoint is doing. An unset URL means the feature is off (deploys
+    without the Laravel half stay quiet instead of spamming errors).
+    """
+    if not TRUNK_STATUS_WEBHOOK_URL:
+        return
+    body = json.dumps({
+        "tenantId": tenant_id,
+        "trunkId": trunk_id,
+        "trunkName": trunk_name,
+        "status": status,
+        "at": datetime.now(timezone.utc).isoformat(),
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        TRUNK_STATUS_WEBHOOK_URL, data=body, method="POST",
+    )
+    req.add_header("Content-Type", "application/json")
+    req.add_header("Authorization", f"Bearer {CALL_ENGINE_WEBHOOK_SECRET}")
+    try:
+        with urllib.request.urlopen(req, timeout=3):
+            pass
+        log.info(
+            "trunk status webhook: tenant=%s trunk=%s -> %s",
+            tenant_id, trunk_id, status,
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "trunk status webhook (tenant=%s trunk=%s -> %s) failed: %s",
+            tenant_id, trunk_id, status, exc,
+        )
+
+
 def _status_feeder_loop(stop_event):
     if not REDIS_URL:
         log.info("status feeder: REDIS_URL unset; skipping")
@@ -949,9 +1001,23 @@ def _status_feeder_loop(stop_event):
         log.error("status feeder: cannot connect to %s: %s", REDIS_URL, exc)
         return
     log.info(
-        "status feeder started: interval=%ds trunks_key=%s agents_key=%s",
+        "status feeder started: interval=%ds trunks_key=%s agents_key=%s webhook=%s",
         STATUS_FEEDER_INTERVAL, STATUS_FEEDER_KEY, STATUS_FEEDER_AGENTS_KEY,
+        "on" if TRUNK_STATUS_WEBHOOK_URL else "off",
     )
+    # Last sweep's status per (tenant_id, slug), seeded from the Redis
+    # tenant hashes so a feeder restart doesn't re-fire drop/restore
+    # alerts for edges it already reported before dying. A failed seed
+    # only costs the first sweep's edges (no prior = no edge), never
+    # produces a duplicate alert.
+    prev_trunk_status = {}
+    try:
+        for key in client.scan_iter(match=f"{STATUS_FEEDER_KEY}:*"):
+            seed_tenant = key[len(STATUS_FEEDER_KEY) + 1:]
+            for slug, status in client.hgetall(key).items():
+                prev_trunk_status[(seed_tenant, slug)] = status
+    except Exception as exc:  # noqa: BLE001
+        log.warning("status feeder: prev-state seed failed: %s", exc)
     while not stop_event.is_set():
         try:
             if shutil.which(ASTERISK_BIN) is None:
@@ -983,25 +1049,38 @@ def _status_feeder_loop(stop_event):
             # the UI's lookup by row.id matches what's in Redis. The
             # reverse map covers every row in sip_trunks; endpoints
             # not present in sip_trunks (e.g. agent endpoints that
-            # leaked in here) fall through unchanged.
+            # leaked in here) fall through unchanged. None (store down)
+            # is distinct from {} (no trunks) — see the map's docstring.
             trunk_reverse = _build_trunk_id_reverse_map()
-
-            def _trunk_slug(ep_id):
-                # `pjsip show endpoints` sometimes emits the endpoint
-                # as `endpoint/contact` once a contact has registered;
-                # we only want the endpoint part for the UI join.
-                head = ep_id.split("/", 1)[0]
-                return trunk_reverse.get(head, head)
+            reverse = trunk_reverse if trunk_reverse is not None else {}
 
             if ep_proc.returncode == 0:
                 trunk_updates = {}
+                tenant_updates = {}
                 for ep_id, state in _parse_pjsip_endpoints(ep_proc.stdout):
-                    slug = _trunk_slug(ep_id)
-                    if ep_id.split("/", 1)[0] in ip_trunk_endpoints:
-                        trunk_updates[slug] = "online"
+                    # `pjsip show endpoints` sometimes emits the endpoint
+                    # as `endpoint/contact` once a contact has registered;
+                    # we only want the endpoint part for the UI join.
+                    head = ep_id.split("/", 1)[0]
+                    status = ("online" if head in ip_trunk_endpoints
+                              else _state_to_status(state))
+                    known = reverse.get(head)
+                    if known:
+                        row_tenant, slug, _name = known
+                        tenant_updates.setdefault(row_tenant, {})[slug] = status
+                        trunk_updates[slug] = status
                     else:
-                        trunk_updates[slug] = _state_to_status(state)
+                        # Only rows sip_trunks knows get tenant placement;
+                        # strays (agent endpoints leaking through this
+                        # listing) stay confined to the legacy global key.
+                        trunk_updates[head] = status
+                for row_tenant, updates in tenant_updates.items():
+                    client.hset(
+                        f"{STATUS_FEEDER_KEY}:{row_tenant}", mapping=updates
+                    )
                 if trunk_updates:
+                    # Legacy global dual-write while agent-hub still falls
+                    # back to it — started 2026-08-23, drop next release.
                     client.hset(STATUS_FEEDER_KEY, mapping=trunk_updates)
                 # Stamp the sweep time whenever Asterisk answered, even if
                 # no trunk rows matched — the freshness signal is "did we
@@ -1010,11 +1089,67 @@ def _status_feeder_loop(stop_event):
                     STATUS_FEEDER_CHECKED_AT_KEY, int(time.time() * 1000)
                 )
 
+                if trunk_reverse is not None:
+                    slugs_by_tenant = {}
+                    trunk_names = {}
+                    for row_tenant, slug, name in trunk_reverse.values():
+                        slugs_by_tenant.setdefault(row_tenant, set()).add(slug)
+                        trunk_names[(row_tenant, slug)] = name
+
+                    # Deleted trunks must not stay "online" forever: the
+                    # old poller's DEL+rewrite masked deletions, and an
+                    # HSET merge alone never removes a field. Sweep every
+                    # tenant hash (a tenant whose last trunk was deleted
+                    # still has a hash to empty, so iterate Redis keys,
+                    # not just the tenants seen this tick) and HDEL what
+                    # sip_trunks no longer holds.
+                    for key in client.scan_iter(
+                        match=f"{STATUS_FEEDER_KEY}:*"
+                    ):
+                        key_tenant = key[len(STATUS_FEEDER_KEY) + 1:]
+                        live = slugs_by_tenant.get(key_tenant, set())
+                        stale = [
+                            s for s in client.hkeys(key) if s not in live
+                        ]
+                        if stale:
+                            client.hdel(key, *stale)
+                        for s in stale:
+                            prev_trunk_status.pop((key_tenant, s), None)
+                    # Same cleanup for the legacy hash, sparing fields
+                    # written this sweep — strays still land there and
+                    # would otherwise be deleted and re-added every tick.
+                    all_slugs = {
+                        s for slugs in slugs_by_tenant.values() for s in slugs
+                    }
+                    legacy_stale = [
+                        s for s in client.hkeys(STATUS_FEEDER_KEY)
+                        if s not in all_slugs and s not in trunk_updates
+                    ]
+                    if legacy_stale:
+                        client.hdel(STATUS_FEEDER_KEY, *legacy_stale)
+
+                    # online<->offline edges become the TrunkStatusChanged
+                    # webhook. Fired after the HSETs so the Redis copy —
+                    # the restart seed — already reflects the new state
+                    # and a crash mid-notify can't replay the edge.
+                    for row_tenant, updates in tenant_updates.items():
+                        for slug, status in updates.items():
+                            prior = prev_trunk_status.get((row_tenant, slug))
+                            if (prior, status) in (
+                                ("online", "offline"), ("offline", "online"),
+                            ):
+                                _post_trunk_status_webhook(
+                                    row_tenant, slug,
+                                    trunk_names.get((row_tenant, slug)),
+                                    status,
+                                )
+                            prev_trunk_status[(row_tenant, slug)] = status
+
             if aor_proc.returncode == 0:
                 agent_updates = {}
                 for aor_id, status in _parse_pjsip_aors(aor_proc.stdout):
                     head = aor_id.split("/", 1)[0]
-                    if head in trunk_endpoints or head in trunk_reverse:
+                    if head in trunk_endpoints or head in reverse:
                         continue
                     # Agents are keyed in Redis by the un-namespaced
                     # form `staff_<id>` so the agent-hub UI (which

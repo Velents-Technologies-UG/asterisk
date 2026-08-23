@@ -1270,6 +1270,12 @@ def _row_to_trunk(row) -> dict:
         "protocol":         row["protocol"],
         "mediaEncryption":  row["media_encryption"],
         "authUsername":     row["auth_username"],
+        # The sentinel the trunk form gates its masked-credentials pill on
+        # (AGH-6664): before that gate the pill implied a stored password
+        # even when none existed. One name for this fact, matching the
+        # trunk-account projection above - a second alias only invites the
+        # two sides to migrate in opposite directions. The password itself
+        # is never serialized, on any path.
         "hasPassword":      bool(row["auth_password_enc"]),
         "numbers":          list(row["numbers"] or []),
         "fromUser":         row["from_user"],
