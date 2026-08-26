@@ -4,15 +4,28 @@
 ; Realtime engine bindings. Merge into /etc/asterisk/extconfig.conf.
 ;
 ; Maps the five PJSIP realtime tables (endpoint/auth/aor/registration/
-; identify) to the ODBC connection named `asterisk` (defined in
-; res_odbc_agents.conf.sample). The ps_* names on the right are the
-; Postgres table names the call-engine writes to.
+; identify) plus the musiconhold class table to the ODBC connection
+; named `asterisk` (defined in res_odbc_agents.conf.sample). The table
+; names on the right are the Postgres table names the call-engine
+; writes to.
 ;
 ; ps_identify is required for IP-based trunks where the carrier is
 ; identified by source IP rather than via REGISTER. The sidecar
 ; populates a row in this table when a provider's mode is 'ip-trunk';
 ; res_pjsip reads it via res_pjsip_endpoint_identifier_ip when an
 ; endpoint's identify_by includes 'ip'.
+;
+; musiconhold is the per-queue hold-music class store. call-engine's
+; MohRegistry (POST /control/moh/register) upserts a mode=files row
+; per sound asset and writes the audio to the shared MOH volume, but
+; res_musiconhold only consults the table when THIS family is mapped:
+; res_musiconhold.c gates realtime lookup on
+; ast_check_realtime("musiconhold"), which find_engine() answers from
+; this [settings] section alone. Without the mapping a successful
+; register leaves the caller in silence. The sidecar's
+; sip_store.bootstrap() creates the table. No musiconhold_entry
+; mapping is needed: res_musiconhold reads that family for
+; mode=playlist classes only, and the registry writes mode=files.
 ;
 
 [settings]
@@ -21,3 +34,4 @@ ps_auths         => odbc,asterisk,ps_auths
 ps_aors          => odbc,asterisk,ps_aors
 ps_registrations => odbc,asterisk,ps_registrations
 ps_identify      => odbc,asterisk,ps_identify
+musiconhold      => odbc,asterisk,musiconhold

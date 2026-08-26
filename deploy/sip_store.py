@@ -277,6 +277,38 @@ ALTER TABLE ps_auths         ALTER COLUMN id TYPE VARCHAR(190);
 ALTER TABLE ps_registrations ALTER COLUMN id TYPE VARCHAR(190);
 """
 
+# Asterisk realtime MusicOnHold class definitions. Written by the
+# call-engine's MohRegistry (POST /control/moh/register upserts
+# {name, mode='files', directory, sort='alpha'} keyed on name — its
+# ON CONFLICT (name) is why name must be the primary key) and read by
+# res_musiconhold through extconfig.conf's
+# `musiconhold => odbc,asterisk,musiconhold` mapping. Created here
+# because nothing else migrates this database — the contrib alembic
+# tree is not run anywhere in this deployment — and MohRegistry's
+# INSERT assumes the table exists. Column set mirrors Asterisk's own
+# contrib/ast-db-manage schema (4da0c5f79a9c_create_tables.py:
+# name/mode/directory/application/digit/sort/format/stamp — the exact
+# vocabulary moh_parse_options() consumes), with two deliberate
+# deviations: `mode` is plain VARCHAR rather than the contrib Postgres
+# ENUM (CREATE TYPE has no IF NOT EXISTS form, and the ODBC realtime
+# layer only ever sees text), and `name` stays VARCHAR(80) rather than
+# getting the 190 widening the ps_* ids got, because Asterisk caps
+# class names at MAX_MUSICCLASS (80) — a longer name is broken there
+# regardless of what the column would hold, and the narrow column
+# makes that failure a loud INSERT error instead of silent truncation.
+_DDL_MUSICONHOLD = r"""
+CREATE TABLE IF NOT EXISTS musiconhold (
+    name        VARCHAR(80) PRIMARY KEY,
+    mode        VARCHAR(80),
+    directory   VARCHAR(255),
+    application VARCHAR(255),
+    digit       VARCHAR(1),
+    sort        VARCHAR(10),
+    format      VARCHAR(10),
+    stamp       TIMESTAMP
+);
+"""
+
 _DDL_PROVIDERS = r"""
 CREATE TABLE IF NOT EXISTS sip_providers (
     id                     TEXT PRIMARY KEY,
@@ -457,6 +489,21 @@ def bootstrap(db_conn_factory) -> None:
         )
     except Exception as exc:
         log.error("sip_store.bootstrap (trunks/providers/accounts) failed: %s", exc)
+
+    # Realtime MOH classes — the table call-engine's MohRegistry upserts
+    # into and res_musiconhold reads via the extconfig `musiconhold`
+    # mapping. Own try/except so a failure here can't take the rest of
+    # bootstrap with it (and vice versa).
+    try:
+        with db_conn_factory() as conn, conn.cursor() as cur:
+            cur.execute(_DDL_MUSICONHOLD)
+        log.info("sip_store.bootstrap: musiconhold realtime table ensured")
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "sip_store.bootstrap (musiconhold) failed: %s — hold-music "
+            "class registration will 500 until the table exists",
+            exc,
+        )
 
     # Widen ps_*.id from VARCHAR(40) to VARCHAR(190) so namespaced ids
     # (tXXXXXXXX_<60>) fit. Same autocommit/per-statement pattern as
