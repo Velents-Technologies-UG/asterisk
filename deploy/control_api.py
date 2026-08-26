@@ -56,6 +56,21 @@ ARI_USERNAME = os.environ.get("ARI_USERNAME", "").strip()
 ARI_PASSWORD = os.environ.get("ARI_PASSWORD", "").strip()
 ARI_HEALTH_URL = os.environ.get("ARI_HEALTH_URL", "http://127.0.0.1:8088/ari/asterisk/info").strip()
 ARI_HEALTH_TIMEOUT_SECONDS = float(os.environ.get("ARI_HEALTH_TIMEOUT_SECONDS", "3"))
+# Per-trunk live channel counts (GET /ari/endpoints/PJSIP/{id}) reuse the
+# same loopback listener and basic-auth pair as the health probe. The ARI
+# root is derived from ARI_HEALTH_URL rather than a new env var; a
+# customised health URL that doesn't end in /asterisk/info falls back to
+# the loopback default. The timeout is deliberately shorter than the
+# health probe's: the count decorates trunk rows whose *state* half must
+# keep flowing when ARI is slow — state first, count only if cheap.
+_ARI_BASE_URL = (
+    ARI_HEALTH_URL[: -len("/asterisk/info")]
+    if ARI_HEALTH_URL.endswith("/asterisk/info")
+    else "http://127.0.0.1:8088/ari"
+)
+ARI_CHANNEL_COUNT_TIMEOUT_SECONDS = float(
+    os.environ.get("ARI_CHANNEL_COUNT_TIMEOUT_SECONDS", "2")
+)
 DEFAULT_TRANSPORT = os.environ.get("PJSIP_TRANSPORT_NAME", "transport-udp")
 DEFAULT_INBOUND_CONTEXT = os.environ.get("TRUNK_INBOUND_CONTEXT", "from-trunk")
 DEFAULT_CODEC_ALLOW = os.environ.get("TRUNK_DEFAULT_ALLOW", "ulaw,alaw")
@@ -873,6 +888,53 @@ def _build_trunk_id_reverse_map():
 _AGENT_ID_NAMESPACED_RE = re.compile(r"^staff_t[a-z0-9]{1,8}_(?P<rest>.+)$")
 
 
+def _ari_endpoint_channel_count(pjsip_id):
+    """Live channel count for one PJSIP endpoint via ARI, or None.
+
+    Returns (count, ari_usable). count is len(channel_ids) from
+    GET /endpoints/PJSIP/{id} — a genuine 0 included — or None when the
+    endpoint could not be measured. ari_usable=False means the failure
+    was connection-level or auth-level (ARI down, creds unset/wrong,
+    slower than the short timeout), so the caller should stop asking
+    for the rest of its pass; a 404 (an endpoint Asterisk doesn't know
+    right now) voids only this one row.
+    """
+    if not ARI_USERNAME or not ARI_PASSWORD:
+        return None, False
+    url = (
+        f"{_ARI_BASE_URL}/endpoints/PJSIP/"
+        f"{urllib.parse.quote(pjsip_id, safe='')}"
+    )
+    req = urllib.request.Request(url)
+    auth = base64.b64encode(
+        f"{ARI_USERNAME}:{ARI_PASSWORD}".encode("utf-8")
+    ).decode("ascii")
+    req.add_header("Authorization", f"Basic {auth}")
+    try:
+        with urllib.request.urlopen(
+            req, timeout=ARI_CHANNEL_COUNT_TIMEOUT_SECONDS
+        ) as resp:
+            body = json.loads(resp.read().decode("utf-8") or "{}")
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            return None, True
+        log.warning(
+            "ARI channel count for %s: HTTP %s — skipping counts this pass",
+            pjsip_id, exc.code,
+        )
+        return None, False
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "ARI channel count unavailable (%s): %s — skipping counts this pass",
+            pjsip_id, exc,
+        )
+        return None, False
+    ids = body.get("channel_ids")
+    if not isinstance(ids, list):
+        return None, True
+    return len(ids), True
+
+
 def _decorate_trunks_with_live_state(items, tenant_id):
     """Embed `state` and `activeChannels` into each trunk row in-place.
 
@@ -883,9 +945,11 @@ def _decorate_trunks_with_live_state(items, tenant_id):
     /control/sip/trunks response self-sufficient — agent-hub gets the
     badge value over the same HTTPS call it already makes.
 
-    Reads `pjsip show endpoints` once for the whole list. Mutates each
-    item dict (camelCase fields: state, activeChannels) and returns
-    nothing.
+    Reads `pjsip show endpoints` once for the whole list, then one ARI
+    round-trip per row for the live channel count. Mutates each item
+    dict (camelCase: `state` always; `activeChannels` plus
+    `channelsMeasured` only when the count was actually measured) and
+    returns nothing.
     """
     if not items:
         return
@@ -918,6 +982,7 @@ def _decorate_trunks_with_live_state(items, tenant_id):
         if id_proc.returncode == 0 else set()
     )
 
+    ari_usable = True
     for row in items:
         slug = row.get("id")
         if not slug:
@@ -927,12 +992,20 @@ def _decorate_trunks_with_live_state(items, tenant_id):
             row["state"] = "online"
         else:
             row["state"] = state_by_pjsip.get(pjsip_id, "unknown")
-        # activeChannels needs a separate channel-show round-trip;
-        # leave at 0 here so the badge color is at least correct.
-        # The UI's util read still works through Redis when it's
-        # configured; this just guarantees the *state* part isn't
-        # blocked by Redis being unreachable.
-        row.setdefault("activeChannels", 0)
+        # Real per-trunk channel count via ARI (GET /endpoints/PJSIP/{id}
+        # -> len(channel_ids)). Written only when actually measured — a
+        # genuine 0 included — together with channelsMeasured=True, the
+        # flag the UI keys on to tell measured-zero from the placeholder
+        # 0 this used to setdefault(). On any failure BOTH fields stay
+        # absent: a failed query must never read as "no calls in
+        # progress". The state above is already set, so a dead or slow
+        # ARI (short timeout; one skip flag for the rest of the pass)
+        # degrades only the count, never the badge.
+        if ari_usable:
+            count, ari_usable = _ari_endpoint_channel_count(pjsip_id)
+            if count is not None:
+                row["activeChannels"] = count
+                row["channelsMeasured"] = True
 
 
 def _user_facing_agent_id(pjsip_id):
