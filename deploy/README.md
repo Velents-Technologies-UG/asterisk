@@ -305,7 +305,8 @@ call to land somewhere useful:
 |-----|----------|--------------|
 | `CONTROL_API_SECRET` | yes | Bearer auth on `/control/*` (existing). |
 | `DATABASE_URL` | for real call traffic | `postgres://USER:PASS@HOST:PORT/DB` of the same DB Asterisk reads via ODBC (the `[asterisk]` connection in `res_odbc_agents.conf`). Without it, sidecar falls back to memory-only. |
-| `ASTERISK_BIN` | no | Override the Asterisk CLI binary path (default `asterisk`, on PATH in both dev + prod images). Used by `/control/asterisk/reload`. |
+| `ASTERISK_BIN` | no | Override the Asterisk CLI binary path (default `asterisk`, on PATH in both dev + prod images). Used by `/control/asterisk/reload` and the MOH class probe. |
+| `MOH_PROBE_TIMEOUT_SECONDS` | no | Per-CLI-read timeout for `/control/asterisk/moh-class/{class}` (default `5`). A timeout yields `resolved: null`, never an answer. |
 | `PJSIP_TRANSPORT_NAME` | no | Default `transport-udp` — must match `pjsip_trunks.conf`'s `[transport-udp]` section. |
 | `TRUNK_INBOUND_CONTEXT` | no | Dialplan context inbound INVITEs land in. Default `from-trunk` (matches `extensions_ai_runtime.conf`). |
 | `TRUNK_DEFAULT_ALLOW` | no | Codec list written to `ps_endpoints.allow`. Default `ulaw,alaw`. |
@@ -344,6 +345,7 @@ all four rows. ID convention: trunk id `primary` → endpoint
 | POST/PUT | `/control/sip/trunks/{id}` | Upsert; the URL `id` and (optional) body `id` must match. |
 | DELETE | `/control/sip/trunks/{id}`  | `204` empty body, or `404`. |
 | POST   | `/control/asterisk/reload`  | `200` `{"reloaded": false, "stub": true, "module": "..."}`. The real call-engine will exec `module reload` over AMI/ARI and flip `reloaded: true`. agent-hub already swallows failures here, so a 501 is harmless — but 200 keeps the network tab clean. |
+| GET    | `/control/asterisk/moh-class/{class}` | `200` `{"mohClass", "family", "familyMapped", "rowVisible", "resolved", "engine"?, "database"?, "table"?, "detail"?}`. Does this MusicOnHold class actually resolve? `resolved` is a **tri-state**: `true` (mapped **and** the row is visible to Asterisk — hold music plays), `false` (positively determined it will not; `familyMapped` says which half is missing), `null` (**could not determine** — Asterisk unreachable, timed out, or answered unrecognisably). Always `200` for all three; `422` only for a malformed class name. Consumed by call-engine's `MohRegistry` so a successful `POST /control/moh/register` can stop asserting `realtimeMappingRequired` unconditionally. Implemented as two `asterisk -rx` reads — `core show config mappings` (the exact gate `ast_check_realtime("musiconhold")` answers from) and `realtime load musiconhold name <class>` (byte-for-byte the query `res_musiconhold` runs at hold time). **Not** `moh show classes`: realtime classes are instantiated lazily on first hold, so a working class is absent from that list until someone is actually on hold. |
 
 Bearer auth (`CONTROL_API_SECRET`) on every `/control/*` route, same
 as the existing surfaces. `/healthz` stays unauthenticated.

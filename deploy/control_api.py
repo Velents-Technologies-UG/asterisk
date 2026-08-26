@@ -71,6 +71,15 @@ _ARI_BASE_URL = (
 ARI_CHANNEL_COUNT_TIMEOUT_SECONDS = float(
     os.environ.get("ARI_CHANNEL_COUNT_TIMEOUT_SECONDS", "2")
 )
+# MOH class resolution probe (GET /control/asterisk/moh-class/<class>).
+# Two `asterisk -rx` reads, the same exec pattern reload_asterisk uses. Not
+# ARI: res_musiconhold is not sorcery-backed, so no /ari/asterisk/config
+# resource can see a MOH class or extconfig.conf, and this module has no AMI
+# client. 5s covers a `realtime load` that has to open an ODBC connection
+# cold; the caller (call-engine's MohRegistry) reads a timeout as "could not
+# determine", never as an answer.
+MOH_PROBE_TIMEOUT_SECONDS = float(os.environ.get("MOH_PROBE_TIMEOUT_SECONDS", "5"))
+MOH_REALTIME_FAMILY = "musiconhold"
 DEFAULT_TRANSPORT = os.environ.get("PJSIP_TRANSPORT_NAME", "transport-udp")
 DEFAULT_INBOUND_CONTEXT = os.environ.get("TRUNK_INBOUND_CONTEXT", "from-trunk")
 DEFAULT_CODEC_ALLOW = os.environ.get("TRUNK_DEFAULT_ALLOW", "ulaw,alaw")
@@ -935,6 +944,178 @@ def _ari_endpoint_channel_count(pjsip_id):
     return len(ids), True
 
 
+# -- MOH class resolution probe -------------------------------------------
+# Answers one question for call-engine's MohRegistry: after it has written a
+# `musiconhold` row, will Asterisk actually find that class when a caller is
+# put on hold? The registry cannot answer it from its own pod - extconfig.conf
+# lives here - so it used to return `realtimeMappingRequired: 'musiconhold'`
+# unconditionally, which became untrue the moment the mapping was added.
+#
+# Two reads, because either one alone is ambiguous:
+#
+#   1. `core show config mappings` prints the extconfig [settings] table, and
+#      it prints a family ONLY under a config engine whose name matches that
+#      mapping's driver (main/config.c handle_cli_core_show_config_mappings).
+#      That is both halves of what ast_check_realtime("musiconhold") needs -
+#      find_engine() requires a map for the family AND a registered engine for
+#      its driver - so a `===> musiconhold` line is a direct read of the exact
+#      gate res_musiconhold.c consults at hold time.
+#
+#   2. `realtime load musiconhold name <class>` runs ast_load_realtime_all,
+#      which resolves its engine through that same find_engine at priority 1.
+#      This is byte-for-byte the query res_musiconhold performs itself:
+#      load_realtime_musiconhold() is ast_load_realtime("musiconhold", "name",
+#      name). A printed row therefore proves mapping + a live ODBC connection
+#      + the just-written row being visible, all three at once.
+#
+# `moh show classes` is deliberately NOT used, and would have reproduced the
+# same false negative from the other side: it iterates only the in-memory
+# mohclasses container, and a realtime class is instantiated LAZILY inside
+# local_ast_moh_start. A correctly mapped, perfectly working class is genuinely
+# absent from that list until the first caller is actually put on hold.
+_MOH_ENGINE_LINE_RE = re.compile(r"^Config Engine:\s*(?P<engine>\S+)\s*$")
+_MOH_MAP_LINE_RE = re.compile(
+    r"^===>\s*(?P<family>[^\s(]+)\s*"
+    r"\(db=(?P<db>[^,]*),\s*table=(?P<table>[^)]*)\)"
+)
+# The class name reaches `asterisk -rx` as one argv element that Asterisk's own
+# CLI parser then splits on whitespace, so a space or a quote would inject a
+# CLI token even though subprocess runs no shell. Character set matches
+# call-engine's SAFE_SLUG (moh-registry.js) plus room for its `moh-` prefix.
+_MOH_CLASS_RE = re.compile(r"^[A-Za-z0-9._-]{1,140}$")
+
+
+def _asterisk_cli_read(cli):
+    """Run one read-only `asterisk -rx <cli>`.
+
+    Returns (stdout, None) on a clean exit, or (None, reason) with reason a
+    short operator-readable string. Every failure mode lands in `reason`: a
+    missing binary, a dead Asterisk (`asterisk -rx` exits non-zero when it
+    cannot reach the ctl socket), a timeout, an exec error. The caller must
+    map all of them to "could not determine" rather than to an answer.
+    """
+    if shutil.which(ASTERISK_BIN) is None:
+        return None, f"{ASTERISK_BIN} binary not on PATH"
+    try:
+        proc = subprocess.run(
+            [ASTERISK_BIN, "-rx", cli],
+            capture_output=True, text=True,
+            timeout=MOH_PROBE_TIMEOUT_SECONDS, check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return None, f"`{cli}` timed out after {MOH_PROBE_TIMEOUT_SECONDS:g}s"
+    except OSError as exc:
+        return None, f"asterisk exec failed: {exc}"
+    if proc.returncode != 0:
+        detail = ((proc.stderr or "") + (proc.stdout or "")).strip()
+        return None, (
+            f"`{cli}` exited {proc.returncode}: {detail[:200] or 'no output'}"
+        )
+    return (proc.stdout or ""), None
+
+
+def _moh_family_mapping(stdout):
+    """The extconfig mapping for the musiconhold family, or None when the
+    family is not mapped to a registered engine.
+
+    Returns {engine, database, table}. `engine` is the config engine the
+    mapping was printed under, which is what makes the line proof of the gate
+    rather than an echo of the file.
+    """
+    engine = None
+    for raw in (stdout or "").splitlines():
+        line = raw.strip()
+        m = _MOH_ENGINE_LINE_RE.match(line)
+        if m:
+            engine = m.group("engine")
+            continue
+        m = _MOH_MAP_LINE_RE.match(line)
+        if m and m.group("family").lower() == MOH_REALTIME_FAMILY:
+            return {
+                "engine": engine,
+                "database": m.group("db").strip(),
+                "table": m.group("table").strip(),
+            }
+    return None
+
+
+def _moh_row_visible(stdout):
+    """True / False / None for `realtime load`'s output.
+
+    None is load-bearing: if res_realtime is not loaded the CLI answers "No
+    such command" on a ZERO exit code, and reading that as "no row" would
+    manufacture a false negative out of a probe that never ran. Only the two
+    outputs res_realtime.c actually emits count as answers.
+    """
+    text = stdout or ""
+    if "No rows found matching search criteria" in text:
+        return False
+    if "Column Name" in text and "Column Value" in text:
+        return True
+    return None
+
+
+def _probe_moh_class(moh_class):
+    """Whether Asterisk can resolve `moh_class` through the realtime layer.
+
+    Three states on `resolved`, and nothing collapses them:
+      True  - the family is mapped to a registered engine AND Asterisk's own
+              hold-time query returns the row. Hold music will play.
+      False - positively determined it will NOT resolve. `familyMapped` says
+              which half is missing, because the two need different fixes: an
+              unmapped family is the extconfig.conf line, while a mapped
+              family with an invisible row is a database/ODBC problem that
+              adding the mapping would do nothing about.
+      None  - could not determine. Asterisk unreachable, timed out, or
+              answered in a form this function does not recognise. Never an
+              answer.
+    """
+    out = {"mohClass": moh_class, "family": MOH_REALTIME_FAMILY}
+
+    mappings_out, mappings_err = _asterisk_cli_read("core show config mappings")
+    mapping = None if mappings_err else _moh_family_mapping(mappings_out)
+    family_mapped = None if mappings_err else mapping is not None
+    out["familyMapped"] = family_mapped
+    if mapping:
+        out["engine"] = mapping["engine"]
+        out["database"] = mapping["database"]
+        out["table"] = mapping["table"]
+
+    row_out, row_err = _asterisk_cli_read(
+        f"realtime load {MOH_REALTIME_FAMILY} name {moh_class}"
+    )
+    row_visible = None if row_err else _moh_row_visible(row_out)
+    out["rowVisible"] = row_visible
+
+    if family_mapped is None or row_visible is None:
+        out["resolved"] = None
+        out["detail"] = (
+            mappings_err
+            or row_err
+            or "asterisk answered the probe in a form the sidecar cannot read"
+        )
+    elif family_mapped and row_visible:
+        out["resolved"] = True
+    elif not family_mapped:
+        out["resolved"] = False
+        out["detail"] = (
+            f"/etc/asterisk/extconfig.conf does not map the "
+            f"`{MOH_REALTIME_FAMILY}` family to a realtime engine, so "
+            f"res_musiconhold never reads the class table and the caller "
+            f"hears silence"
+        )
+    else:
+        out["resolved"] = False
+        out["detail"] = (
+            f"`{MOH_REALTIME_FAMILY}` is mapped to "
+            f"{mapping.get('engine') or 'an engine'} "
+            f"(db={mapping.get('database')}, table={mapping.get('table')}) "
+            f"but no row named `{moh_class}` is visible to Asterisk - the "
+            f"mapping is not the problem"
+        )
+    return out
+
+
 def _decorate_trunks_with_live_state(items, tenant_id):
     """Embed `state` and `activeChannels` into each trunk row in-place.
 
@@ -1260,6 +1441,8 @@ _ROUTES = [
     ("POST",   re.compile(r"^/control/sip/agents/([^/]+)/credentials/?$"),
                                                              "provision_agent_credentials"),
     ("POST",   re.compile(r"^/control/asterisk/reload/?$"),  "reload_asterisk"),
+    ("GET",    re.compile(r"^/control/asterisk/moh-class/([^/]+)$"),
+                                                             "probe_moh_class"),
 ]
 
 
@@ -1804,6 +1987,33 @@ class Handler(BaseHTTPRequestHandler):
             {"reloaded": ok, "stub": False, "module": module,
              "rc": proc.returncode, "stdout": out, "stderr": err},
         )
+
+    def probe_moh_class(self, raw_class):
+        """GET /control/asterisk/moh-class/<class> - does this MOH class
+        actually resolve for Asterisk right now?
+
+        Always 200 once the class name is well formed, including for
+        "not resolved" and for "could not determine". The tri-state lives in
+        the `resolved` field and nowhere else, so the caller has exactly one
+        thing to read; folding could-not-determine into a 5xx would leave
+        call-engine inferring an answer from a transport failure, which is the
+        very confusion this endpoint exists to remove.
+        """
+        moh_class = urllib.parse.unquote(raw_class or "").strip()
+        if not _MOH_CLASS_RE.match(moh_class):
+            self._send_json(
+                HTTPStatus.UNPROCESSABLE_ENTITY,
+                {"error": "moh class must be 1-140 chars, alphanumerics + . _ -"},
+            )
+            return
+        result = _probe_moh_class(moh_class)
+        log.info(
+            "moh probe %s: resolved=%s familyMapped=%s rowVisible=%s%s",
+            moh_class, result.get("resolved"), result.get("familyMapped"),
+            result.get("rowVisible"),
+            f" detail={result['detail']!r}" if result.get("detail") else "",
+        )
+        self._send_json(HTTPStatus.OK, result)
 
 
 def main():
