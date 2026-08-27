@@ -285,17 +285,56 @@ ALTER TABLE ps_registrations ALTER COLUMN id TYPE VARCHAR(190);
 # `musiconhold => odbc,asterisk,musiconhold` mapping. Created here
 # because nothing else migrates this database — the contrib alembic
 # tree is not run anywhere in this deployment — and MohRegistry's
-# INSERT assumes the table exists. Column set mirrors Asterisk's own
-# contrib/ast-db-manage schema (4da0c5f79a9c_create_tables.py:
-# name/mode/directory/application/digit/sort/format/stamp — the exact
-# vocabulary moh_parse_options() consumes), with two deliberate
-# deviations: `mode` is plain VARCHAR rather than the contrib Postgres
-# ENUM (CREATE TYPE has no IF NOT EXISTS form, and the ODBC realtime
-# layer only ever sees text), and `name` stays VARCHAR(80) rather than
-# getting the 190 widening the ps_* ids got, because Asterisk caps
-# class names at MAX_MUSICCLASS (80) — a longer name is broken there
-# regardless of what the column would hold, and the narrow column
-# makes that failure a loud INSERT error instead of silent truncation.
+# INSERT assumes the table exists.
+#
+# Column set mirrors Asterisk's own contrib/ast-db-manage schema as of
+# THIS source tree, which is two migrations: 4da0c5f79a9c_create_tables
+# (name/mode/directory/application/digit/sort/format/stamp) plus
+# f5b0e7427449_add_loop_last_to_res_musiconhold (loop_last). The third
+# MOH migration, fbb7766f17bc_add_playlist_to_moh, adds no column here —
+# it widens the mode enum and creates a separate musiconhold_entry table
+# (see the note below).
+#
+# This is NOT "the exact vocabulary moh_parse_options() consumes", which
+# an earlier version of this comment claimed: that function also accepts
+# entry, announcement, kill_escalation_delay and kill_method, none of
+# which is a column in any upstream migration. They are musiconhold.conf
+# options only. The distinction matters because it is what makes the
+# column set safe to be a subset — see below.
+#
+# Three deliberate deviations from contrib:
+#   * `mode` is plain VARCHAR rather than the contrib Postgres ENUM
+#     (CREATE TYPE has no IF NOT EXISTS form, and the ODBC realtime layer
+#     only ever sees text — res_config_odbc SQLGetData's every column as
+#     SQL_CHAR). 'files', what MohRegistry writes, is a valid member of
+#     that enum anyway, so this is more permissive, never less.
+#   * `loop_last` is VARCHAR(3) rather than the yesno_values ENUM, for the
+#     same reason. moh_parse_options runs it through ast_true().
+#   * `name` stays VARCHAR(80) rather than getting the 190 widening the
+#     ps_* ids got, because Asterisk caps class names at MAX_MUSICCLASS
+#     (80) — a longer name is broken there regardless of what the column
+#     would hold, and the narrow column makes that failure a loud INSERT
+#     error instead of silent truncation.
+#
+# WHY A COLUMN CANNOT BE "REJECTED" HERE, which is worth stating because
+# it is the hypothesis this table keeps attracting whenever hold music is
+# silent: res_config_odbc issues `SELECT * FROM musiconhold WHERE name= ?`
+# (res_config_odbc.c:209) and hands every column it gets back to
+# moh_parse_options, which matches on the column NAME and ignores any it
+# does not know. So an EXTRA column is inert and a MISSING one only
+# leaves its option at the default. Neither can make res_musiconhold
+# refuse the row. The columns that CAN break a row are the two the
+# realtime path actively requires — a NULL/empty `mode`, or an empty
+# `directory` on a non-custom/playlist mode — and both are written by
+# MohRegistry's INSERT on every upsert.
+#
+# NOT created here, deliberately: `musiconhold_entry` (the playlist
+# table). Nothing maps that family in extconfig and MohRegistry only ever
+# writes mode='files'. Worth knowing it is a silent trap if that ever
+# changes — load_realtime_musiconhold() destroys the class and behaves
+# "as though this class doesn't exist" when mode='playlist' yields zero
+# entries (res_musiconhold.c:1709), so a playlist class over a missing
+# table fails exactly like a missing row.
 _DDL_MUSICONHOLD = r"""
 CREATE TABLE IF NOT EXISTS musiconhold (
     name        VARCHAR(80) PRIMARY KEY,
@@ -305,8 +344,23 @@ CREATE TABLE IF NOT EXISTS musiconhold (
     digit       VARCHAR(1),
     sort        VARCHAR(10),
     format      VARCHAR(10),
+    loop_last   VARCHAR(3),
     stamp       TIMESTAMP
 );
+"""
+
+# CREATE TABLE IF NOT EXISTS above does nothing to a table that already
+# exists, so every deployment created before loop_last was added to the
+# DDL needs the column added additively. Same every-boot, IF-NOT-EXISTS,
+# one-statement-per-execute contract as the ps_* patches.
+#
+# No live fault is being fixed here — per the reasoning above, a missing
+# loop_last leaves the option at its default and cannot stop a class
+# resolving. It closes a real divergence from Asterisk's own schema so
+# the column vocabulary is the one res_musiconhold documents, and so the
+# option becomes settable without a second migration later.
+_DDL_MUSICONHOLD_PATCH = r"""
+ALTER TABLE musiconhold ADD COLUMN IF NOT EXISTS loop_last VARCHAR(3);
 """
 
 _DDL_PROVIDERS = r"""
@@ -502,6 +556,36 @@ def bootstrap(db_conn_factory) -> None:
         log.warning(
             "sip_store.bootstrap (musiconhold) failed: %s — hold-music "
             "class registration will 500 until the table exists",
+            exc,
+        )
+
+    # Additive column patch for a musiconhold table that predates
+    # loop_last. Separate connection + autocommit + one statement per
+    # execute, so an already-present column or a permission glitch cannot
+    # roll back anything else. Own try/except for the same reason.
+    try:
+        conn = db_conn_factory()
+        try:
+            conn.autocommit = True
+            with conn.cursor() as cur:
+                for stmt in _DDL_MUSICONHOLD_PATCH.split(";"):
+                    s = stmt.strip()
+                    if not s or s.startswith("--"):
+                        continue
+                    try:
+                        cur.execute(s)
+                    except Exception as inner_exc:  # noqa: BLE001
+                        log.warning(
+                            "sip_store.bootstrap (musiconhold patch %r): %s",
+                            s[:80], inner_exc,
+                        )
+        finally:
+            conn.close()
+        log.info("sip_store.bootstrap: musiconhold schema patched (loop_last)")
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "sip_store.bootstrap (musiconhold patch) failed: %s — loop_last "
+            "stays unavailable; class resolution is unaffected",
             exc,
         )
 
