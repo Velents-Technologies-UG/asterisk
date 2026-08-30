@@ -425,6 +425,18 @@ def _pjsip_upsert(row, password):
                    if (not register_enabled or carrier_ip)
                    else "username,auth_username")
 
+    # INBOUND auth (ps_endpoints.auth) - not to be confused with
+    # outbound_auth, which is us authenticating TO the carrier and is always
+    # set when credentials exist. An IP trunk (register_enabled=False)
+    # identifies the carrier by source IP and must NEVER challenge it:
+    # writing auth here made Asterisk answer Voylo's own inbound INVITE with
+    # 401 Unauthorized, which the carrier does not answer - its portal
+    # reported CHANUNAVAIL in 18ms and every inbound call died (AGH-8426
+    # follow-on, 2026-08-30; the hand-proven working endpoint has auth=NULL).
+    # Registering trunks keep the legacy behaviour - some carriers do
+    # authenticate requests toward a registered account.
+    inbound_auth_id = auth_id if register_enabled else None
+
     # Carrier compatibility, proven against innocalls:
     #
     #   - From URI user MUST match the SIP auth username. The trunk admin
@@ -581,7 +593,7 @@ def _pjsip_upsert(row, password):
                         trust_id_outbound = EXCLUDED.trust_id_outbound,
                         send_pai          = EXCLUDED.send_pai,
                         send_rpid         = EXCLUDED.send_rpid
-                """, (row["id"], transport, context, row["id"], auth_id, allow,
+                """, (row["id"], transport, context, row["id"], inbound_auth_id, allow,
                       identify_by, auth_id,
                       from_sip_user or None, from_domain_value or None,
                       callerid_value or None,
@@ -626,7 +638,7 @@ def _pjsip_upsert(row, password):
                         trust_id_outbound = EXCLUDED.trust_id_outbound,
                         send_pai          = EXCLUDED.send_pai,
                         send_rpid         = EXCLUDED.send_rpid
-                """, (row["id"], transport, context, row["id"], auth_id, allow,
+                """, (row["id"], transport, context, row["id"], inbound_auth_id, allow,
                       identify_by, auth_id,
                       from_sip_user or None, from_domain_value or None,
                       callerid_value or None,
