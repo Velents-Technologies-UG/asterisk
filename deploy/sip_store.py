@@ -179,6 +179,23 @@ CREATE TABLE IF NOT EXISTS sip_trunks (
     from_user              TEXT,
     from_domain            TEXT,
     realm                  TEXT,
+    -- SIP outbound proxy URI ('sip:host[:port];lr'), for carriers whose SIP
+    -- domain has no DNS record and is reachable only via a proxy IP (Voylo:
+    -- sip.uae.voylo.ai resolves to NOTHING; every request loose-routes to
+    -- sip:167.172.191.79;lr). Without it the AOR contact cannot resolve, goes
+    -- Unavail, and every originate fails as ARI "Allocation failed" - which
+    -- the agent hears as "all circuits are busy" (AGH-8426, 2026-08-30).
+    -- Stored canonical/unescaped; _pjsip_upsert escapes ';' for realtime.
+    outbound_proxy         TEXT,
+    -- From-header user OVERRIDE. NULL keeps the proven default (From user =
+    -- auth username - wholesale carriers 403 anything else, see the innocalls
+    -- notes in control_api._pjsip_upsert). The sentinel 'caller_id' writes
+    -- NULL to ps_endpoints.from_user AND callerid, so the per-call CALLERID
+    -- the dial-plan rule sets is what reaches the From header - the shape
+    -- Voylo requires ("From '+<authUsername>' not in allowed_caller_ids").
+    -- Any other value is written verbatim. This is the escape hatch
+    -- _pjsip_upsert's comment promised as `fromSipUser` but nothing carried.
+    from_sip_user          TEXT,
     register_enabled       BOOLEAN NOT NULL DEFAULT TRUE,
     carrier_ip             INET,
     channel_limit          INTEGER NOT NULL DEFAULT 50,
@@ -244,6 +261,13 @@ CREATE INDEX IF NOT EXISTS sip_trunks_tenant_idx ON sip_trunks(tenant_id);
 # call-engine pod has no migration step that could ever run against it.
 # The CHECK is guarded because ADD CONSTRAINT — unlike ADD COLUMN — has no
 # IF NOT EXISTS form and would abort the whole patch on the second boot.
+# Outbound-proxy + From-override columns for rows predating them. Same
+# every-boot, IF-NOT-EXISTS contract as the tenant migration.
+_DDL_TRUNKS_PROXY_MIGRATION = r"""
+ALTER TABLE sip_trunks ADD COLUMN IF NOT EXISTS outbound_proxy TEXT;
+ALTER TABLE sip_trunks ADD COLUMN IF NOT EXISTS from_sip_user  TEXT;
+"""
+
 _DDL_TRUNKS_PRIORITY_MIGRATION = r"""
 ALTER TABLE sip_trunks ADD COLUMN IF NOT EXISTS priority INTEGER;
 UPDATE sip_trunks SET priority = 100 WHERE priority IS NULL;
@@ -444,6 +468,15 @@ ALTER TABLE ps_endpoints ADD COLUMN IF NOT EXISTS direct_media             VARCH
 ALTER TABLE ps_endpoints ADD COLUMN IF NOT EXISTS rewrite_contact          VARCHAR(3);
 ALTER TABLE ps_endpoints ADD COLUMN IF NOT EXISTS rtp_symmetric            VARCHAR(3);
 ALTER TABLE ps_endpoints ADD COLUMN IF NOT EXISTS force_rport              VARCHAR(3);
+-- dtmf_mode: control_api's trunk INSERT hardcodes 'rfc4733', and this block
+-- omitting the column is why NO trunk was ever provisionable on a subset
+-- schema - the upsert died with "column dtmf_mode does not exist" while
+-- agents (whose writer does not set it) provisioned fine, so the failure
+-- looked like anything but a missing migration (AGH-8426, 2026-08-30).
+ALTER TABLE ps_endpoints ADD COLUMN IF NOT EXISTS dtmf_mode                VARCHAR(40);
+-- outbound_proxy: see the sip_trunks column comment. VARCHAR(190) to hold
+-- 'sip:host:port^3Blr' with a long hostname.
+ALTER TABLE ps_endpoints ADD COLUMN IF NOT EXISTS outbound_proxy           VARCHAR(190);
 
 -- Per-agent WebRTC columns (control_api._provision_agent writes these)
 ALTER TABLE ps_endpoints ADD COLUMN IF NOT EXISTS ice_support              VARCHAR(3);
@@ -536,6 +569,7 @@ def bootstrap(db_conn_factory) -> None:
             # Failover-priority column for sip_trunks predating it. Same
             # every-boot, IF-NOT-EXISTS contract as the tenant migration.
             cur.execute(_DDL_TRUNKS_PRIORITY_MIGRATION)
+            cur.execute(_DDL_TRUNKS_PROXY_MIGRATION)
             cur.execute(_SEED_INNOCALLS)
         log.info(
             "sip_store.bootstrap: sip_trunks ensured + tenant_id and "
@@ -1364,6 +1398,26 @@ def validate_trunk_input(body: dict, partial: bool = False) -> tuple[dict, Optio
         out["from_domain"] = _str_or_none(pick("fromDomain", "from_domain"))
     if "realm" in body:
         out["realm"] = _str_or_none(body.get("realm"))
+    if "outboundProxy" in body or "outbound_proxy" in body:
+        # Normalized to a full loose-routing URI: a bare host is prefixed
+        # 'sip:' and ';lr' is appended when no parameter is present, because
+        # an outbound proxy without loose routing makes Asterisk rewrite the
+        # request-URI to the proxy - the call then dials the proxy itself.
+        # Stored UNESCAPED ('sip:host;lr'); the realtime escaping ('^3B' for
+        # ';') is _pjsip_upsert's business, not the canonical row's.
+        op = _str_or_none(pick("outboundProxy", "outbound_proxy"))
+        if op:
+            if not op.startswith(("sip:", "sips:")):
+                op = "sip:" + op
+            if ";" not in op:
+                op = op + ";lr"
+        out["outbound_proxy"] = op
+    if "fromSipUser" in body or "from_sip_user" in body:
+        # NULL = proven default (From user = auth username); the sentinel
+        # 'caller_id' = write NULL from_user/callerid so the per-call
+        # CALLERID drives the From header; anything else verbatim. See the
+        # sip_trunks column comment.
+        out["from_sip_user"] = _str_or_none(pick("fromSipUser", "from_sip_user"))
     if "description" in body:
         out["description"] = _str_or_none(body.get("description"))
 
@@ -1438,6 +1492,7 @@ _TRUNK_COLUMNS = (
     "tenant_id", "id", "name", "address", "protocol", "media_encryption",
     "auth_username", "auth_password_enc", "numbers",
     "from_user", "from_domain", "realm",
+    "outbound_proxy", "from_sip_user",
     "register_enabled", "carrier_ip",
     "channel_limit", "expiration_seconds",
     "description", "enabled", "priority", "created_at", "updated_at",
@@ -1466,6 +1521,8 @@ def _row_to_trunk(row) -> dict:
         "fromUser":         row["from_user"],
         "fromDomain":       row["from_domain"],
         "realm":            row["realm"],
+        "outboundProxy":    row["outbound_proxy"],
+        "fromSipUser":      row["from_sip_user"],
         "registerEnabled":  bool(row["register_enabled"]),
         "carrierIp":        str(carrier_ip) if carrier_ip is not None else None,
         "channelLimit":     row["channel_limit"],
@@ -1569,6 +1626,10 @@ def _trunk_to_pjsip_row(trunk: dict, plaintext_password: str) -> dict:
         "client_uri":       None,
         "from_user":        from_user,
         "from_domain":      trunk.get("fromDomain") or host,
+        # Threaded verbatim; _pjsip_upsert owns both the ';' escaping and the
+        # 'caller_id' sentinel. Absent for rows predating the columns.
+        "outbound_proxy":   trunk.get("outboundProxy"),
+        "from_sip_user":    trunk.get("fromSipUser"),
         "expiration":       trunk["expirationSeconds"],
         "allow":            None,
         "outbound_auth":    None,
@@ -1633,6 +1694,7 @@ def upsert_trunk(
                     (tenant_id, id, name, address, protocol, media_encryption,
                      auth_username, auth_password_enc, numbers,
                      from_user, from_domain, realm,
+                     outbound_proxy, from_sip_user,
                      register_enabled, carrier_ip,
                      channel_limit, expiration_seconds,
                      description, enabled, priority, updated_at)
@@ -1640,6 +1702,7 @@ def upsert_trunk(
                         %(media_encryption)s, %(auth_username)s,
                         %(auth_password_enc)s, %(numbers)s,
                         %(from_user)s, %(from_domain)s, %(realm)s,
+                        %(outbound_proxy)s, %(from_sip_user)s,
                         %(register_enabled)s, %(carrier_ip)s,
                         %(channel_limit)s, %(expiration_seconds)s,
                         %(description)s, %(enabled)s, %(priority)s, NOW())
@@ -1654,6 +1717,8 @@ def upsert_trunk(
                     from_user          = EXCLUDED.from_user,
                     from_domain        = EXCLUDED.from_domain,
                     realm              = EXCLUDED.realm,
+                    outbound_proxy     = EXCLUDED.outbound_proxy,
+                    from_sip_user      = EXCLUDED.from_sip_user,
                     register_enabled   = EXCLUDED.register_enabled,
                     carrier_ip         = EXCLUDED.carrier_ip,
                     channel_limit      = EXCLUDED.channel_limit,
@@ -1676,6 +1741,8 @@ def upsert_trunk(
                     "from_user":          cols.get("from_user"),
                     "from_domain":        cols.get("from_domain"),
                     "realm":              cols.get("realm"),
+                    "outbound_proxy":     cols.get("outbound_proxy"),
+                    "from_sip_user":      cols.get("from_sip_user"),
                     "register_enabled":   cols.get("register_enabled", True),
                     "carrier_ip":         cols.get("carrier_ip"),
                     "channel_limit":      cols["channel_limit"],

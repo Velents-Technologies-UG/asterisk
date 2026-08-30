@@ -466,17 +466,36 @@ def _pjsip_upsert(row, password):
     #     asterisk is behind any NAT or load balancer — i.e. nearly
     #     always in a Kubernetes deployment. No-op when there's truly
     #     no NAT, so safe to set unconditionally.
-    from_sip_user = (
-        row.get("from_sip_user")
-        or row.get("from_user_override")
-        or row.get("username")
-        or ""
-    )
+    # The 'caller_id' sentinel (sip_trunks.from_sip_user): write NULL to BOTH
+    # from_user and callerid, so the per-call CALLERID the dial-plan rule sets
+    # is what builds the From header. Voylo screens From against
+    # allowed_caller_ids and 403s the auth username in 2ms; the hand-proven
+    # working endpoint had exactly these two columns NULL (AGH-8426,
+    # 2026-08-30). Everything else keeps the innocalls-proven default below -
+    # removing that default outright would 403 the carrier it was proven on.
+    per_call_caller_id = (row.get("from_sip_user") or "").strip().lower() == "caller_id"
+    if per_call_caller_id:
+        from_sip_user = ""
+        callerid_value = ""
+    else:
+        from_sip_user = (
+            row.get("from_sip_user")
+            or row.get("from_user_override")
+            or row.get("username")
+            or ""
+        )
+        callerid_source = row.get("from_user") or row.get("username") or ""
+        callerid_value = (
+            f'"{callerid_source}" <{callerid_source}>' if callerid_source else ""
+        )
     from_domain_value = row.get("from_domain") or _server_uri_host(server_uri) or ""
-    callerid_source = row.get("from_user") or row.get("username") or ""
-    callerid_value = (
-        f'"{callerid_source}" <{callerid_source}>' if callerid_source else ""
-    )
+
+    # Realtime escaping for the outbound proxy: res_sorcery_realtime decodes
+    # '^3B' back to ';', and a literal ';' in the column is read as a field
+    # separator - the live hand-provisioned row stores
+    # 'sip:167.172.191.79^3Blr' for exactly this reason. Canonical sip_trunks
+    # keeps the human form; the escape happens only on this write.
+    outbound_proxy_value = (row.get("outbound_proxy") or "").replace(";", "^3B")
 
     # Trunk-side media encryption. The canonical sip_trunks shape uses
     # 'none' for plain RTP; Asterisk's media_encryption column expects
@@ -529,6 +548,7 @@ def _pjsip_upsert(row, password):
                         (id, transport, context, aors, auth, allow, dtmf_mode,
                          identify_by, disallow, outbound_auth,
                          from_user, from_domain, callerid,
+                         outbound_proxy,
                          media_encryption,
                          rtp_symmetric, force_rport, rewrite_contact,
                          direct_media,
@@ -536,6 +556,7 @@ def _pjsip_upsert(row, password):
                     VALUES (%s, %s, %s, %s, %s, %s, 'rfc4733',
                             %s, 'all', %s,
                             %s, %s, %s,
+                            %s,
                             %s,
                             'yes', 'yes', 'yes',
                             'no',
@@ -551,6 +572,7 @@ def _pjsip_upsert(row, password):
                         from_user         = EXCLUDED.from_user,
                         from_domain       = EXCLUDED.from_domain,
                         callerid          = EXCLUDED.callerid,
+                        outbound_proxy    = EXCLUDED.outbound_proxy,
                         media_encryption  = EXCLUDED.media_encryption,
                         rtp_symmetric     = EXCLUDED.rtp_symmetric,
                         force_rport       = EXCLUDED.force_rport,
@@ -563,6 +585,7 @@ def _pjsip_upsert(row, password):
                       identify_by, auth_id,
                       from_sip_user or None, from_domain_value or None,
                       callerid_value or None,
+                      outbound_proxy_value or None,
                       media_encryption_value))
             else:
                 cur.execute("""
@@ -570,6 +593,7 @@ def _pjsip_upsert(row, password):
                         (id, transport, context, aors, auth, allow, dtmf_mode,
                          identify_by, disallow, outbound_auth,
                          from_user, from_domain, callerid,
+                         outbound_proxy,
                          media_encryption,
                          rtp_symmetric, force_rport, rewrite_contact,
                          direct_media,
@@ -577,6 +601,7 @@ def _pjsip_upsert(row, password):
                     VALUES (%s, %s, %s, %s, %s, %s, 'rfc4733',
                             %s, 'all', %s,
                             %s, %s, %s,
+                            %s,
                             %s,
                             'yes', 'yes', 'yes',
                             'no',
@@ -592,6 +617,7 @@ def _pjsip_upsert(row, password):
                         from_user         = EXCLUDED.from_user,
                         from_domain       = EXCLUDED.from_domain,
                         callerid          = EXCLUDED.callerid,
+                        outbound_proxy    = EXCLUDED.outbound_proxy,
                         media_encryption  = EXCLUDED.media_encryption,
                         rtp_symmetric     = EXCLUDED.rtp_symmetric,
                         force_rport       = EXCLUDED.force_rport,
@@ -604,6 +630,7 @@ def _pjsip_upsert(row, password):
                       identify_by, auth_id,
                       from_sip_user or None, from_domain_value or None,
                       callerid_value or None,
+                      outbound_proxy_value or None,
                       media_encryption_value))
 
             if register_enabled:
