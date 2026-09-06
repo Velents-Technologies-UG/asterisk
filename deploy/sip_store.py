@@ -301,6 +301,61 @@ ALTER TABLE ps_auths         ALTER COLUMN id TYPE VARCHAR(190);
 ALTER TABLE ps_registrations ALTER COLUMN id TYPE VARCHAR(190);
 """
 
+# PJSIP contact bindings — where res_pjsip_registrar persists each
+# REGISTER once sorcery.conf maps `contact=realtime,ps_contacts`
+# (sorcery_realtime_agents.conf.sample) and extconfig maps the family.
+# Unmapped, contacts lived only in the pod-local astdb sqlite: the agent
+# showed Avail in `pjsip show contacts` but origination to it failed with
+# "Could not create dialog to invalid URI 'staff_<agent>'" and the
+# answered leg dropped (confirmed live on Azure nonprod, 2026-09-06).
+# Created here because nothing else migrates ps_contacts: call-engine's
+# migrations create the other five ps_* tables (0002/0006) but never
+# this one, and the contrib alembic tree is not run anywhere in this
+# deployment. Conversely, once sorcery maps the type, a MISSING table
+# makes the contact CREATE on REGISTER fail — agents then cannot
+# register at all — so this must land in the same image as the sorcery
+# line.
+#
+# Column set mirrors this source tree's contrib alembic end state
+# (43956d550a44 created id/uri/expiration_time/qualify_frequency; the
+# later migrations added/widened the rest), which is also exactly the
+# field list res_pjsip/location.c registers for the contact sorcery
+# type. Same deliberate deviations as musiconhold above: the yes/no
+# columns are plain VARCHAR(3) instead of the contrib ENUMs (CREATE
+# TYPE has no IF NOT EXISTS form; res_config_odbc traffics in text
+# either way). id stays VARCHAR(255) per contrib e96a0b8071c — contact
+# ids are `<aor-id>;@<32-hex>`, so even a tenant-namespaced 70-char aor
+# id fits without the 190 widen the other ps_* tables needed.
+#
+# The unique index mirrors contrib's ps_contacts_uq constraint on
+# (id, reg_server); CREATE UNIQUE INDEX IF NOT EXISTS keeps it
+# idempotent where ADD CONSTRAINT would abort every boot after the
+# first. ps_contacts_qualifyfreq_exp is the index the qualify/prune
+# scans use (contrib ef7efc2d3964).
+_DDL_PS_CONTACTS = r"""
+CREATE TABLE IF NOT EXISTS ps_contacts (
+    id                   VARCHAR(255) NOT NULL,
+    uri                  VARCHAR(511),
+    expiration_time      BIGINT,
+    qualify_frequency    INTEGER,
+    qualify_timeout      DOUBLE PRECISION,
+    qualify_2xx_only     VARCHAR(3),
+    authenticate_qualify VARCHAR(3),
+    outbound_proxy       VARCHAR(255),
+    path                 TEXT,
+    user_agent           VARCHAR(255),
+    endpoint             VARCHAR(255),
+    reg_server           VARCHAR(255),
+    via_addr             VARCHAR(40),
+    via_port             INTEGER,
+    call_id              VARCHAR(255),
+    prune_on_boot        VARCHAR(3)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ps_contacts_uq ON ps_contacts (id, reg_server);
+CREATE INDEX IF NOT EXISTS ps_contacts_id ON ps_contacts (id);
+CREATE INDEX IF NOT EXISTS ps_contacts_qualifyfreq_exp ON ps_contacts (qualify_frequency, expiration_time);
+"""
+
 # Asterisk realtime MusicOnHold class definitions. Written by the
 # call-engine's MohRegistry (POST /control/moh/register upserts
 # {name, mode='files', directory, sort='alpha'} keyed on name — its
@@ -652,6 +707,22 @@ def bootstrap(db_conn_factory) -> None:
         log.warning(
             "sip_store.bootstrap (pjsip id widen) failed: %s — "
             "tenant-namespaced PJSIP endpoint ids may be truncated",
+            exc,
+        )
+
+    # REGISTER contact persistence — see _DDL_PS_CONTACTS. Every
+    # statement is IF NOT EXISTS, so one execute is fine; own
+    # try/except because with sorcery mapping contact=realtime a
+    # missing table blocks agent registration outright.
+    try:
+        with db_conn_factory() as conn, conn.cursor() as cur:
+            cur.execute(_DDL_PS_CONTACTS)
+        log.info("sip_store.bootstrap: ps_contacts realtime table ensured")
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "sip_store.bootstrap (ps_contacts) failed: %s — REGISTER "
+            "contact writes will fail and agents cannot register until "
+            "the table exists",
             exc,
         )
 

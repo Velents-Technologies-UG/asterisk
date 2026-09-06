@@ -3,11 +3,19 @@
 ;
 ; Realtime engine bindings. Merge into /etc/asterisk/extconfig.conf.
 ;
-; Maps the five PJSIP realtime tables (endpoint/auth/aor/registration/
-; identify) plus the musiconhold class table to the ODBC connection
+; Maps the six PJSIP realtime tables (endpoint/auth/aor/contact/
+; registration/identify) plus the musiconhold class table to the ODBC connection
 ; named `asterisk` (defined in res_odbc_agents.conf.sample). The table
 ; names on the right are the Postgres table names the call-engine
 ; writes to.
+;
+; ps_contacts is where res_pjsip_registrar persists REGISTER contact
+; bindings, but ONLY once sorcery.conf maps contact=realtime,ps_contacts
+; (see sorcery_realtime_agents.conf.sample — without that mapping this
+; family is simply never consulted and contacts stay in the pod-local
+; astdb). The table is created by the sidecar's sip_store.bootstrap(),
+; not by any call-engine migration. If sorcery maps contact but this
+; family is missing, contact writes fail and agents cannot register.
 ;
 ; ps_identify is required for IP-based trunks where the carrier is
 ; identified by source IP rather than via REGISTER. The sidecar
@@ -32,6 +40,7 @@
 ps_endpoints     => odbc,asterisk,ps_endpoints
 ps_auths         => odbc,asterisk,ps_auths
 ps_aors          => odbc,asterisk,ps_aors
+ps_contacts      => odbc,asterisk,ps_contacts
 ps_registrations => odbc,asterisk,ps_registrations
 ps_identify      => odbc,asterisk,ps_identify
 musiconhold      => odbc,asterisk,musiconhold

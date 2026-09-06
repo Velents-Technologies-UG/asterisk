@@ -42,6 +42,19 @@
 endpoint=realtime,ps_endpoints
 auth=realtime,ps_auths
 aor=realtime,ps_aors
+; `contact` must be mapped alongside endpoint/auth/aor. Unmapped, the
+; type stays on res_pjsip's default astdb wizard, so REGISTER bindings
+; live only in the pod-local sqlite astdb: `pjsip show contacts` shows
+; the agent Avail while `realtime load ps_contacts endpoint <agent>`
+; returns nothing, and originating to the agent falls back to the bare
+; endpoint name as a request URI — "Could not create dialog to invalid
+; URI 'staff_<agent>'", answered leg drops. Confirmed live on Azure
+; nonprod 2026-09-06. Needs BOTH the ps_contacts family in
+; extconfig_realtime_agents.conf.sample AND the table itself (created
+; by deploy/sip_store.py bootstrap(); no call-engine migration makes
+; it) — with the mapping but no working family/table behind it,
+; contact CREATE fails on REGISTER and agents can't register at all.
+contact=realtime,ps_contacts
 
 [res_pjsip_outbound_registration]
 registration=realtime,ps_registrations
