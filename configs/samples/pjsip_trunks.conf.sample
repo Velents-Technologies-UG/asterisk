@@ -53,6 +53,11 @@ bind=0.0.0.0:5060
 ; every inbound trace); missing BYE => the agent side never learns the
 ; caller hung up. Only meaningful once external_signaling_address is
 ; injected at boot (entrypoint.sh); harmless without it.
+;
+; 5062 is the AWS-NLB default. A host-network deployment (Azure) reaches
+; the pod on the bind port 5060 directly and must set
+; ASTERISK_EXTERNAL_SIGNALING_PORT=5060, which entrypoint.sh (step 3b-port)
+; rewrites the line below to. Leave the env unset to keep this default.
 external_signaling_port=5062
 
 [transport-tcp]
