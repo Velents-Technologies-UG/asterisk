@@ -339,8 +339,12 @@ CREATE TABLE IF NOT EXISTS ps_contacts (
     expiration_time      BIGINT,
     qualify_frequency    INTEGER,
     qualify_timeout      DOUBLE PRECISION,
-    qualify_2xx_only     VARCHAR(3),
-    authenticate_qualify VARCHAR(3),
+    -- ast_bool_values, not yes/no: Asterisk writes the full set incl.
+    -- 'true'/'false', so these must hold >3 chars. VARCHAR(3) here caused
+    -- '22001 value too long' on every REGISTER (prune_on_boot='false'),
+    -- which failed the contact bind and left softphones unregistered.
+    qualify_2xx_only     VARCHAR(16),
+    authenticate_qualify VARCHAR(16),
     outbound_proxy       VARCHAR(255),
     path                 TEXT,
     user_agent           VARCHAR(255),
@@ -349,11 +353,25 @@ CREATE TABLE IF NOT EXISTS ps_contacts (
     via_addr             VARCHAR(40),
     via_port             INTEGER,
     call_id              VARCHAR(255),
-    prune_on_boot        VARCHAR(3)
+    prune_on_boot        VARCHAR(16)
 );
 CREATE UNIQUE INDEX IF NOT EXISTS ps_contacts_uq ON ps_contacts (id, reg_server);
 CREATE INDEX IF NOT EXISTS ps_contacts_id ON ps_contacts (id);
 CREATE INDEX IF NOT EXISTS ps_contacts_qualifyfreq_exp ON ps_contacts (qualify_frequency, expiration_time);
+"""
+
+# Widen the ast_bool_values columns an older _DDL_PS_CONTACTS sized VARCHAR(3)
+# for yes/no. Asterisk writes the FULL ast_bool_values set incl. 'true'/'false',
+# so a REGISTER stamping prune_on_boot='false' (5 chars) hit
+# '22001 value too long for type character varying(3)', the contact INSERT
+# failed, and register_aor_core logged "Unable to bind contact" — softphones
+# connected the WS but never registered (Azure, 2026-09-07). CREATE TABLE
+# IF NOT EXISTS cannot repair an existing table, so this ALTER runs every boot.
+# Idempotent: re-widening an already-VARCHAR(16) column is a no-op.
+_DDL_PS_CONTACTS_PATCH = r"""
+ALTER TABLE ps_contacts ALTER COLUMN qualify_2xx_only     TYPE VARCHAR(16);
+ALTER TABLE ps_contacts ALTER COLUMN authenticate_qualify TYPE VARCHAR(16);
+ALTER TABLE ps_contacts ALTER COLUMN prune_on_boot        TYPE VARCHAR(16);
 """
 
 # Asterisk realtime MusicOnHold class definitions. Written by the
@@ -723,6 +741,36 @@ def bootstrap(db_conn_factory) -> None:
             "sip_store.bootstrap (ps_contacts) failed: %s — REGISTER "
             "contact writes will fail and agents cannot register until "
             "the table exists",
+            exc,
+        )
+
+    # Repair an existing ps_contacts whose bool columns are VARCHAR(3).
+    # Same autocommit/per-statement pattern as the other patches; own
+    # try/except because this REPAIRS registration and must not roll back
+    # the rest of bootstrap if it cannot run.
+    try:
+        conn = db_conn_factory()
+        try:
+            conn.autocommit = True
+            with conn.cursor() as cur:
+                for stmt in _DDL_PS_CONTACTS_PATCH.split(";"):
+                    s = stmt.strip()
+                    if not s or s.startswith("--"):
+                        continue
+                    try:
+                        cur.execute(s)
+                    except Exception as inner_exc:  # noqa: BLE001
+                        log.warning(
+                            "sip_store.bootstrap (ps_contacts patch %r): %s",
+                            s[:80], inner_exc,
+                        )
+        finally:
+            conn.close()
+        log.info("sip_store.bootstrap: ps_contacts bool columns widened to VARCHAR(16)")
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "sip_store.bootstrap (ps_contacts patch) failed: %s — REGISTER "
+            "may hit '22001 value too long' and agents cannot register",
             exc,
         )
 
