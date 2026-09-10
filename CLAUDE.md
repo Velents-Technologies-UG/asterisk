@@ -12,6 +12,18 @@ This is a full upstream Asterisk source tree (build system, `main/`, `res/`, `ch
 
 The root `README.md` is the **stock upstream Asterisk README** — build/install instructions for Asterisk itself, nothing Velents-specific. For the actual deployment contract (ports, volumes, env-var templating, K8s notes, the `control_api.py` sidecar's full CRUD contract for PJSIP trunks), read `deploy/README.md`. For the call-engine-side dialplan wiring specifically, read `configs/samples/README.call-engine.md`.
 
+## Operating rules (binding) — Agentic Build Graph
+
+@docs/build-graph/OPERATING_RULES.md
+
+The Agentic Build Graph (`Velents-Technologies-UG/build-graph`) is installed in this repository:
+subagents `grounder` / `builder` / `reviewer` in `.claude/agents/`, skills `/increment`, `/verify`,
+`/status`, `/signal`, `/stage` in `.claude/skills/`, specs and handbook in `docs/build-graph/`. Its
+registers live in `docs/`: `PROJECT_CONTEXT.md`, `BLOCKERS.md`, `COVERAGE.md`, `DECISIONS.md`,
+`RESUME.md`, `codebase-dna.md`. Code changes run through `/increment` (it halts at the plan gate);
+nothing is reported done without `/verify`. The rules above govern *how* work is done here; the rest
+of this file is *what* this codebase is.
+
 ### Which control API is live: `control_api.py` (Python) vs. call-engine's `control-api.js` (Node) — RECONCILED 2026-08-17
 
 Both exist and both are live, but they are **not** duplicates competing for the same job. They overlap on exactly one surface — `/control/sip/*` — and there the Python sidecar wins.

@@ -39,7 +39,11 @@ out/
 tests/CI/output
 .develvars
 .devcontainer/
-.claude/
+# Ignore local Claude Code state, but keep the Agentic Build Graph's agents and
+# skills (docs/build-graph/), which are committed on purpose.
+.claude/*
+!.claude/agents/
+!.claude/skills/
 
 # Environment / secrets
 .env
