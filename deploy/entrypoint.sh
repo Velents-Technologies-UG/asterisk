@@ -175,48 +175,6 @@ if [ -n "${ASTERISK_TURN_ADDR:-}" ]; then
   fi
 fi
 
-# 3d. Widen (or narrow) the RTP port range from env.
-#
-# The range decides how many calls this Asterisk can carry, and the number is
-# not the port count: res_rtp_asterisk binds only EVEN ports and reserves the
-# odd one for RTCP (its allocator steps `x += 2`), and rtcp_mux changes what is
-# SIGNALLED rather than what is reserved. So capacity is
-# (end - start + 1) / 2 RTP instances, and one instance is one call LEG. A
-# bridged call is two legs, so a 4-port range is ONE concurrent call.
-#
-# This block exists because that was not a hypothetical. The Azure nonprod
-# manifest has set ASTERISK_RTP_START / ASTERISK_RTP_END since it moved off
-# AWS, with a comment saying the full range was restored - and nothing in this
-# image had ever read either variable, so the baked 10000-10003 applied and the
-# whole environment ran on two RTP instances. Prod was confirmed the same way
-# on 2026-09-11 (`asterisk -rx "rtp show settings"` printed 10000/10003) while
-# its NLB had been forwarding thirty ports for months.
-#
-# The right ceiling differs per deployment and only the deployment knows it:
-# behind an AWS NLB the range must match the forwarded ports EXACTLY (wider
-# gives calls that connect with no audio), while a hostNetwork pod has no such
-# ceiling. Hence env, with the baked sample as the fallback.
-#
-# Both values are required together and must be sane: a half-configured range
-# is how you get a silent mismatch with the load balancer, which is the failure
-# this is fixing. Anything unusable is refused LOUDLY and the baked values
-# stand, because a warned-about fallback is recoverable and a silent one is
-# what cost us this incident.
-if [ -n "${ASTERISK_RTP_START:-}" ] || [ -n "${ASTERISK_RTP_END:-}" ]; then
-  rtp_start="${ASTERISK_RTP_START:-}"
-  rtp_end="${ASTERISK_RTP_END:-}"
-  if [ -z "$rtp_start" ] || [ -z "$rtp_end" ]; then
-    log "WARNING: ASTERISK_RTP_START/ASTERISK_RTP_END must be set together (got start='${rtp_start}' end='${rtp_end}') - keeping the baked rtp.conf range"
-  elif ! printf '%s' "$rtp_start" | grep -qE '^[0-9]+$' || ! printf '%s' "$rtp_end" | grep -qE '^[0-9]+$'; then
-    log "WARNING: ASTERISK_RTP_START/END must be integers (got '${rtp_start}'/'${rtp_end}') - keeping the baked rtp.conf range"
-  elif [ "$rtp_end" -le "$rtp_start" ]; then
-    log "WARNING: ASTERISK_RTP_END (${rtp_end}) must be greater than ASTERISK_RTP_START (${rtp_start}) - keeping the baked rtp.conf range"
-  else
-    sed -i "s/^rtpstart=.*/rtpstart=${rtp_start}/; s/^rtpend=.*/rtpend=${rtp_end}/" /etc/asterisk/rtp.conf
-    log "rtp.conf range set from env: ${rtp_start}-${rtp_end} ($(( (rtp_end - rtp_start + 1) / 2 )) RTP instances, i.e. $(( (rtp_end - rtp_start + 1) / 4 )) concurrent two-leg calls)"
-  fi
-fi
-
 # 4. Runtime dirs - idempotent. PVCs / emptyDirs may mask the image's
 # pre-created versions, so re-create on every start.
 #
