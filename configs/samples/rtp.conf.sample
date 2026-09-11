@@ -22,7 +22,28 @@
 
 [general]
 rtpstart=10000
-rtpend=10003
+; 10000-10029: THIRTY ports, which is what the AWS NLB in front of this pod
+; already forwards (devops aws/velents/prod/helm-charts/asterisk/values.yaml,
+; serviceUDP.portRange). The two MUST stay in sync in BOTH directions: wider
+; here than the NLB forwards gives calls that connect with no audio, and
+; narrower here silently caps capacity below the infrastructure you are paying
+; for, which is what this line did until 2026-09-11.
+;
+; Capacity, because the arithmetic is not what the port count suggests:
+; res_rtp_asterisk binds only EVEN ports and reserves the odd one for RTCP
+; (the allocator steps `x += 2`), and rtcp_mux changes what is SIGNALLED, not
+; what is reserved. So the pool is (end - start + 1) / 2 RTP instances, and one
+; instance is one LEG. A bridged call is two legs.
+;
+; At the old 10000-10003 that was two instances, i.e. ONE concurrent call, on
+; production, with nothing spare for a supervisor snoop. Confirmed live on the
+; prod pod (`rtp show settings`) on 2026-09-11, after a dead agent leg holding
+; one of the two instances left the next caller with a SIP failure.
+;
+; Override per deployment with ASTERISK_RTP_START / ASTERISK_RTP_END rather
+; than editing this file: a hostNetwork deployment has no NLB port ceiling at
+; all and can go far wider. See deploy/entrypoint.sh step 3d.
+rtpend=10029
 
 ; STUN server for WebRTC ICE candidate discovery. Without this,
 ; ICE-enabled endpoints (ps_endpoints.ice_support=yes — every WSS
