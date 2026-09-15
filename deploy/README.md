@@ -135,14 +135,24 @@ All three should be `Running`.
 
 ## Call-engine control API ingress (cross-cluster)
 
-The call-engine runs as a Python sidecar process inside the Asterisk
+The control API runs as a Python sidecar process inside the Asterisk
 pod (`deploy/control_api.py`, launched by `entrypoint.sh`). It binds
-**TCP 8092** for `/control/*` and `/healthz`. It is a sensitive admin
-surface: it will provision PJSIP trunks, disposition calls, drive the
-dialplan over ARI, and expose operational telemetry. The current
-checked-in version is a stub: `/healthz` works and bearer auth is
-enforced on `/control/*`, but the real ARI/AMI plumbing for each
-endpoint lands incrementally.
+**TCP 8092** for `/control/*`, `/healthz` and `/readyz`. It is a
+sensitive admin surface: it provisions PJSIP trunks, providers and
+trunk accounts, issues per-agent SIP credentials, originates calls, and
+reloads Asterisk modules.
+
+This is **fully implemented**, not a stub — every route in the table
+below performs real Postgres writes and/or ARI calls. It is also the
+**live** SIP-trunk CRUD path in prod: `CALL_ENGINE_CONTROL_URL` points
+at `http://asterisk:8092` (this pod), not at the call-engine pod. The
+`call-engine` repo's `src/control-api.js` carries a smaller, older,
+**tenant-blind** `/control/sip/*` block that this supersedes — see the
+reconciliation table in the repo-root `CLAUDE.md` before wiring
+anything against either.
+
+Note that everything on this port is `/control/*`-only: any other path,
+`/ari/*` included, gets a flat 404. ARI itself is on **8088**.
 
 Required env in the pod spec:
 
@@ -263,7 +273,7 @@ verify on a live pod when a call doesn't connect.
 | # | From | To | Why it matters |
 |---|------|----|----|
 | 1 | `ps_endpoints.id` | trunk id from POST body | Dialplan `[from-trunk-out]` (`configs/samples/extensions_ai_runtime.conf.sample:113`) dials `PJSIP/${EXTEN}@${TRUNK_ENDPOINT}` — the endpoint name has to match the trunk id the call-engine puts in `TRUNK_ENDPOINT`. |
-| 2 | `ps_endpoints.context` | `from-trunk` (or `TRUNK_INBOUND_CONTEXT`) | Inbound INVITEs from the provider land in dialplan `[from-trunk]` (`extensions_ai_runtime.conf.sample:55`), which fires `Stasis(call-engine, inbound, ${EXTEN})`. Wrong context = inbound calls dropped. |
+| 2 | `ps_endpoints.context` | `from-trunk` (or `TRUNK_INBOUND_CONTEXT`) | Inbound INVITEs from the provider land in dialplan `[from-trunk]` (that section of `configs/samples/extensions_ai_runtime.conf.sample` — cited by name, not line number, because the line moved the first time the file grew a header), which fires `Stasis(call-engine, inbound, ${EXTEN})`. Wrong context = inbound calls dropped. |
 | 3 | `ps_endpoints.aors` | trunk id (same string) | The endpoint resolves contact info via the matching `ps_aors` row. |
 | 4 | `ps_endpoints.auth` + `outbound_auth` | `<trunk-id>-auth` | Asterisk authenticates inbound (challenge) and outbound (sending INVITE) via this auth row. |
 | 5 | `ps_aors.contact` | trunk `serverUri` | When Asterisk dials out via `PJSIP/${EXTEN}@<trunk_id>`, it appends EXTEN to this contact. |
@@ -295,10 +305,62 @@ call to land somewhere useful:
 |-----|----------|--------------|
 | `CONTROL_API_SECRET` | yes | Bearer auth on `/control/*` (existing). |
 | `DATABASE_URL` | for real call traffic | `postgres://USER:PASS@HOST:PORT/DB` of the same DB Asterisk reads via ODBC (the `[asterisk]` connection in `res_odbc_agents.conf`). Without it, sidecar falls back to memory-only. |
-| `ASTERISK_BIN` | no | Override the Asterisk CLI binary path (default `asterisk`, on PATH in both dev + prod images). Used by `/control/asterisk/reload`. |
+| `ASTERISK_BIN` | no | Override the Asterisk CLI binary path (default `asterisk`, on PATH in both dev + prod images). Used by `/control/asterisk/reload` and the MOH class probe. |
+| `MOH_PROBE_TIMEOUT_SECONDS` | no | Per-CLI-read timeout for `/control/asterisk/moh-class/{class}` (default `5`). A timeout yields `resolved: null`, never an answer. |
+| `MOH_DB_PROBE_TIMEOUT_SECONDS` | no | Connect + statement timeout for the same route's **direct SELECT** against the sidecar's own database (default `5`). Bounds both, because the probe runs on a queue-save path. A timeout yields `rowInSidecarDb: null` — never `false`. |
+| `MOH_ODBC_SECTION` | no | Fallback res_odbc.conf section name to report connection state for (default `asterisk`). Only used when `core show config mappings` did not yield the mapping's own middle token, which is preferred. |
+| `ODBC_DSN_NAME` | no | Must match what `render_odbc.py` renders (default `asterisk-pgsql`). Compared against the DSN `odbc show` reports, to detect a masked/stale `odbc.ini` — see `odbcDsnMatchesRendered` below. |
+| `AST_DATA_DIR` | no | Default `/var/lib/asterisk`. Only used to resolve a **relative** MOH `directory` the way `res_musiconhold.c`'s `moh_scan_files` does. |
 | `PJSIP_TRANSPORT_NAME` | no | Default `transport-udp` — must match `pjsip_trunks.conf`'s `[transport-udp]` section. |
 | `TRUNK_INBOUND_CONTEXT` | no | Dialplan context inbound INVITEs land in. Default `from-trunk` (matches `extensions_ai_runtime.conf`). |
 | `TRUNK_DEFAULT_ALLOW` | no | Codec list written to `ps_endpoints.allow`. Default `ulaw,alaw`. |
+
+#### Hold music plays the stock default: comparing the two `DATABASE_URL`s
+
+Per-queue hold music needs a `musiconhold` row that **Asterisk** can read.
+call-engine INSERTs it through *its own* `DATABASE_URL`; Asterisk reads through
+the DSN `render_odbc.py` renders from *this pod's* `DATABASE_URL`. Nothing
+reconciles the two, and when they differ the save succeeds, the row exists, and
+every caller hears the stock default.
+
+**Ask the probe first — it now answers this directly.** `fault` on
+`GET /control/asterisk/moh-class/{class}` distinguishes them:
+
+| `fault` | Meaning | Where to look |
+|---|---|---|
+| `row-absent-from-sidecar-db` | The row is **not** in the database this pod reads. | The two `DATABASE_URL`s — compare them as below. |
+| `row-present-asterisk-cannot-read-it` | The row **is** here and Asterisk still will not return it. | res_odbc connection state, the ODBC user's `search_path`, the table's columns. **Not** the URLs. |
+| `asterisk-reads-a-different-dsn` | Something is masking `odbc.ini`. | Fix that first; until then this pod's own view proves nothing about Asterisk's. |
+| `row-not-visible-origin-undetermined` | Asterisk says no row; our own SELECT could not run. | Nothing is established yet — read `sidecarDbDetail`. |
+
+Only compare the URLs for the first row. The comparison is **host, port and
+database name only** — never a credential, and neither command below can print
+one, which is the point of using them rather than reading the secret:
+
+```bash
+NS=velents-test
+
+# Asterisk's side. The sidecar reports its own identity as host:port/dbname.
+kubectl -n "$NS" exec deploy/asterisk -- python3 -c \
+  'import os,urllib.parse as p; u=p.urlparse(os.environ.get("DATABASE_URL",""));
+print(f"asterisk    {u.hostname}:{u.port or 5432}/{(u.path or chr(47)).lstrip(chr(47))}")'
+
+# call-engine's side. Same three fields, computed in-pod (node, not python).
+kubectl -n "$NS" exec deploy/call-engine -- node -e \
+  'const u=new URL(process.env.DATABASE_URL); console.log(`call-engine ${u.hostname}:${u.port||5432}${u.pathname}`)'
+```
+
+Two identical lines means the databases match and the fault is elsewhere —
+which is exactly what `row-present-asterisk-cannot-read-it` already told you.
+Two different lines is the fault, and it is fixed in **AWS Secrets Manager**,
+not with `kubectl patch secret`: External Secrets Operator resyncs every 60s
+and silently reverts a patched Secret. `envFrom` is injected at pod start and
+`subPath` file mounts never live-update, so **any secret change needs a rollout
+restart.**
+
+`sidecarDatabaseIdentity` in the probe response is the same string as the first
+command's output, so in practice one `curl` of the probe plus the second command
+is enough.
 
 #### Postgres schema requirement
 
@@ -334,6 +396,7 @@ all four rows. ID convention: trunk id `primary` → endpoint
 | POST/PUT | `/control/sip/trunks/{id}` | Upsert; the URL `id` and (optional) body `id` must match. |
 | DELETE | `/control/sip/trunks/{id}`  | `204` empty body, or `404`. |
 | POST   | `/control/asterisk/reload`  | `200` `{"reloaded": false, "stub": true, "module": "..."}`. The real call-engine will exec `module reload` over AMI/ARI and flip `reloaded: true`. agent-hub already swallows failures here, so a 501 is harmless — but 200 keeps the network tab clean. |
+| GET    | `/control/asterisk/moh-class/{class}` | `200` `{"mohClass", "family", "familyMapped", "rowVisible", "resolved", "fault", "rowInSidecarDb", "tableInSidecarDb", "sidecarDatabase", "sidecarDatabaseIdentity", "odbc", "odbcConnectionUp", "odbcSection", "odbcDsnMatchesRendered", "renderedDsnName", "audioDirectory"?, "engine"?, "database"?, "table"?, "detail"?}`. Does this MusicOnHold class actually resolve? `resolved` is a **tri-state**: `true` (mapped **and** the row is visible to Asterisk — hold music plays), `false` (positively determined it will not; `familyMapped` says which half is missing), `null` (**could not determine** — Asterisk unreachable, timed out, or answered unrecognisably). Always `200` for all three; `422` only for a malformed class name. Consumed by call-engine's `MohRegistry` so a successful `POST /control/moh/register` can stop asserting `realtimeMappingRequired` unconditionally. Implemented as two `asterisk -rx` reads — `core show config mappings` (the exact gate `ast_check_realtime("musiconhold")` answers from) and `realtime load musiconhold name <class>` (byte-for-byte the query `res_musiconhold` runs at hold time). **Not** `moh show classes`: realtime classes are instantiated lazily on first hold, so a working class is absent from that list until someone is actually on hold. <br><br>**`familyMapped: true` + `rowVisible: false` used to be one answer covering two faults with opposite fixes**, leaving the operator to hand-compare two Kubernetes secrets. A third read now tells them apart: a **direct SELECT** through the sidecar's own connection (`rowInSidecarDb`, plus `tableInSidecarDb`). A row found there but not by Asterisk means the databases match and something else is wrong (`fault: row-present-asterisk-cannot-read-it` — look at res_odbc state, `search_path`, columns). No row there means call-engine's INSERT landed elsewhere (`fault: row-absent-from-sidecar-db` — compare the two `DATABASE_URL`s). If the SELECT could not run, `rowInSidecarDb` is `null` and `fault` is `row-not-visible-origin-undetermined`; a database error is never reported as a missing row. `sidecarDatabaseIdentity` is `host:port/dbname` and **never** a username or password — its whole value is being comparable with call-engine's without either side printing a credential. `odbcConnectionUp` is tri-state: `true` = a connection is currently held, `false` = res_odbc has no such section at all, `null` = **0 active connections, which does not distinguish idle from dead**. `lastFailedConnect` is reported but never folded into it (res_odbc never clears it on a later success, so it is a high-water mark). `odbcDsnMatchesRendered: false` outranks everything, because a masked `odbc.ini` means the sidecar's own database says nothing about Asterisk's. `audioDirectory` appears only when the SELECT returned a `directory`; a missing or empty one is why a caller hears **silence**, whereas a class that does not resolve falls through to `default` and the caller hears the **stock default**. `exists: true` is never promoted to an audibility claim (format policy lives in call-engine). |
 
 Bearer auth (`CONTROL_API_SECRET`) on every `/control/*` route, same
 as the existing surfaces. `/healthz` stays unauthenticated.
@@ -526,5 +589,10 @@ short message. The call-engine should respond with:
 - `configs/samples/README.call-engine.md` — install steps for a
   non-containerised host. The Asterisk-side docs there explain each
   config fragment we ship.
-- `agent-hub/services/agenthub-call-engine/README.md` — companion
-  service that talks ARI to this Asterisk.
+- the standalone **`call-engine`** repo (sibling checkout `../call-engine`)
+  — companion service that talks ARI to this Asterisk. Its `CLAUDE.md` is
+  the current map; its `README.md` predates the queue/gateway/flow-runner
+  modules. The old `agent-hub/services/agenthub-call-engine/` path is dead.
+- the repo-root `CLAUDE.md` — Velents-owned surface of this tree, the two
+  Asterisk dialplan pattern-matching gotchas, and the control-api
+  reconciliation (this sidecar vs. call-engine's Node one).

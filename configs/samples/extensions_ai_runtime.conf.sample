@@ -9,6 +9,11 @@
 ; Required modules (all ship with Asterisk 18+):
 ;     app_stasis.so, res_stasis.so, res_ari.so
 ;     app_audiosocket.so, res_audiosocket.so
+;     app_playback.so + the English core sounds ([from-trunk]'s
+;     engine-down announcement); Congestion() is a PBX builtin
+;
+; DevOps: the image bakes this file in at build time, so a live pod needs
+; `asterisk -rx 'dialplan reload'` after the conf is synced or nothing changes.
 ;
 
 ;------------------------------------------------------------
@@ -60,16 +65,38 @@ exten => _X.,1,NoOp(ai-runtime: unmatched ${EXTEN})
 ; then reports "Channel not found" and the call is lost. A CANCEL only
 ; has effect on a still-pending INVITE; once we've sent a local, instant
 ; 200 OK here, a same-origin CANCEL is inapplicable and the call stays up.
+;
+; The priorities AFTER Stasis() run only when Stasis returns without taking
+; the call — call-engine down, or its ARI app unregistered. Because we
+; already answered above, the caller is sitting in a live, silent call at
+; that point: dead air, on the one inbound failure mode we control. The
+; announcement + congestion tone makes it audible instead. Congestion()
+; returns -1, so the trailing Hangup() never actually executes — it stays
+; only for symmetry with every other extension in this file.
+;
+; all-circuits-busy-now is a stock English core-sounds prompt (the image
+; enables CORE-SOUNDS-EN-WAV); a name that isn't in the installed set logs
+; an error and plays silence, which is the very failure being removed here,
+; so don't substitute an invented one. A trunk that loses REGISTER is NOT
+; covered by any of this — the carrier never delivers the INVITE, so no
+; dialplan of ours runs at all; that half is alerting-only.
+;
+; Both patterns exist for the `_X.`-doesn't-match-`+` reason documented in
+; [from-wss-agents-out] below, and their bodies must stay identical.
 exten => _+X.,1,NoOp(inbound ${CALLERID(num)} -> ${EXTEN})
  same => n,Set(__CALLED_DID=${EXTEN})
  same => n,Answer()
  same => n,Stasis(call-engine,inbound,${EXTEN})
+ same => n,Playback(all-circuits-busy-now)
+ same => n,Congestion(5)
  same => n,Hangup()
 
 exten => _X.,1,NoOp(inbound ${CALLERID(num)} -> ${EXTEN})
  same => n,Set(__CALLED_DID=${EXTEN})
  same => n,Answer()
  same => n,Stasis(call-engine,inbound,${EXTEN})
+ same => n,Playback(all-circuits-busy-now)
+ same => n,Congestion(5)
  same => n,Hangup()
 
 ;------------------------------------------------------------
@@ -79,9 +106,34 @@ exten => _X.,1,NoOp(inbound ${CALLERID(num)} -> ${EXTEN})
 ; Originated by the call-engine as Local/agent_<staff_id>@from-agents/n.
 ; This is the INBOUND ring target, NOT where outbound from agents
 ; goes; outbound is in [from-wss-agents-out] below.
+;
+; Pattern is _age[n]t_. (not _agent_X. or a bare _agent_.) - two distinct
+; Asterisk pattern gotchas stacked here:
+;   1. X in Asterisk dialplan pattern syntax matches digits 0-9 ONLY.
+;      call-engine's AgentSipStore.provisionAgent() accepts an arbitrary
+;      string agentId (e.g. a tenant-scoped slug like
+;      "velentsagents_testCallCenter_2", not necessarily a bare numeric
+;      staff id), so a digits-only pattern silently rejected every such
+;      agent with "No such extension/context ... while calling Local
+;      channel" - breaking every feature that rings an agent this way:
+;      transfer, conference, consult, snoop, and queue-routed inbound
+;      alike. `.` matches one or more characters of any kind, fixing
+;      that part - but:
+;   2. Asterisk's pattern matcher treats the letters x/z/n (lowercase
+;      too, not just X/Z/N) as digit-class wildcards ANYWHERE they
+;      appear in a pattern, not just as literal characters - "agent"
+;      contains a literal 'n', which Asterisk silently reinterprets as
+;      [2-9], so a bare _agent_. pattern never matches the literal
+;      word "agent" at all (confirmed via `dialplan add extension` +
+;      `dialplan show` isolation testing - "flow"/"staf"/"hello" all
+;      matched fine as literal prefixes in the same position; "agent"
+;      and "xyz" never did, for exactly this reason). Wrapping the n in
+;      a single-character class - [n] - forces literal matching,
+;      bypassing the wildcard reinterpretation, same as it would for
+;      any literal x/z/n a future pattern needs here.
 ;------------------------------------------------------------
 [from-agents]
-exten => _agent_X.,1,NoOp(Ringing staff_${EXTEN:6} for queue call)
+exten => _age[n]t_.,1,NoOp(Ringing staff_${EXTEN:6} for queue call)
  same => n,Dial(PJSIP/staff_${EXTEN:6},20)
  same => n,Hangup()
 
@@ -103,7 +155,17 @@ exten => _agent_X.,1,NoOp(Ringing staff_${EXTEN:6} for queue call)
 ;             can resolve which staff member is dialing
 ;------------------------------------------------------------
 [from-wss-agents-out]
+; Two patterns, same body: `X` in Asterisk dialplan syntax matches digits
+; 0-9 ONLY, not `+` - a bare _X. silently rejects any E.164-formatted dial
+; (e.g. +201121750740) with "extension not found", even though it's a
+; perfectly valid number. _+X. covers the international-dialing case;
+; _X. keeps working for numbers dialed without a leading +.
 exten => _X.,1,NoOp(Outbound from ${CHANNEL(endpoint)} -> ${EXTEN})
+ same => n,Set(__AGENT_ENDPOINT=${CHANNEL(endpoint)})
+ same => n,Set(__DIALED_NUMBER=${EXTEN})
+ same => n,Stasis(call-engine,outbound_human,${EXTEN},${CHANNEL(endpoint)})
+ same => n,Hangup()
+exten => _+X.,1,NoOp(Outbound from ${CHANNEL(endpoint)} -> ${EXTEN})
  same => n,Set(__AGENT_ENDPOINT=${CHANNEL(endpoint)})
  same => n,Set(__DIALED_NUMBER=${EXTEN})
  same => n,Stasis(call-engine,outbound_human,${EXTEN},${CHANNEL(endpoint)})
@@ -118,9 +180,22 @@ exten => _X.,1,NoOp(Outbound from ${CHANNEL(endpoint)} -> ${EXTEN})
 ; Channel variables (set by call-engine .originate({variables:{...}})):
 ;   TRUNK_ENDPOINT       e.g. 'trunk-out' or 'usa-trunk'
 ;   OUTBOUND_CALLER_ID   E.164 string, may be empty
+;
+; Two patterns, same body, same reason as [from-wss-agents-out]'s pair:
+; `X` matches digits 0-9 ONLY, not `+` - a bare _X. silently rejected any
+; E.164-formatted dial (e.g. +201112235924) with "No such extension/
+; context ... while calling Local channel", so the trunk leg never even
+; originated even though the agent's own leg was already answered and
+; bridged - looked like a live call in the UI with total silence on the
+; PSTN side. _+X. covers the international-dialing case; _X. keeps
+; working for numbers dialed without a leading +.
 ;------------------------------------------------------------
 [from-trunk-out]
 exten => _X.,1,NoOp(Trunk leg via ${TRUNK_ENDPOINT} -> ${EXTEN})
+ same => n,ExecIf($[!${ISNULL(${OUTBOUND_CALLER_ID})}]?Set(CALLERID(num)=${OUTBOUND_CALLER_ID}))
+ same => n,Dial(PJSIP/${EXTEN}@${TRUNK_ENDPOINT},60)
+ same => n,Hangup()
+exten => _+X.,1,NoOp(Trunk leg via ${TRUNK_ENDPOINT} -> ${EXTEN})
  same => n,ExecIf($[!${ISNULL(${OUTBOUND_CALLER_ID})}]?Set(CALLERID(num)=${OUTBOUND_CALLER_ID}))
  same => n,Dial(PJSIP/${EXTEN}@${TRUNK_ENDPOINT},60)
  same => n,Hangup()

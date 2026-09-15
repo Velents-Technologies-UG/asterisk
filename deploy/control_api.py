@@ -56,6 +56,49 @@ ARI_USERNAME = os.environ.get("ARI_USERNAME", "").strip()
 ARI_PASSWORD = os.environ.get("ARI_PASSWORD", "").strip()
 ARI_HEALTH_URL = os.environ.get("ARI_HEALTH_URL", "http://127.0.0.1:8088/ari/asterisk/info").strip()
 ARI_HEALTH_TIMEOUT_SECONDS = float(os.environ.get("ARI_HEALTH_TIMEOUT_SECONDS", "3"))
+# Per-trunk live channel counts (GET /ari/endpoints/PJSIP/{id}) reuse the
+# same loopback listener and basic-auth pair as the health probe. The ARI
+# root is derived from ARI_HEALTH_URL rather than a new env var; a
+# customised health URL that doesn't end in /asterisk/info falls back to
+# the loopback default. The timeout is deliberately shorter than the
+# health probe's: the count decorates trunk rows whose *state* half must
+# keep flowing when ARI is slow — state first, count only if cheap.
+_ARI_BASE_URL = (
+    ARI_HEALTH_URL[: -len("/asterisk/info")]
+    if ARI_HEALTH_URL.endswith("/asterisk/info")
+    else "http://127.0.0.1:8088/ari"
+)
+ARI_CHANNEL_COUNT_TIMEOUT_SECONDS = float(
+    os.environ.get("ARI_CHANNEL_COUNT_TIMEOUT_SECONDS", "2")
+)
+# MOH class resolution probe (GET /control/asterisk/moh-class/<class>).
+# Two `asterisk -rx` reads, the same exec pattern reload_asterisk uses. Not
+# ARI: res_musiconhold is not sorcery-backed, so no /ari/asterisk/config
+# resource can see a MOH class or extconfig.conf, and this module has no AMI
+# client. 5s covers a `realtime load` that has to open an ODBC connection
+# cold; the caller (call-engine's MohRegistry) reads a timeout as "could not
+# determine", never as an answer.
+MOH_PROBE_TIMEOUT_SECONDS = float(os.environ.get("MOH_PROBE_TIMEOUT_SECONDS", "5"))
+MOH_REALTIME_FAMILY = "musiconhold"
+# The direct-SELECT half of the same probe. Bounds both the connect and the
+# statement, because this runs on a queue-save path: an unreachable database
+# has to land in "could not determine" quickly rather than hold the save open.
+MOH_DB_PROBE_TIMEOUT_SECONDS = float(
+    os.environ.get("MOH_DB_PROBE_TIMEOUT_SECONDS", "5")
+)
+# res_odbc.conf section the extconfig mapping's middle token names
+# (`musiconhold => odbc,asterisk,musiconhold` -> section `asterisk`). Only a
+# fallback: the probe prefers the token it actually read from the mapping.
+MOH_ODBC_SECTION_DEFAULT = os.environ.get("MOH_ODBC_SECTION", "asterisk")
+# Mirrors render_odbc.py's ODBC_DSN_NAME default, and is compared against the
+# DSN `odbc show` reports. A mismatch is the one cheap, decisive way to learn
+# that Asterisk is NOT using the DSN this pod rendered - i.e. that the
+# sidecar's own connection stopped being evidence about Asterisk's database.
+ODBC_DSN_NAME = os.environ.get("ODBC_DSN_NAME", "asterisk-pgsql")
+# Asterisk resolves a RELATIVE MOH `directory` against AST_DATA_DIR
+# (res_musiconhold.c moh_scan_files). Overridable for an image built with a
+# different --localstatedir.
+AST_DATA_DIR = os.environ.get("AST_DATA_DIR", "/var/lib/asterisk")
 DEFAULT_TRANSPORT = os.environ.get("PJSIP_TRANSPORT_NAME", "transport-udp")
 DEFAULT_INBOUND_CONTEXT = os.environ.get("TRUNK_INBOUND_CONTEXT", "from-trunk")
 DEFAULT_CODEC_ALLOW = os.environ.get("TRUNK_DEFAULT_ALLOW", "ulaw,alaw")
@@ -69,6 +112,13 @@ STATUS_FEEDER_AGENTS_KEY = os.environ.get("STATUS_FEEDER_AGENTS_KEY", "cx:agents
 STATUS_FEEDER_CHECKED_AT_KEY = os.environ.get(
     "STATUS_FEEDER_CHECKED_AT_KEY", "cx:trunks:checked_at"
 )
+# Server-side trunk drop/restore alerts (AGH-6664). When a known trunk
+# crosses online<->offline the feeder POSTs TrunkStatusChanged here, so
+# the alert fires with no browser open (the previously shipped alert was
+# a client-side hook — no admin on the page meant no alert ever fired).
+# Unset URL = feature off; the feeder skips silently.
+TRUNK_STATUS_WEBHOOK_URL = os.environ.get("TRUNK_STATUS_WEBHOOK_URL", "").strip()
+CALL_ENGINE_WEBHOOK_SECRET = os.environ.get("CALL_ENGINE_WEBHOOK_SECRET", "").strip()
 MAX_BODY_BYTES = 64 * 1024
 
 # ASTERISK_EXTERNAL_IP is the master NAT switch. If it's unset but a public
@@ -224,8 +274,15 @@ def _db_enabled():
     return HAS_PSYCOPG2 and bool(DATABASE_URL)
 
 
-def _db_conn():
-    """Open a psycopg2 connection from DATABASE_URL."""
+def _db_conn(**extra):
+    """Open a psycopg2 connection from DATABASE_URL.
+
+    `extra` is forwarded verbatim to psycopg2.connect so a caller on a
+    latency-sensitive path - the MOH probe - can bound its own connect and
+    statement without every other caller inheriting a timeout it never asked
+    for. Called with no arguments everywhere else, including as sip_store's
+    `db_conn_factory`.
+    """
     u = urllib.parse.urlparse(DATABASE_URL)
     return psycopg2.connect(
         host=u.hostname,
@@ -234,6 +291,7 @@ def _db_conn():
         user=urllib.parse.unquote(u.username) if u.username else None,
         password=urllib.parse.unquote(u.password) if u.password else None,
         sslmode=DATABASE_SSLMODE,
+        **extra,
     )
 
 
@@ -367,6 +425,18 @@ def _pjsip_upsert(row, password):
                    if (not register_enabled or carrier_ip)
                    else "username,auth_username")
 
+    # INBOUND auth (ps_endpoints.auth) - not to be confused with
+    # outbound_auth, which is us authenticating TO the carrier and is always
+    # set when credentials exist. An IP trunk (register_enabled=False)
+    # identifies the carrier by source IP and must NEVER challenge it:
+    # writing auth here made Asterisk answer Voylo's own inbound INVITE with
+    # 401 Unauthorized, which the carrier does not answer - its portal
+    # reported CHANUNAVAIL in 18ms and every inbound call died (AGH-8426
+    # follow-on, 2026-08-30; the hand-proven working endpoint has auth=NULL).
+    # Registering trunks keep the legacy behaviour - some carriers do
+    # authenticate requests toward a registered account.
+    inbound_auth_id = auth_id if register_enabled else None
+
     # Carrier compatibility, proven against innocalls:
     #
     #   - From URI user MUST match the SIP auth username. The trunk admin
@@ -408,17 +478,36 @@ def _pjsip_upsert(row, password):
     #     asterisk is behind any NAT or load balancer — i.e. nearly
     #     always in a Kubernetes deployment. No-op when there's truly
     #     no NAT, so safe to set unconditionally.
-    from_sip_user = (
-        row.get("from_sip_user")
-        or row.get("from_user_override")
-        or row.get("username")
-        or ""
-    )
+    # The 'caller_id' sentinel (sip_trunks.from_sip_user): write NULL to BOTH
+    # from_user and callerid, so the per-call CALLERID the dial-plan rule sets
+    # is what builds the From header. Voylo screens From against
+    # allowed_caller_ids and 403s the auth username in 2ms; the hand-proven
+    # working endpoint had exactly these two columns NULL (AGH-8426,
+    # 2026-08-30). Everything else keeps the innocalls-proven default below -
+    # removing that default outright would 403 the carrier it was proven on.
+    per_call_caller_id = (row.get("from_sip_user") or "").strip().lower() == "caller_id"
+    if per_call_caller_id:
+        from_sip_user = ""
+        callerid_value = ""
+    else:
+        from_sip_user = (
+            row.get("from_sip_user")
+            or row.get("from_user_override")
+            or row.get("username")
+            or ""
+        )
+        callerid_source = row.get("from_user") or row.get("username") or ""
+        callerid_value = (
+            f'"{callerid_source}" <{callerid_source}>' if callerid_source else ""
+        )
     from_domain_value = row.get("from_domain") or _server_uri_host(server_uri) or ""
-    callerid_source = row.get("from_user") or row.get("username") or ""
-    callerid_value = (
-        f'"{callerid_source}" <{callerid_source}>' if callerid_source else ""
-    )
+
+    # Realtime escaping for the outbound proxy: res_sorcery_realtime decodes
+    # '^3B' back to ';', and a literal ';' in the column is read as a field
+    # separator - the live hand-provisioned row stores
+    # 'sip:167.172.191.79^3Blr' for exactly this reason. Canonical sip_trunks
+    # keeps the human form; the escape happens only on this write.
+    outbound_proxy_value = (row.get("outbound_proxy") or "").replace(";", "^3B")
 
     # Trunk-side media encryption. The canonical sip_trunks shape uses
     # 'none' for plain RTP; Asterisk's media_encryption column expects
@@ -471,6 +560,7 @@ def _pjsip_upsert(row, password):
                         (id, transport, context, aors, auth, allow, dtmf_mode,
                          identify_by, disallow, outbound_auth,
                          from_user, from_domain, callerid,
+                         outbound_proxy,
                          media_encryption,
                          rtp_symmetric, force_rport, rewrite_contact,
                          direct_media,
@@ -478,6 +568,7 @@ def _pjsip_upsert(row, password):
                     VALUES (%s, %s, %s, %s, %s, %s, 'rfc4733',
                             %s, 'all', %s,
                             %s, %s, %s,
+                            %s,
                             %s,
                             'yes', 'yes', 'yes',
                             'no',
@@ -493,6 +584,7 @@ def _pjsip_upsert(row, password):
                         from_user         = EXCLUDED.from_user,
                         from_domain       = EXCLUDED.from_domain,
                         callerid          = EXCLUDED.callerid,
+                        outbound_proxy    = EXCLUDED.outbound_proxy,
                         media_encryption  = EXCLUDED.media_encryption,
                         rtp_symmetric     = EXCLUDED.rtp_symmetric,
                         force_rport       = EXCLUDED.force_rport,
@@ -501,10 +593,11 @@ def _pjsip_upsert(row, password):
                         trust_id_outbound = EXCLUDED.trust_id_outbound,
                         send_pai          = EXCLUDED.send_pai,
                         send_rpid         = EXCLUDED.send_rpid
-                """, (row["id"], transport, context, row["id"], auth_id, allow,
+                """, (row["id"], transport, context, row["id"], inbound_auth_id, allow,
                       identify_by, auth_id,
                       from_sip_user or None, from_domain_value or None,
                       callerid_value or None,
+                      outbound_proxy_value or None,
                       media_encryption_value))
             else:
                 cur.execute("""
@@ -512,6 +605,7 @@ def _pjsip_upsert(row, password):
                         (id, transport, context, aors, auth, allow, dtmf_mode,
                          identify_by, disallow, outbound_auth,
                          from_user, from_domain, callerid,
+                         outbound_proxy,
                          media_encryption,
                          rtp_symmetric, force_rport, rewrite_contact,
                          direct_media,
@@ -519,6 +613,7 @@ def _pjsip_upsert(row, password):
                     VALUES (%s, %s, %s, %s, %s, %s, 'rfc4733',
                             %s, 'all', %s,
                             %s, %s, %s,
+                            %s,
                             %s,
                             'yes', 'yes', 'yes',
                             'no',
@@ -534,6 +629,7 @@ def _pjsip_upsert(row, password):
                         from_user         = EXCLUDED.from_user,
                         from_domain       = EXCLUDED.from_domain,
                         callerid          = EXCLUDED.callerid,
+                        outbound_proxy    = EXCLUDED.outbound_proxy,
                         media_encryption  = EXCLUDED.media_encryption,
                         rtp_symmetric     = EXCLUDED.rtp_symmetric,
                         force_rport       = EXCLUDED.force_rport,
@@ -542,10 +638,11 @@ def _pjsip_upsert(row, password):
                         trust_id_outbound = EXCLUDED.trust_id_outbound,
                         send_pai          = EXCLUDED.send_pai,
                         send_rpid         = EXCLUDED.send_rpid
-                """, (row["id"], transport, context, row["id"], auth_id, allow,
+                """, (row["id"], transport, context, row["id"], inbound_auth_id, allow,
                       identify_by, auth_id,
                       from_sip_user or None, from_domain_value or None,
                       callerid_value or None,
+                      outbound_proxy_value or None,
                       media_encryption_value))
 
             if register_enabled:
@@ -829,7 +926,7 @@ def _state_to_status(state):
 
 
 def _build_trunk_id_reverse_map():
-    """Map PJSIP realtime endpoint ids back to user-facing trunk slugs.
+    """Map PJSIP realtime endpoint ids back to their sip_trunks rows.
 
     Realtime ps_endpoints.id for trunks is now `t<tenant_prefix>_<slug>`
     (the namespaced form sip_store.pjsip_trunk_endpoint_id produces),
@@ -837,24 +934,729 @@ def _build_trunk_id_reverse_map():
     (`innov2`, not `tdefault_innov2`). Without the reverse, the
     trunk badge in the UI stays grey/"unknown" even when the trunk
     is happily registered. Query sip_trunks once per feeder tick and
-    return realtime_id -> slug.
+    return realtime_id -> (tenant_id, slug, name) — the tenant places
+    the slug in the right per-tenant status hash, the name is what the
+    drop/restore webhook calls the trunk in words.
+
+    Returns None when the store is unavailable or the query fails —
+    deliberately distinct from {} (no trunks): the feeder treats the
+    map as the roster of trunks that exist, and a transient DB error
+    must not read as "every trunk was deleted".
     """
     if not HAS_SIP_STORE or not _db_enabled():
-        return {}
+        return None
     try:
         with _db_conn() as conn, conn.cursor() as cur:
-            cur.execute("SELECT tenant_id, id FROM sip_trunks")
+            cur.execute("SELECT tenant_id, id, name FROM sip_trunks")
             rows = cur.fetchall()
     except Exception as exc:  # noqa: BLE001
         log.warning("status feeder: trunk reverse map query failed: %s", exc)
-        return {}
+        return None
     out = {}
-    for tenant_id, slug in rows:
-        out[sip_store.pjsip_trunk_endpoint_id(tenant_id, slug)] = slug
+    for tenant_id, slug, name in rows:
+        out[sip_store.pjsip_trunk_endpoint_id(tenant_id, slug)] = (
+            tenant_id, slug, name,
+        )
     return out
 
 
 _AGENT_ID_NAMESPACED_RE = re.compile(r"^staff_t[a-z0-9]{1,8}_(?P<rest>.+)$")
+
+
+def _ari_endpoint_channel_count(pjsip_id):
+    """Live channel count for one PJSIP endpoint via ARI, or None.
+
+    Returns (count, ari_usable). count is len(channel_ids) from
+    GET /endpoints/PJSIP/{id} — a genuine 0 included — or None when the
+    endpoint could not be measured. ari_usable=False means the failure
+    was connection-level or auth-level (ARI down, creds unset/wrong,
+    slower than the short timeout), so the caller should stop asking
+    for the rest of its pass; a 404 (an endpoint Asterisk doesn't know
+    right now) voids only this one row.
+    """
+    if not ARI_USERNAME or not ARI_PASSWORD:
+        return None, False
+    url = (
+        f"{_ARI_BASE_URL}/endpoints/PJSIP/"
+        f"{urllib.parse.quote(pjsip_id, safe='')}"
+    )
+    req = urllib.request.Request(url)
+    auth = base64.b64encode(
+        f"{ARI_USERNAME}:{ARI_PASSWORD}".encode("utf-8")
+    ).decode("ascii")
+    req.add_header("Authorization", f"Basic {auth}")
+    try:
+        with urllib.request.urlopen(
+            req, timeout=ARI_CHANNEL_COUNT_TIMEOUT_SECONDS
+        ) as resp:
+            body = json.loads(resp.read().decode("utf-8") or "{}")
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            return None, True
+        log.warning(
+            "ARI channel count for %s: HTTP %s — skipping counts this pass",
+            pjsip_id, exc.code,
+        )
+        return None, False
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "ARI channel count unavailable (%s): %s — skipping counts this pass",
+            pjsip_id, exc,
+        )
+        return None, False
+    ids = body.get("channel_ids")
+    if not isinstance(ids, list):
+        return None, True
+    return len(ids), True
+
+
+# -- MOH class resolution probe -------------------------------------------
+# Answers one question for call-engine's MohRegistry: after it has written a
+# `musiconhold` row, will Asterisk actually find that class when a caller is
+# put on hold? The registry cannot answer it from its own pod - extconfig.conf
+# lives here - so it used to return `realtimeMappingRequired: 'musiconhold'`
+# unconditionally, which became untrue the moment the mapping was added.
+#
+# Two reads, because either one alone is ambiguous:
+#
+#   1. `core show config mappings` prints the extconfig [settings] table, and
+#      it prints a family ONLY under a config engine whose name matches that
+#      mapping's driver (main/config.c handle_cli_core_show_config_mappings).
+#      That is both halves of what ast_check_realtime("musiconhold") needs -
+#      find_engine() requires a map for the family AND a registered engine for
+#      its driver - so a `===> musiconhold` line is a direct read of the exact
+#      gate res_musiconhold.c consults at hold time.
+#
+#   2. `realtime load musiconhold name <class>` runs ast_load_realtime_all,
+#      which resolves its engine through that same find_engine at priority 1.
+#      This is byte-for-byte the query res_musiconhold performs itself:
+#      load_realtime_musiconhold() is ast_load_realtime("musiconhold", "name",
+#      name). A printed row therefore proves mapping + a live ODBC connection
+#      + the just-written row being visible, all three at once.
+#
+# `moh show classes` is deliberately NOT used, and would have reproduced the
+# same false negative from the other side: it iterates only the in-memory
+# mohclasses container, and a realtime class is instantiated LAZILY inside
+# local_ast_moh_start. A correctly mapped, perfectly working class is genuinely
+# absent from that list until the first caller is actually put on hold.
+_MOH_ENGINE_LINE_RE = re.compile(r"^Config Engine:\s*(?P<engine>\S+)\s*$")
+_MOH_MAP_LINE_RE = re.compile(
+    r"^===>\s*(?P<family>[^\s(]+)\s*"
+    r"\(db=(?P<db>[^,]*),\s*table=(?P<table>[^)]*)\)"
+)
+# The class name reaches `asterisk -rx` as one argv element that Asterisk's own
+# CLI parser then splits on whitespace, so a space or a quote would inject a
+# CLI token even though subprocess runs no shell. Character set matches
+# call-engine's SAFE_SLUG (moh-registry.js) plus room for its `moh-` prefix.
+_MOH_CLASS_RE = re.compile(r"^[A-Za-z0-9._-]{1,140}$")
+
+
+def _asterisk_cli_read(cli):
+    """Run one read-only `asterisk -rx <cli>`.
+
+    Returns (stdout, None) on a clean exit, or (None, reason) with reason a
+    short operator-readable string. Every failure mode lands in `reason`: a
+    missing binary, a dead Asterisk (`asterisk -rx` exits non-zero when it
+    cannot reach the ctl socket), a timeout, an exec error. The caller must
+    map all of them to "could not determine" rather than to an answer.
+    """
+    if shutil.which(ASTERISK_BIN) is None:
+        return None, f"{ASTERISK_BIN} binary not on PATH"
+    try:
+        proc = subprocess.run(
+            [ASTERISK_BIN, "-rx", cli],
+            capture_output=True, text=True,
+            timeout=MOH_PROBE_TIMEOUT_SECONDS, check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return None, f"`{cli}` timed out after {MOH_PROBE_TIMEOUT_SECONDS:g}s"
+    except OSError as exc:
+        return None, f"asterisk exec failed: {exc}"
+    if proc.returncode != 0:
+        detail = ((proc.stderr or "") + (proc.stdout or "")).strip()
+        return None, (
+            f"`{cli}` exited {proc.returncode}: {detail[:200] or 'no output'}"
+        )
+    return (proc.stdout or ""), None
+
+
+def _moh_family_mapping(stdout):
+    """The extconfig mapping for the musiconhold family, or None when the
+    family is not mapped to a registered engine.
+
+    Returns {engine, database, table}. `engine` is the config engine the
+    mapping was printed under, which is what makes the line proof of the gate
+    rather than an echo of the file.
+    """
+    engine = None
+    for raw in (stdout or "").splitlines():
+        line = raw.strip()
+        m = _MOH_ENGINE_LINE_RE.match(line)
+        if m:
+            engine = m.group("engine")
+            continue
+        m = _MOH_MAP_LINE_RE.match(line)
+        if m and m.group("family").lower() == MOH_REALTIME_FAMILY:
+            return {
+                "engine": engine,
+                "database": m.group("db").strip(),
+                "table": m.group("table").strip(),
+            }
+    return None
+
+
+def _moh_row_visible(stdout):
+    """True / False / None for `realtime load`'s output.
+
+    None is load-bearing: if res_realtime is not loaded the CLI answers "No
+    such command" on a ZERO exit code, and reading that as "no row" would
+    manufacture a false negative out of a probe that never ran. Only the two
+    outputs res_realtime.c actually emits count as answers.
+    """
+    text = stdout or ""
+    if "No rows found matching search criteria" in text:
+        return False
+    if "Column Name" in text and "Column Value" in text:
+        return True
+    return None
+
+
+# -- The three things `realtime load` alone cannot tell apart ---------------
+# `familyMapped: true, rowVisible: false` is one answer covering two faults
+# that need OPPOSITE fixes, and until this block existed the operator was left
+# to hand-compare two Kubernetes secrets to find out which one they had:
+#
+#   (A) call-engine INSERTed into a DIFFERENT database than Asterisk reads.
+#       Its pool comes from ITS OWN DATABASE_URL; Asterisk's DSN is rendered
+#       from THIS pod's DATABASE_URL (render_odbc.py). Nothing reconciles the
+#       two. Fix: point one of them at the other.
+#   (B) the row IS in the database Asterisk's DSN names and Asterisk still
+#       will not resolve the class - res_odbc connection down, a schema or
+#       search_path difference, a column the realtime engine rejects. Fix:
+#       anything except touching those URLs.
+#
+# The discriminator is a direct SELECT through the sidecar's own connection.
+# A row found here but not by Asterisk is (B). No row here is (A).
+#
+# WHY THE SIDECAR'S CONNECTION IS THE RIGHT WITNESS, and the one way it stops
+# being one. render_odbc.py (entrypoint.sh line ~99) and this process (line
+# ~256) are launched by the same entrypoint in the same container, and both
+# derive host/port/database from the same `DATABASE_URL` with the same URL
+# parse - so by construction the sidecar reads the database the rendered DSN
+# names. That is a claim about the file we RENDERED, not about what Asterisk
+# loaded: a ConfigMap or secret mount landing on odbc.ini after we wrote it
+# would point res_odbc somewhere else entirely, and render_odbc's own
+# read-back verify only logs that to stderr where nothing reads it.
+# `odbcDsnMatchesRendered` closes that hole by comparing the DSN name Asterisk
+# reports against the one this pod rendered, so the assumption is CHECKED on
+# every probe instead of trusted. When it is false, `rowInSidecarDb` says
+# nothing about Asterisk's database, and the probe reports that rather than
+# drawing the conclusion anyway.
+
+
+def _moh_sidecar_database():
+    """Host, port and database name the sidecar reads. Never the credentials.
+
+    That omission is the whole point of the field: this route is reachable by
+    agent-hub, and a database identity is only useful here because it can be
+    compared with call-engine's without either side printing a secret.
+
+    Defaults mirror render_odbc.py's (localhost / 5432) deliberately, so both
+    sides of that comparison are rendered the same way rather than one saying
+    `null` where the other says `5432`.
+    """
+    if not DATABASE_URL:
+        return None
+    try:
+        u = urllib.parse.urlparse(DATABASE_URL)
+    except ValueError:
+        return None
+    if u.scheme not in ("postgres", "postgresql"):
+        return None
+    name = (u.path or "/").lstrip("/")
+    if not name:
+        return None
+    return {
+        "host": u.hostname or "localhost",
+        "port": u.port or 5432,
+        "name": name,
+    }
+
+
+def _moh_database_identity_str(db):
+    """`host:port/dbname` - the one-line form an operator can eyeball."""
+    if not db:
+        return None
+    return f"{db['host']}:{db['port']}/{db['name']}"
+
+
+# `odbc show` output (res_odbc.c handle_cli_odbc_show):
+#
+#   ODBC DSN Settings
+#   -----------------
+#
+#     Name:   asterisk
+#     DSN:    asterisk-pgsql
+#       Last fail connection attempt: 2026-08-27 12:00:00
+#       Number of active connections: 3 (out of 20)
+#
+# Neither line carries a credential - `class->dsn` is the odbc.ini stanza
+# NAME, not its contents - so this is safe to return over the control API.
+_ODBC_NAME_RE = re.compile(r"^Name:\s+(?P<name>\S+)$")
+_ODBC_DSN_RE = re.compile(r"^DSN:\s+(?P<dsn>\S+)$")
+_ODBC_CONN_RE = re.compile(
+    r"^Number of active connections:\s+(?P<active>\d+)\s*\(out of\s+(?P<max>\d+)\)$"
+)
+_ODBC_FAIL_RE = re.compile(r"^Last fail connection attempt:\s+(?P<when>.+)$")
+_ODBC_HEADER = "ODBC DSN Settings"
+
+
+def _parse_odbc_show(stdout, section):
+    """The `odbc show` record for `section`, or None when it is not listed.
+
+    Returns (record | None, recognised). That second value is load-bearing for
+    exactly the reason _moh_row_visible returns None: with res_odbc unloaded
+    the CLI answers "No such command" on a ZERO exit code, and reading that as
+    "the class is not configured" would manufacture a false negative out of a
+    probe that never ran.
+    """
+    text = stdout or ""
+    if _ODBC_HEADER not in text:
+        return None, False
+    wanted = (section or "").lower()
+    record = None
+    match = None
+    for raw in text.splitlines():
+        line = raw.strip()
+        m = _ODBC_NAME_RE.match(line)
+        if m:
+            record = {
+                "section": m.group("name"), "dsn": None,
+                "activeConnections": None, "maxConnections": None,
+                "lastFailedConnect": None,
+            }
+            if record["section"].lower() == wanted:
+                match = record
+            continue
+        if record is None:
+            continue
+        m = _ODBC_DSN_RE.match(line)
+        if m:
+            record["dsn"] = m.group("dsn")
+            continue
+        m = _ODBC_CONN_RE.match(line)
+        if m:
+            record["activeConnections"] = int(m.group("active"))
+            record["maxConnections"] = int(m.group("max"))
+            continue
+        m = _ODBC_FAIL_RE.match(line)
+        if m:
+            record["lastFailedConnect"] = m.group("when").strip()
+    return match, True
+
+
+def _moh_odbc_connection(section):
+    """(record, up, detail) for the res_odbc class Asterisk reads MOH through.
+
+    `up` is a tri-state and the middle value is not a hedge:
+
+      True   at least one connection is currently held in the pool.
+             res_odbc.c increments connection_cnt on connect and decrements it
+             on destroy, so a non-zero count is a live one.
+      False  res_odbc listed its classes and this one was NOT among them.
+             There is no pool at all, so it positively cannot read the table.
+      None   could not determine. `odbc show` unreadable, res_odbc not loaded
+             - or the pool is simply IDLE. A count of 0 does not distinguish
+             "no connection needed since the last release" from "cannot
+             connect", and guessing `down` from it would report a healthy
+             database as broken on any quiet queue.
+
+    `lastFailedConnect` is reported but deliberately NOT folded into `up`:
+    res_odbc.c sets last_negative_connect on failure (lines 1165, 1182) and
+    never clears it on a later success, so it is a high-water mark. An
+    hours-old failure over a pool that has since recovered would otherwise
+    read as a live outage.
+    """
+    out, err = _asterisk_cli_read("odbc show")
+    if err:
+        return None, None, err
+    record, recognised = _parse_odbc_show(out, section)
+    if not recognised:
+        return None, None, (
+            "res_odbc did not answer `odbc show` recognisably "
+            "(module not loaded?)"
+        )
+    if record is None:
+        return None, False, (
+            f"res_odbc has no `{section}` section, so Asterisk has no "
+            f"connection to read the {MOH_REALTIME_FAMILY} table through"
+        )
+    active = record.get("activeConnections")
+    if active is None:
+        return record, None, (
+            f"`odbc show` listed `{section}` without a connection count"
+        )
+    if active > 0:
+        return record, True, None
+    return record, None, (
+        f"res_odbc `{section}` holds 0 of {record.get('maxConnections')} "
+        f"connections - idle and dead look identical from here"
+    )
+
+
+def _moh_row_in_sidecar_db(moh_class):
+    """Is the class row in the database THIS pod reads?
+
+    Returns (row_present, table_present, directory, detail):
+
+      row_present   True  the SELECT returned the row.
+                    False the SELECT ran and returned nothing, or the table
+                          does not exist - both are a positively determined
+                          "not here", which is what (A) needs.
+                    None  could not determine. No DATABASE_URL, no psycopg2,
+                          connect refused, timeout, permission denied. A
+                          database error is NOT evidence the row is missing.
+      table_present separated out because the fixes differ: a missing table
+                    means sip_store.bootstrap never ran against this
+                    database, while a missing row in a table that exists
+                    means the INSERT landed somewhere else.
+      directory     the row's own `directory` value, for the audio check.
+    """
+    if not HAS_PSYCOPG2:
+        return None, None, None, "psycopg2 unavailable in the sidecar"
+    if not DATABASE_URL:
+        return None, None, None, "DATABASE_URL not configured for the sidecar"
+    connect_timeout = max(1, int(MOH_DB_PROBE_TIMEOUT_SECONDS))
+    statement_timeout = max(1, int(MOH_DB_PROBE_TIMEOUT_SECONDS * 1000))
+    try:
+        conn = _db_conn(
+            connect_timeout=connect_timeout,
+            options=f"-c statement_timeout={statement_timeout}",
+        )
+    except Exception as exc:  # noqa: BLE001
+        return None, None, None, f"sidecar database connect failed: {exc}"
+    try:
+        with conn, conn.cursor() as cur:
+            try:
+                cur.execute(
+                    f"SELECT directory FROM {MOH_REALTIME_FAMILY} "
+                    f"WHERE name = %s",
+                    (moh_class,),
+                )
+            except Exception as exc:  # noqa: BLE001
+                # 42P01 undefined_table is an ANSWER, not a failed read:
+                # there is no table here, so the row is certainly not here.
+                if getattr(exc, "pgcode", None) == "42P01":
+                    return False, False, None, (
+                        f"table `{MOH_REALTIME_FAMILY}` does not exist in the "
+                        f"database the sidecar reads"
+                    )
+                return None, None, None, f"sidecar SELECT failed: {exc}"
+            row = cur.fetchone()
+    except Exception as exc:  # noqa: BLE001
+        return None, None, None, f"sidecar SELECT failed: {exc}"
+    finally:
+        try:
+            conn.close()
+        except Exception:  # noqa: BLE001
+            pass
+    if row is None:
+        return False, True, None, None
+    return True, True, (row[0] or None), None
+
+
+def _moh_audio_directory(directory):
+    """What the MOH directory named in the row looks like from this pod.
+
+    Reported because it separates the two symptoms an operator actually
+    describes, which res_musiconhold produces from different faults:
+
+      "callers hear the STOCK DEFAULT" - the class did not resolve.
+        local_ast_moh_start walks classes[] = {requested, channel musicclass,
+        interpclass, "default"}, so a class that fails to resolve falls
+        through to `default`. That is the fault `resolved` answers.
+      "callers hear SILENCE" - the class resolved and then failed to init.
+        For mode=files, init_files_class returns -1 when moh_scan_files finds
+        no playable file in `directory`, and there is no further fallback.
+
+    The evidence is deliberately ASYMMETRIC. A missing or empty directory is
+    real evidence of the silence fault; a directory WITH files is not a
+    guarantee, because moh_scan_files counts only files whose format Asterisk
+    can actually play and this function does not own that format policy
+    (call-engine's audio-format.js does). So `exists: true` is never promoted
+    to an audibility claim. The sidecar shares the container filesystem with
+    Asterisk, which is what makes the stat evidence about Asterisk at all.
+    """
+    if not directory:
+        return None
+    path = (
+        directory if directory.startswith("/")
+        else os.path.join(AST_DATA_DIR, directory)
+    )
+    out = {"directory": directory, "scannedPath": path}
+    try:
+        names = os.listdir(path)
+    except FileNotFoundError:
+        out["exists"] = False
+        out["fileCount"] = 0
+        return out
+    except OSError as exc:
+        # Unreadable is not empty.
+        out["exists"] = None
+        out["fileCount"] = None
+        out["detail"] = f"cannot read {path}: {exc}"
+        return out
+    out["exists"] = True
+    try:
+        out["fileCount"] = sum(
+            1 for n in names
+            if not n.startswith(".") and os.path.isfile(os.path.join(path, n))
+        )
+    except OSError:
+        out["fileCount"] = None
+    return out
+
+
+# Faults `fault` can name. One string, so a caller does not have to re-derive
+# the combination, and every member is a POSITIVE determination except the
+# last - which is the whole discipline of this module restated: an
+# undetermined probe names itself rather than picking the likelier answer.
+MOH_FAULT_NONE = "none"
+MOH_FAULT_FAMILY_NOT_MAPPED = "family-not-mapped"
+MOH_FAULT_OTHER_DSN = "asterisk-reads-a-different-dsn"
+MOH_FAULT_ODBC_SECTION_MISSING = "odbc-connection-not-configured"
+MOH_FAULT_ROW_ABSENT_HERE = "row-absent-from-sidecar-db"
+MOH_FAULT_ROW_HERE_UNREADABLE = "row-present-asterisk-cannot-read-it"
+MOH_FAULT_ROW_ORIGIN_UNKNOWN = "row-not-visible-origin-undetermined"
+MOH_FAULT_AUDIO_DIR_MISSING = "resolved-but-audio-directory-missing"
+MOH_FAULT_AUDIO_DIR_EMPTY = "resolved-but-audio-directory-empty"
+MOH_FAULT_UNDETERMINED = "undetermined"
+
+
+def _moh_fault(ev):
+    """(fault, detail) from the evidence `ev` the probe collected.
+
+    Split out from _probe_moh_class so the mapping from evidence to verdict is
+    one readable table, and so the two faults this whole module exists to tell
+    apart are visibly adjacent.
+
+    Order matters twice over:
+
+      * `asterisk-reads-a-different-dsn` is tested FIRST among the
+        row-not-visible cases, because it is the one finding that
+        INVALIDATES the direct SELECT. If Asterisk is not using the DSN this
+        pod rendered, then what the sidecar can see in its own database is no
+        longer evidence about what Asterisk can see, and reporting
+        `row-absent-from-sidecar-db` off the back of it would send an
+        operator to compare two URLs when the actual fault is a mount
+        masking odbc.ini.
+      * `odbc-connection-not-configured` comes next because it is a strictly
+        more specific instance of (B) with a different fix, and leaving it
+        folded into the general case would send the operator schema-hunting
+        over a connection that does not exist.
+    """
+    resolved = ev.get("resolved")
+    family_mapped = ev.get("familyMapped")
+    row_visible = ev.get("rowVisible")
+    row_here = ev.get("rowInSidecarDb")
+    table_here = ev.get("tableInSidecarDb")
+    dsn_match = ev.get("odbcDsnMatchesRendered")
+    odbc_up = ev.get("odbcConnectionUp")
+    identity = ev.get("sidecarDatabaseIdentity") or "an unreported database"
+    audio = ev.get("audioDirectory") or {}
+
+    if resolved is True:
+        # The class resolves. The only remaining way a caller hears nothing is
+        # the files half, and only a POSITIVE finding is reported as a fault -
+        # `exists: None` (unreadable) stays `none`, because "we could not look"
+        # is not "there is nothing there".
+        if audio.get("exists") is False:
+            return MOH_FAULT_AUDIO_DIR_MISSING, (
+                f"Asterisk resolves this class, but its directory "
+                f"{audio.get('scannedPath')!r} does not exist in the asterisk "
+                f"pod. res_musiconhold init_files_class fails with no "
+                f"fallback, so the caller hears SILENCE rather than the stock "
+                f"default. Check the shared MOH volume is mounted in both "
+                f"pods and that call-engine wrote to the same path"
+            )
+        if audio.get("exists") is True and audio.get("fileCount") == 0:
+            return MOH_FAULT_AUDIO_DIR_EMPTY, (
+                f"Asterisk resolves this class, but its directory "
+                f"{audio.get('scannedPath')!r} is empty, so moh_scan_files "
+                f"finds nothing to play and the caller hears SILENCE. The "
+                f"class row is fine; the audio write is what did not land"
+            )
+        return MOH_FAULT_NONE, None
+
+    if resolved is False and family_mapped is False:
+        return MOH_FAULT_FAMILY_NOT_MAPPED, (
+            f"/etc/asterisk/extconfig.conf does not map the "
+            f"`{MOH_REALTIME_FAMILY}` family to a realtime engine, so "
+            f"res_musiconhold never reads the class table and the caller "
+            f"hears the stock default"
+        )
+
+    if resolved is False and row_visible is False:
+        if dsn_match is False:
+            return MOH_FAULT_OTHER_DSN, (
+                f"res_odbc is using DSN {(ev.get('odbc') or {}).get('dsn')!r}, "
+                f"not the {ODBC_DSN_NAME!r} this pod rendered - so something "
+                f"is masking odbc.ini and the sidecar's own view of "
+                f"{identity} says nothing about which database Asterisk "
+                f"reads. Fix the masked config before comparing any URL"
+            )
+        if odbc_up is False:
+            return MOH_FAULT_ODBC_SECTION_MISSING, (
+                f"`{MOH_REALTIME_FAMILY}` is mapped to the res_odbc section "
+                f"`{ev.get('odbcSection')}`, but res_odbc has no such section "
+                f"- so there is no connection for the realtime engine to "
+                f"query. This is res_odbc.conf, not the database and not the "
+                f"mapping"
+            )
+        if row_here is False and table_here is False:
+            return MOH_FAULT_ROW_ABSENT_HERE, (
+                f"table `{MOH_REALTIME_FAMILY}` does not exist in {identity}, "
+                f"the database this pod reads. Either call-engine INSERTed "
+                f"into a different database, or sip_store.bootstrap has never "
+                f"run against this one. Compare this pod's DATABASE_URL host/"
+                f"port/database with call-engine's - the mapping and res_odbc "
+                f"are both fine"
+            )
+        if row_here is False:
+            return MOH_FAULT_ROW_ABSENT_HERE, (
+                f"no `{ev.get('mohClass')}` row exists in {identity}, the "
+                f"database this pod reads, and Asterisk agrees it cannot see "
+                f"one. The row call-engine wrote went somewhere else: compare "
+                f"this pod's DATABASE_URL host/port/database with "
+                f"call-engine's. The `{MOH_REALTIME_FAMILY}` mapping and "
+                f"res_odbc are both fine"
+            )
+        if row_here is True:
+            return MOH_FAULT_ROW_HERE_UNREADABLE, (
+                f"the row IS present in {identity} - the database this pod "
+                f"reads and the one Asterisk's DSN names - and Asterisk still "
+                f"does not return it. So this is NOT a mismatched "
+                f"DATABASE_URL: look at the res_odbc connection's own state, "
+                f"the schema/search_path the ODBC user resolves "
+                f"`{MOH_REALTIME_FAMILY}` in, and the table's columns"
+            )
+        return MOH_FAULT_ROW_ORIGIN_UNKNOWN, (
+            f"Asterisk positively reports no `{MOH_REALTIME_FAMILY}` row for "
+            f"this class, and the sidecar's own SELECT could not be run "
+            f"({ev.get('sidecarDbDetail') or 'no detail'}), so whether the "
+            f"row is missing or merely unreadable by Asterisk is NOT "
+            f"established"
+        )
+
+    return MOH_FAULT_UNDETERMINED, None
+
+
+def _probe_moh_class(moh_class):
+    """Whether Asterisk can resolve `moh_class` through the realtime layer,
+    and - when it cannot - which of the possible causes it actually is.
+
+    `resolved` keeps exactly the contract call-engine's MohRegistry branches
+    on, computed from the two Asterisk CLI reads and NOTHING else:
+      True  - the family is mapped to a registered engine AND Asterisk's own
+              hold-time query returns the row. Hold music will play.
+      False - positively determined it will NOT resolve. `familyMapped` says
+              which half is missing, because the two need different fixes: an
+              unmapped family is the extconfig.conf line, while a mapped
+              family with an invisible row is a database/ODBC problem that
+              adding the mapping would do nothing about.
+      None  - could not determine. Asterisk unreachable, timed out, or
+              answered in a form this function does not recognise. Never an
+              answer.
+
+    Everything the direct SELECT, the database identity and the res_odbc read
+    contribute is ADDITIVE - none of it can move `resolved`, so an older
+    call-engine reading only the three original tri-states behaves exactly as
+    before, and a database that is unreachable from the sidecar cannot turn a
+    working class into a broken-looking one.
+
+    `fault` is the new single-field answer to "which fault is this", and
+    `detail` carries the same conclusion in prose because `detail` is the one
+    new-information field the current call-engine already forwards.
+    """
+    out = {"mohClass": moh_class, "family": MOH_REALTIME_FAMILY}
+
+    # --- 1. the extconfig gate res_musiconhold consults at hold time ------
+    mappings_out, mappings_err = _asterisk_cli_read("core show config mappings")
+    mapping = None if mappings_err else _moh_family_mapping(mappings_out)
+    family_mapped = None if mappings_err else mapping is not None
+    out["familyMapped"] = family_mapped
+    if mapping:
+        out["engine"] = mapping["engine"]
+        # NB `database` is the extconfig mapping's middle token, i.e. the
+        # res_odbc.conf SECTION name - not a database name. The database name
+        # is `sidecarDatabase.name`. Kept under the old key because
+        # call-engine already forwards it.
+        out["database"] = mapping["database"]
+        out["table"] = mapping["table"]
+
+    # --- 2. Asterisk's own hold-time query, byte for byte -----------------
+    row_out, row_err = _asterisk_cli_read(
+        f"realtime load {MOH_REALTIME_FAMILY} name {moh_class}"
+    )
+    row_visible = None if row_err else _moh_row_visible(row_out)
+    out["rowVisible"] = row_visible
+
+    # --- 3. resolved: from 1 and 2 only -----------------------------------
+    if family_mapped is None or row_visible is None:
+        out["resolved"] = None
+    elif family_mapped and row_visible:
+        out["resolved"] = True
+    else:
+        out["resolved"] = False
+
+    # --- 4. additive evidence that tells the two row-invisible faults apart
+    db = _moh_sidecar_database()
+    out["sidecarDatabase"] = db
+    out["sidecarDatabaseIdentity"] = _moh_database_identity_str(db)
+    out["renderedDsnName"] = ODBC_DSN_NAME or None
+
+    row_here, table_here, directory, db_detail = _moh_row_in_sidecar_db(moh_class)
+    out["rowInSidecarDb"] = row_here
+    out["tableInSidecarDb"] = table_here
+    if db_detail:
+        out["sidecarDbDetail"] = db_detail
+
+    # The section to look up is the mapping's own middle token when we read
+    # one, so the res_odbc state reported is the connection this family
+    # actually resolves through rather than a guess.
+    section = (mapping or {}).get("database") or MOH_ODBC_SECTION_DEFAULT
+    odbc_record, odbc_up, odbc_detail = _moh_odbc_connection(section)
+    out["odbcSection"] = section
+    out["odbc"] = odbc_record
+    out["odbcConnectionUp"] = odbc_up
+    if odbc_detail:
+        out["odbcDetail"] = odbc_detail
+    reported_dsn = (odbc_record or {}).get("dsn")
+    out["odbcDsnMatchesRendered"] = (
+        reported_dsn == ODBC_DSN_NAME
+        if (reported_dsn and ODBC_DSN_NAME) else None
+    )
+
+    audio = _moh_audio_directory(directory)
+    if audio is not None:
+        out["audioDirectory"] = audio
+
+    # --- 5. the verdict ---------------------------------------------------
+    fault, fault_detail = _moh_fault(out)
+    out["fault"] = fault
+    detail = fault_detail
+    if out["resolved"] is None:
+        # An undetermined probe reports why it could not read Asterisk, which
+        # outranks any fault text: nothing downstream should act on a verdict
+        # derived from a read that did not happen.
+        detail = (
+            mappings_err
+            or row_err
+            or "asterisk answered the probe in a form the sidecar cannot read"
+        )
+    if detail:
+        out["detail"] = detail
+    return out
 
 
 def _decorate_trunks_with_live_state(items, tenant_id):
@@ -867,9 +1669,11 @@ def _decorate_trunks_with_live_state(items, tenant_id):
     /control/sip/trunks response self-sufficient — agent-hub gets the
     badge value over the same HTTPS call it already makes.
 
-    Reads `pjsip show endpoints` once for the whole list. Mutates each
-    item dict (camelCase fields: state, activeChannels) and returns
-    nothing.
+    Reads `pjsip show endpoints` once for the whole list, then one ARI
+    round-trip per row for the live channel count. Mutates each item
+    dict (camelCase: `state` always; `activeChannels` plus
+    `channelsMeasured` only when the count was actually measured) and
+    returns nothing.
     """
     if not items:
         return
@@ -902,6 +1706,7 @@ def _decorate_trunks_with_live_state(items, tenant_id):
         if id_proc.returncode == 0 else set()
     )
 
+    ari_usable = True
     for row in items:
         slug = row.get("id")
         if not slug:
@@ -911,12 +1716,20 @@ def _decorate_trunks_with_live_state(items, tenant_id):
             row["state"] = "online"
         else:
             row["state"] = state_by_pjsip.get(pjsip_id, "unknown")
-        # activeChannels needs a separate channel-show round-trip;
-        # leave at 0 here so the badge color is at least correct.
-        # The UI's util read still works through Redis when it's
-        # configured; this just guarantees the *state* part isn't
-        # blocked by Redis being unreachable.
-        row.setdefault("activeChannels", 0)
+        # Real per-trunk channel count via ARI (GET /endpoints/PJSIP/{id}
+        # -> len(channel_ids)). Written only when actually measured — a
+        # genuine 0 included — together with channelsMeasured=True, the
+        # flag the UI keys on to tell measured-zero from the placeholder
+        # 0 this used to setdefault(). On any failure BOTH fields stay
+        # absent: a failed query must never read as "no calls in
+        # progress". The state above is already set, so a dead or slow
+        # ARI (short timeout; one skip flag for the rest of the pass)
+        # degrades only the count, never the badge.
+        if ari_usable:
+            count, ari_usable = _ari_endpoint_channel_count(pjsip_id)
+            if count is not None:
+                row["activeChannels"] = count
+                row["channelsMeasured"] = True
 
 
 def _user_facing_agent_id(pjsip_id):
@@ -930,6 +1743,42 @@ def _user_facing_agent_id(pjsip_id):
     if not m:
         return pjsip_id
     return f"staff_{m.group('rest')}"
+
+
+def _post_trunk_status_webhook(tenant_id, trunk_id, trunk_name, status):
+    """Notify Laravel that a known trunk crossed online<->offline.
+
+    One attempt with a 3s cap, failures logged and swallowed — the
+    status feeder must keep sweeping regardless of what the webhook
+    endpoint is doing. An unset URL means the feature is off (deploys
+    without the Laravel half stay quiet instead of spamming errors).
+    """
+    if not TRUNK_STATUS_WEBHOOK_URL:
+        return
+    body = json.dumps({
+        "tenantId": tenant_id,
+        "trunkId": trunk_id,
+        "trunkName": trunk_name,
+        "status": status,
+        "at": datetime.now(timezone.utc).isoformat(),
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        TRUNK_STATUS_WEBHOOK_URL, data=body, method="POST",
+    )
+    req.add_header("Content-Type", "application/json")
+    req.add_header("Authorization", f"Bearer {CALL_ENGINE_WEBHOOK_SECRET}")
+    try:
+        with urllib.request.urlopen(req, timeout=3):
+            pass
+        log.info(
+            "trunk status webhook: tenant=%s trunk=%s -> %s",
+            tenant_id, trunk_id, status,
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "trunk status webhook (tenant=%s trunk=%s -> %s) failed: %s",
+            tenant_id, trunk_id, status, exc,
+        )
 
 
 def _status_feeder_loop(stop_event):
@@ -949,9 +1798,23 @@ def _status_feeder_loop(stop_event):
         log.error("status feeder: cannot connect to %s: %s", REDIS_URL, exc)
         return
     log.info(
-        "status feeder started: interval=%ds trunks_key=%s agents_key=%s",
+        "status feeder started: interval=%ds trunks_key=%s agents_key=%s webhook=%s",
         STATUS_FEEDER_INTERVAL, STATUS_FEEDER_KEY, STATUS_FEEDER_AGENTS_KEY,
+        "on" if TRUNK_STATUS_WEBHOOK_URL else "off",
     )
+    # Last sweep's status per (tenant_id, slug), seeded from the Redis
+    # tenant hashes so a feeder restart doesn't re-fire drop/restore
+    # alerts for edges it already reported before dying. A failed seed
+    # only costs the first sweep's edges (no prior = no edge), never
+    # produces a duplicate alert.
+    prev_trunk_status = {}
+    try:
+        for key in client.scan_iter(match=f"{STATUS_FEEDER_KEY}:*"):
+            seed_tenant = key[len(STATUS_FEEDER_KEY) + 1:]
+            for slug, status in client.hgetall(key).items():
+                prev_trunk_status[(seed_tenant, slug)] = status
+    except Exception as exc:  # noqa: BLE001
+        log.warning("status feeder: prev-state seed failed: %s", exc)
     while not stop_event.is_set():
         try:
             if shutil.which(ASTERISK_BIN) is None:
@@ -983,25 +1846,38 @@ def _status_feeder_loop(stop_event):
             # the UI's lookup by row.id matches what's in Redis. The
             # reverse map covers every row in sip_trunks; endpoints
             # not present in sip_trunks (e.g. agent endpoints that
-            # leaked in here) fall through unchanged.
+            # leaked in here) fall through unchanged. None (store down)
+            # is distinct from {} (no trunks) — see the map's docstring.
             trunk_reverse = _build_trunk_id_reverse_map()
-
-            def _trunk_slug(ep_id):
-                # `pjsip show endpoints` sometimes emits the endpoint
-                # as `endpoint/contact` once a contact has registered;
-                # we only want the endpoint part for the UI join.
-                head = ep_id.split("/", 1)[0]
-                return trunk_reverse.get(head, head)
+            reverse = trunk_reverse if trunk_reverse is not None else {}
 
             if ep_proc.returncode == 0:
                 trunk_updates = {}
+                tenant_updates = {}
                 for ep_id, state in _parse_pjsip_endpoints(ep_proc.stdout):
-                    slug = _trunk_slug(ep_id)
-                    if ep_id.split("/", 1)[0] in ip_trunk_endpoints:
-                        trunk_updates[slug] = "online"
+                    # `pjsip show endpoints` sometimes emits the endpoint
+                    # as `endpoint/contact` once a contact has registered;
+                    # we only want the endpoint part for the UI join.
+                    head = ep_id.split("/", 1)[0]
+                    status = ("online" if head in ip_trunk_endpoints
+                              else _state_to_status(state))
+                    known = reverse.get(head)
+                    if known:
+                        row_tenant, slug, _name = known
+                        tenant_updates.setdefault(row_tenant, {})[slug] = status
+                        trunk_updates[slug] = status
                     else:
-                        trunk_updates[slug] = _state_to_status(state)
+                        # Only rows sip_trunks knows get tenant placement;
+                        # strays (agent endpoints leaking through this
+                        # listing) stay confined to the legacy global key.
+                        trunk_updates[head] = status
+                for row_tenant, updates in tenant_updates.items():
+                    client.hset(
+                        f"{STATUS_FEEDER_KEY}:{row_tenant}", mapping=updates
+                    )
                 if trunk_updates:
+                    # Legacy global dual-write while agent-hub still falls
+                    # back to it — started 2026-08-23, drop next release.
                     client.hset(STATUS_FEEDER_KEY, mapping=trunk_updates)
                 # Stamp the sweep time whenever Asterisk answered, even if
                 # no trunk rows matched — the freshness signal is "did we
@@ -1010,11 +1886,67 @@ def _status_feeder_loop(stop_event):
                     STATUS_FEEDER_CHECKED_AT_KEY, int(time.time() * 1000)
                 )
 
+                if trunk_reverse is not None:
+                    slugs_by_tenant = {}
+                    trunk_names = {}
+                    for row_tenant, slug, name in trunk_reverse.values():
+                        slugs_by_tenant.setdefault(row_tenant, set()).add(slug)
+                        trunk_names[(row_tenant, slug)] = name
+
+                    # Deleted trunks must not stay "online" forever: the
+                    # old poller's DEL+rewrite masked deletions, and an
+                    # HSET merge alone never removes a field. Sweep every
+                    # tenant hash (a tenant whose last trunk was deleted
+                    # still has a hash to empty, so iterate Redis keys,
+                    # not just the tenants seen this tick) and HDEL what
+                    # sip_trunks no longer holds.
+                    for key in client.scan_iter(
+                        match=f"{STATUS_FEEDER_KEY}:*"
+                    ):
+                        key_tenant = key[len(STATUS_FEEDER_KEY) + 1:]
+                        live = slugs_by_tenant.get(key_tenant, set())
+                        stale = [
+                            s for s in client.hkeys(key) if s not in live
+                        ]
+                        if stale:
+                            client.hdel(key, *stale)
+                        for s in stale:
+                            prev_trunk_status.pop((key_tenant, s), None)
+                    # Same cleanup for the legacy hash, sparing fields
+                    # written this sweep — strays still land there and
+                    # would otherwise be deleted and re-added every tick.
+                    all_slugs = {
+                        s for slugs in slugs_by_tenant.values() for s in slugs
+                    }
+                    legacy_stale = [
+                        s for s in client.hkeys(STATUS_FEEDER_KEY)
+                        if s not in all_slugs and s not in trunk_updates
+                    ]
+                    if legacy_stale:
+                        client.hdel(STATUS_FEEDER_KEY, *legacy_stale)
+
+                    # online<->offline edges become the TrunkStatusChanged
+                    # webhook. Fired after the HSETs so the Redis copy —
+                    # the restart seed — already reflects the new state
+                    # and a crash mid-notify can't replay the edge.
+                    for row_tenant, updates in tenant_updates.items():
+                        for slug, status in updates.items():
+                            prior = prev_trunk_status.get((row_tenant, slug))
+                            if (prior, status) in (
+                                ("online", "offline"), ("offline", "online"),
+                            ):
+                                _post_trunk_status_webhook(
+                                    row_tenant, slug,
+                                    trunk_names.get((row_tenant, slug)),
+                                    status,
+                                )
+                            prev_trunk_status[(row_tenant, slug)] = status
+
             if aor_proc.returncode == 0:
                 agent_updates = {}
                 for aor_id, status in _parse_pjsip_aors(aor_proc.stdout):
                     head = aor_id.split("/", 1)[0]
-                    if head in trunk_endpoints or head in trunk_reverse:
+                    if head in trunk_endpoints or head in reverse:
                         continue
                     # Agents are keyed in Redis by the un-namespaced
                     # form `staff_<id>` so the agent-hub UI (which
@@ -1052,6 +1984,8 @@ _ROUTES = [
     ("POST",   re.compile(r"^/control/sip/agents/([^/]+)/credentials/?$"),
                                                              "provision_agent_credentials"),
     ("POST",   re.compile(r"^/control/asterisk/reload/?$"),  "reload_asterisk"),
+    ("GET",    re.compile(r"^/control/asterisk/moh-class/([^/]+)$"),
+                                                             "probe_moh_class"),
 ]
 
 
@@ -1596,6 +2530,41 @@ class Handler(BaseHTTPRequestHandler):
             {"reloaded": ok, "stub": False, "module": module,
              "rc": proc.returncode, "stdout": out, "stderr": err},
         )
+
+    def probe_moh_class(self, raw_class):
+        """GET /control/asterisk/moh-class/<class> - does this MOH class
+        actually resolve for Asterisk right now?
+
+        Always 200 once the class name is well formed, including for
+        "not resolved" and for "could not determine". The tri-state lives in
+        the `resolved` field and nowhere else, so the caller has exactly one
+        thing to read; folding could-not-determine into a 5xx would leave
+        call-engine inferring an answer from a transport failure, which is the
+        very confusion this endpoint exists to remove.
+        """
+        moh_class = urllib.parse.unquote(raw_class or "").strip()
+        if not _MOH_CLASS_RE.match(moh_class):
+            self._send_json(
+                HTTPStatus.UNPROCESSABLE_ENTITY,
+                {"error": "moh class must be 1-140 chars, alphanumerics + . _ -"},
+            )
+            return
+        result = _probe_moh_class(moh_class)
+        # The identity is logged as host:port/dbname only. It is the field an
+        # operator compares against call-engine's, and it has to be readable
+        # from `kubectl logs` without a credential ever entering the log.
+        log.info(
+            "moh probe %s: resolved=%s fault=%s familyMapped=%s rowVisible=%s "
+            "rowInSidecarDb=%s db=%s odbcUp=%s dsnMatch=%s%s",
+            moh_class, result.get("resolved"), result.get("fault"),
+            result.get("familyMapped"), result.get("rowVisible"),
+            result.get("rowInSidecarDb"),
+            result.get("sidecarDatabaseIdentity"),
+            result.get("odbcConnectionUp"),
+            result.get("odbcDsnMatchesRendered"),
+            f" detail={result['detail']!r}" if result.get("detail") else "",
+        )
+        self._send_json(HTTPStatus.OK, result)
 
 
 def main():

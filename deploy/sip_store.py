@@ -179,12 +179,36 @@ CREATE TABLE IF NOT EXISTS sip_trunks (
     from_user              TEXT,
     from_domain            TEXT,
     realm                  TEXT,
+    -- SIP outbound proxy URI ('sip:host[:port];lr'), for carriers whose SIP
+    -- domain has no DNS record and is reachable only via a proxy IP (Voylo:
+    -- sip.uae.voylo.ai resolves to NOTHING; every request loose-routes to
+    -- sip:167.172.191.79;lr). Without it the AOR contact cannot resolve, goes
+    -- Unavail, and every originate fails as ARI "Allocation failed" - which
+    -- the agent hears as "all circuits are busy" (AGH-8426, 2026-08-30).
+    -- Stored canonical/unescaped; _pjsip_upsert escapes ';' for realtime.
+    outbound_proxy         TEXT,
+    -- From-header user OVERRIDE. NULL keeps the proven default (From user =
+    -- auth username - wholesale carriers 403 anything else, see the innocalls
+    -- notes in control_api._pjsip_upsert). The sentinel 'caller_id' writes
+    -- NULL to ps_endpoints.from_user AND callerid, so the per-call CALLERID
+    -- the dial-plan rule sets is what reaches the From header - the shape
+    -- Voylo requires ("From '+<authUsername>' not in allowed_caller_ids").
+    -- Any other value is written verbatim. This is the escape hatch
+    -- _pjsip_upsert's comment promised as `fromSipUser` but nothing carried.
+    from_sip_user          TEXT,
     register_enabled       BOOLEAN NOT NULL DEFAULT TRUE,
     carrier_ip             INET,
     channel_limit          INTEGER NOT NULL DEFAULT 50,
     expiration_seconds     INTEGER NOT NULL DEFAULT 3600,
     description            TEXT,
     enabled                BOOLEAN NOT NULL DEFAULT TRUE,
+    -- Failover ORDER, not a failover mechanism (AGH-7262): lower =
+    -- preferred. Nothing reads it at originate time — only one trunk is
+    -- contracted, so there is nothing to fail over TO, and the
+    -- switch-over is a manual runbook procedure. The column exists so
+    -- the operator's stated preference is recorded and ordered now,
+    -- rather than being invented at the moment a second trunk lands.
+    priority               INTEGER NOT NULL DEFAULT 100,
     created_at             TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at             TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     -- (tenant_id, id) lets tenants share a trunk slug; the PJSIP
@@ -200,6 +224,8 @@ CREATE TABLE IF NOT EXISTS sip_trunks (
         CHECK (channel_limit BETWEEN 1 AND 1000),
     CONSTRAINT sip_trunks_expiration_range
         CHECK (expiration_seconds BETWEEN 60 AND 86400),
+    CONSTRAINT sip_trunks_priority_range
+        CHECK (priority BETWEEN 1 AND 1000),
     CONSTRAINT sip_trunks_ip_required_for_ip_trunk
         CHECK (register_enabled OR carrier_ip IS NOT NULL)
 );
@@ -229,6 +255,38 @@ END $$;
 CREATE INDEX IF NOT EXISTS sip_trunks_tenant_idx ON sip_trunks(tenant_id);
 """
 
+# Migration patch for databases that predate the failover-priority column.
+# Same shape as the tenant migration above, and applied at every sidecar
+# boot for the same reason: this store is the sidecar's, and the
+# call-engine pod has no migration step that could ever run against it.
+# The CHECK is guarded because ADD CONSTRAINT — unlike ADD COLUMN — has no
+# IF NOT EXISTS form and would abort the whole patch on the second boot.
+# Outbound-proxy + From-override columns for rows predating them. Same
+# every-boot, IF-NOT-EXISTS contract as the tenant migration.
+_DDL_TRUNKS_PROXY_MIGRATION = r"""
+ALTER TABLE sip_trunks ADD COLUMN IF NOT EXISTS outbound_proxy TEXT;
+ALTER TABLE sip_trunks ADD COLUMN IF NOT EXISTS from_sip_user  TEXT;
+"""
+
+_DDL_TRUNKS_PRIORITY_MIGRATION = r"""
+ALTER TABLE sip_trunks ADD COLUMN IF NOT EXISTS priority INTEGER;
+UPDATE sip_trunks SET priority = 100 WHERE priority IS NULL;
+ALTER TABLE sip_trunks ALTER COLUMN priority SET NOT NULL;
+ALTER TABLE sip_trunks ALTER COLUMN priority SET DEFAULT 100;
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'sip_trunks_priority_range'
+          AND conrelid = 'sip_trunks'::regclass
+    ) THEN
+        ALTER TABLE sip_trunks
+            ADD CONSTRAINT sip_trunks_priority_range
+            CHECK (priority BETWEEN 1 AND 1000);
+    END IF;
+END $$;
+"""
+
 # Stock Asterisk realtime tables size *.id at VARCHAR(40), which is
 # tight once we prefix with the tenant: `t<8>_<60>` = 70 chars. Widen
 # to 190 (matching the rest of Asterisk's contrib alembic) so the
@@ -241,6 +299,165 @@ ALTER TABLE ps_endpoints     ALTER COLUMN id TYPE VARCHAR(190);
 ALTER TABLE ps_aors          ALTER COLUMN id TYPE VARCHAR(190);
 ALTER TABLE ps_auths         ALTER COLUMN id TYPE VARCHAR(190);
 ALTER TABLE ps_registrations ALTER COLUMN id TYPE VARCHAR(190);
+"""
+
+# PJSIP contact bindings — where res_pjsip_registrar persists each
+# REGISTER once sorcery.conf maps `contact=realtime,ps_contacts`
+# (sorcery_realtime_agents.conf.sample) and extconfig maps the family.
+# Unmapped, contacts lived only in the pod-local astdb sqlite: the agent
+# showed Avail in `pjsip show contacts` but origination to it failed with
+# "Could not create dialog to invalid URI 'staff_<agent>'" and the
+# answered leg dropped (confirmed live on Azure nonprod, 2026-09-06).
+# Created here because nothing else migrates ps_contacts: call-engine's
+# migrations create the other five ps_* tables (0002/0006) but never
+# this one, and the contrib alembic tree is not run anywhere in this
+# deployment. Conversely, once sorcery maps the type, a MISSING table
+# makes the contact CREATE on REGISTER fail — agents then cannot
+# register at all — so this must land in the same image as the sorcery
+# line.
+#
+# Column set mirrors this source tree's contrib alembic end state
+# (43956d550a44 created id/uri/expiration_time/qualify_frequency; the
+# later migrations added/widened the rest), which is also exactly the
+# field list res_pjsip/location.c registers for the contact sorcery
+# type. Same deliberate deviations as musiconhold above: the yes/no
+# columns are plain VARCHAR(3) instead of the contrib ENUMs (CREATE
+# TYPE has no IF NOT EXISTS form; res_config_odbc traffics in text
+# either way). id stays VARCHAR(255) per contrib e96a0b8071c — contact
+# ids are `<aor-id>;@<32-hex>`, so even a tenant-namespaced 70-char aor
+# id fits without the 190 widen the other ps_* tables needed.
+#
+# The unique index mirrors contrib's ps_contacts_uq constraint on
+# (id, reg_server); CREATE UNIQUE INDEX IF NOT EXISTS keeps it
+# idempotent where ADD CONSTRAINT would abort every boot after the
+# first. ps_contacts_qualifyfreq_exp is the index the qualify/prune
+# scans use (contrib ef7efc2d3964).
+_DDL_PS_CONTACTS = r"""
+CREATE TABLE IF NOT EXISTS ps_contacts (
+    id                   VARCHAR(255) NOT NULL,
+    uri                  VARCHAR(511),
+    expiration_time      BIGINT,
+    qualify_frequency    INTEGER,
+    qualify_timeout      DOUBLE PRECISION,
+    -- ast_bool_values, not yes/no: Asterisk writes the full set incl.
+    -- 'true'/'false', so these must hold >3 chars. VARCHAR(3) here caused
+    -- '22001 value too long' on every REGISTER (prune_on_boot='false'),
+    -- which failed the contact bind and left softphones unregistered.
+    qualify_2xx_only     VARCHAR(16),
+    authenticate_qualify VARCHAR(16),
+    outbound_proxy       VARCHAR(255),
+    path                 TEXT,
+    user_agent           VARCHAR(255),
+    endpoint             VARCHAR(255),
+    reg_server           VARCHAR(255),
+    via_addr             VARCHAR(40),
+    via_port             INTEGER,
+    call_id              VARCHAR(255),
+    prune_on_boot        VARCHAR(16)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ps_contacts_uq ON ps_contacts (id, reg_server);
+CREATE INDEX IF NOT EXISTS ps_contacts_id ON ps_contacts (id);
+CREATE INDEX IF NOT EXISTS ps_contacts_qualifyfreq_exp ON ps_contacts (qualify_frequency, expiration_time);
+"""
+
+# Widen the ast_bool_values columns an older _DDL_PS_CONTACTS sized VARCHAR(3)
+# for yes/no. Asterisk writes the FULL ast_bool_values set incl. 'true'/'false',
+# so a REGISTER stamping prune_on_boot='false' (5 chars) hit
+# '22001 value too long for type character varying(3)', the contact INSERT
+# failed, and register_aor_core logged "Unable to bind contact" — softphones
+# connected the WS but never registered (Azure, 2026-09-07). CREATE TABLE
+# IF NOT EXISTS cannot repair an existing table, so this ALTER runs every boot.
+# Idempotent: re-widening an already-VARCHAR(16) column is a no-op.
+_DDL_PS_CONTACTS_PATCH = r"""
+ALTER TABLE ps_contacts ALTER COLUMN qualify_2xx_only     TYPE VARCHAR(16);
+ALTER TABLE ps_contacts ALTER COLUMN authenticate_qualify TYPE VARCHAR(16);
+ALTER TABLE ps_contacts ALTER COLUMN prune_on_boot        TYPE VARCHAR(16);
+"""
+
+# Asterisk realtime MusicOnHold class definitions. Written by the
+# call-engine's MohRegistry (POST /control/moh/register upserts
+# {name, mode='files', directory, sort='alpha'} keyed on name — its
+# ON CONFLICT (name) is why name must be the primary key) and read by
+# res_musiconhold through extconfig.conf's
+# `musiconhold => odbc,asterisk,musiconhold` mapping. Created here
+# because nothing else migrates this database — the contrib alembic
+# tree is not run anywhere in this deployment — and MohRegistry's
+# INSERT assumes the table exists.
+#
+# Column set mirrors Asterisk's own contrib/ast-db-manage schema as of
+# THIS source tree, which is two migrations: 4da0c5f79a9c_create_tables
+# (name/mode/directory/application/digit/sort/format/stamp) plus
+# f5b0e7427449_add_loop_last_to_res_musiconhold (loop_last). The third
+# MOH migration, fbb7766f17bc_add_playlist_to_moh, adds no column here —
+# it widens the mode enum and creates a separate musiconhold_entry table
+# (see the note below).
+#
+# This is NOT "the exact vocabulary moh_parse_options() consumes", which
+# an earlier version of this comment claimed: that function also accepts
+# entry, announcement, kill_escalation_delay and kill_method, none of
+# which is a column in any upstream migration. They are musiconhold.conf
+# options only. The distinction matters because it is what makes the
+# column set safe to be a subset — see below.
+#
+# Three deliberate deviations from contrib:
+#   * `mode` is plain VARCHAR rather than the contrib Postgres ENUM
+#     (CREATE TYPE has no IF NOT EXISTS form, and the ODBC realtime layer
+#     only ever sees text — res_config_odbc SQLGetData's every column as
+#     SQL_CHAR). 'files', what MohRegistry writes, is a valid member of
+#     that enum anyway, so this is more permissive, never less.
+#   * `loop_last` is VARCHAR(3) rather than the yesno_values ENUM, for the
+#     same reason. moh_parse_options runs it through ast_true().
+#   * `name` stays VARCHAR(80) rather than getting the 190 widening the
+#     ps_* ids got, because Asterisk caps class names at MAX_MUSICCLASS
+#     (80) — a longer name is broken there regardless of what the column
+#     would hold, and the narrow column makes that failure a loud INSERT
+#     error instead of silent truncation.
+#
+# WHY A COLUMN CANNOT BE "REJECTED" HERE, which is worth stating because
+# it is the hypothesis this table keeps attracting whenever hold music is
+# silent: res_config_odbc issues `SELECT * FROM musiconhold WHERE name= ?`
+# (res_config_odbc.c:209) and hands every column it gets back to
+# moh_parse_options, which matches on the column NAME and ignores any it
+# does not know. So an EXTRA column is inert and a MISSING one only
+# leaves its option at the default. Neither can make res_musiconhold
+# refuse the row. The columns that CAN break a row are the two the
+# realtime path actively requires — a NULL/empty `mode`, or an empty
+# `directory` on a non-custom/playlist mode — and both are written by
+# MohRegistry's INSERT on every upsert.
+#
+# NOT created here, deliberately: `musiconhold_entry` (the playlist
+# table). Nothing maps that family in extconfig and MohRegistry only ever
+# writes mode='files'. Worth knowing it is a silent trap if that ever
+# changes — load_realtime_musiconhold() destroys the class and behaves
+# "as though this class doesn't exist" when mode='playlist' yields zero
+# entries (res_musiconhold.c:1709), so a playlist class over a missing
+# table fails exactly like a missing row.
+_DDL_MUSICONHOLD = r"""
+CREATE TABLE IF NOT EXISTS musiconhold (
+    name        VARCHAR(80) PRIMARY KEY,
+    mode        VARCHAR(80),
+    directory   VARCHAR(255),
+    application VARCHAR(255),
+    digit       VARCHAR(1),
+    sort        VARCHAR(10),
+    format      VARCHAR(10),
+    loop_last   VARCHAR(3),
+    stamp       TIMESTAMP
+);
+"""
+
+# CREATE TABLE IF NOT EXISTS above does nothing to a table that already
+# exists, so every deployment created before loop_last was added to the
+# DDL needs the column added additively. Same every-boot, IF-NOT-EXISTS,
+# one-statement-per-execute contract as the ps_* patches.
+#
+# No live fault is being fixed here — per the reasoning above, a missing
+# loop_last leaves the option at its default and cannot stop a class
+# resolving. It closes a real divergence from Asterisk's own schema so
+# the column vocabulary is the one res_musiconhold documents, and so the
+# option becomes settable without a second migration later.
+_DDL_MUSICONHOLD_PATCH = r"""
+ALTER TABLE musiconhold ADD COLUMN IF NOT EXISTS loop_last VARCHAR(3);
 """
 
 _DDL_PROVIDERS = r"""
@@ -324,6 +541,15 @@ ALTER TABLE ps_endpoints ADD COLUMN IF NOT EXISTS direct_media             VARCH
 ALTER TABLE ps_endpoints ADD COLUMN IF NOT EXISTS rewrite_contact          VARCHAR(3);
 ALTER TABLE ps_endpoints ADD COLUMN IF NOT EXISTS rtp_symmetric            VARCHAR(3);
 ALTER TABLE ps_endpoints ADD COLUMN IF NOT EXISTS force_rport              VARCHAR(3);
+-- dtmf_mode: control_api's trunk INSERT hardcodes 'rfc4733', and this block
+-- omitting the column is why NO trunk was ever provisionable on a subset
+-- schema - the upsert died with "column dtmf_mode does not exist" while
+-- agents (whose writer does not set it) provisioned fine, so the failure
+-- looked like anything but a missing migration (AGH-8426, 2026-08-30).
+ALTER TABLE ps_endpoints ADD COLUMN IF NOT EXISTS dtmf_mode                VARCHAR(40);
+-- outbound_proxy: see the sip_trunks column comment. VARCHAR(190) to hold
+-- 'sip:host:port^3Blr' with a long hostname.
+ALTER TABLE ps_endpoints ADD COLUMN IF NOT EXISTS outbound_proxy           VARCHAR(190);
 
 -- Per-agent WebRTC columns (control_api._provision_agent writes these)
 ALTER TABLE ps_endpoints ADD COLUMN IF NOT EXISTS ice_support              VARCHAR(3);
@@ -413,12 +639,62 @@ def bootstrap(db_conn_factory) -> None:
             # tenant_id column. Safe on a fresh DB too — every step is
             # IF NOT EXISTS / IF the old PK is still in place.
             cur.execute(_DDL_TRUNKS_TENANT_MIGRATION)
+            # Failover-priority column for sip_trunks predating it. Same
+            # every-boot, IF-NOT-EXISTS contract as the tenant migration.
+            cur.execute(_DDL_TRUNKS_PRIORITY_MIGRATION)
+            cur.execute(_DDL_TRUNKS_PROXY_MIGRATION)
             cur.execute(_SEED_INNOCALLS)
         log.info(
-            "sip_store.bootstrap: sip_trunks ensured + tenant_id migration applied"
+            "sip_store.bootstrap: sip_trunks ensured + tenant_id and "
+            "priority migrations applied"
         )
     except Exception as exc:
         log.error("sip_store.bootstrap (trunks/providers/accounts) failed: %s", exc)
+
+    # Realtime MOH classes — the table call-engine's MohRegistry upserts
+    # into and res_musiconhold reads via the extconfig `musiconhold`
+    # mapping. Own try/except so a failure here can't take the rest of
+    # bootstrap with it (and vice versa).
+    try:
+        with db_conn_factory() as conn, conn.cursor() as cur:
+            cur.execute(_DDL_MUSICONHOLD)
+        log.info("sip_store.bootstrap: musiconhold realtime table ensured")
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "sip_store.bootstrap (musiconhold) failed: %s — hold-music "
+            "class registration will 500 until the table exists",
+            exc,
+        )
+
+    # Additive column patch for a musiconhold table that predates
+    # loop_last. Separate connection + autocommit + one statement per
+    # execute, so an already-present column or a permission glitch cannot
+    # roll back anything else. Own try/except for the same reason.
+    try:
+        conn = db_conn_factory()
+        try:
+            conn.autocommit = True
+            with conn.cursor() as cur:
+                for stmt in _DDL_MUSICONHOLD_PATCH.split(";"):
+                    s = stmt.strip()
+                    if not s or s.startswith("--"):
+                        continue
+                    try:
+                        cur.execute(s)
+                    except Exception as inner_exc:  # noqa: BLE001
+                        log.warning(
+                            "sip_store.bootstrap (musiconhold patch %r): %s",
+                            s[:80], inner_exc,
+                        )
+        finally:
+            conn.close()
+        log.info("sip_store.bootstrap: musiconhold schema patched (loop_last)")
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "sip_store.bootstrap (musiconhold patch) failed: %s — loop_last "
+            "stays unavailable; class resolution is unaffected",
+            exc,
+        )
 
     # Widen ps_*.id from VARCHAR(40) to VARCHAR(190) so namespaced ids
     # (tXXXXXXXX_<60>) fit. Same autocommit/per-statement pattern as
@@ -449,6 +725,52 @@ def bootstrap(db_conn_factory) -> None:
         log.warning(
             "sip_store.bootstrap (pjsip id widen) failed: %s — "
             "tenant-namespaced PJSIP endpoint ids may be truncated",
+            exc,
+        )
+
+    # REGISTER contact persistence — see _DDL_PS_CONTACTS. Every
+    # statement is IF NOT EXISTS, so one execute is fine; own
+    # try/except because with sorcery mapping contact=realtime a
+    # missing table blocks agent registration outright.
+    try:
+        with db_conn_factory() as conn, conn.cursor() as cur:
+            cur.execute(_DDL_PS_CONTACTS)
+        log.info("sip_store.bootstrap: ps_contacts realtime table ensured")
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "sip_store.bootstrap (ps_contacts) failed: %s — REGISTER "
+            "contact writes will fail and agents cannot register until "
+            "the table exists",
+            exc,
+        )
+
+    # Repair an existing ps_contacts whose bool columns are VARCHAR(3).
+    # Same autocommit/per-statement pattern as the other patches; own
+    # try/except because this REPAIRS registration and must not roll back
+    # the rest of bootstrap if it cannot run.
+    try:
+        conn = db_conn_factory()
+        try:
+            conn.autocommit = True
+            with conn.cursor() as cur:
+                for stmt in _DDL_PS_CONTACTS_PATCH.split(";"):
+                    s = stmt.strip()
+                    if not s or s.startswith("--"):
+                        continue
+                    try:
+                        cur.execute(s)
+                    except Exception as inner_exc:  # noqa: BLE001
+                        log.warning(
+                            "sip_store.bootstrap (ps_contacts patch %r): %s",
+                            s[:80], inner_exc,
+                        )
+        finally:
+            conn.close()
+        log.info("sip_store.bootstrap: ps_contacts bool columns widened to VARCHAR(16)")
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "sip_store.bootstrap (ps_contacts patch) failed: %s — REGISTER "
+            "may hit '22001 value too long' and agents cannot register",
             exc,
         )
 
@@ -1195,6 +1517,26 @@ def validate_trunk_input(body: dict, partial: bool = False) -> tuple[dict, Optio
         out["from_domain"] = _str_or_none(pick("fromDomain", "from_domain"))
     if "realm" in body:
         out["realm"] = _str_or_none(body.get("realm"))
+    if "outboundProxy" in body or "outbound_proxy" in body:
+        # Normalized to a full loose-routing URI: a bare host is prefixed
+        # 'sip:' and ';lr' is appended when no parameter is present, because
+        # an outbound proxy without loose routing makes Asterisk rewrite the
+        # request-URI to the proxy - the call then dials the proxy itself.
+        # Stored UNESCAPED ('sip:host;lr'); the realtime escaping ('^3B' for
+        # ';') is _pjsip_upsert's business, not the canonical row's.
+        op = _str_or_none(pick("outboundProxy", "outbound_proxy"))
+        if op:
+            if not op.startswith(("sip:", "sips:")):
+                op = "sip:" + op
+            if ";" not in op:
+                op = op + ";lr"
+        out["outbound_proxy"] = op
+    if "fromSipUser" in body or "from_sip_user" in body:
+        # NULL = proven default (From user = auth username); the sentinel
+        # 'caller_id' = write NULL from_user/callerid so the per-call
+        # CALLERID drives the From header; anything else verbatim. See the
+        # sip_trunks column comment.
+        out["from_sip_user"] = _str_or_none(pick("fromSipUser", "from_sip_user"))
     if "description" in body:
         out["description"] = _str_or_none(body.get("description"))
 
@@ -1231,6 +1573,22 @@ def validate_trunk_input(body: dict, partial: bool = False) -> tuple[dict, Optio
             raise StoreError("expirationSeconds must be 60..86400")
         out["expiration_seconds"] = es
 
+    if "priority" in body or not partial:
+        # An omitted priority takes the column default, but 0 or "high" is
+        # a value the operator typed and got wrong — reject it rather than
+        # substituting 100, which would read back as a preference nobody
+        # expressed (channelLimit's `or 50` above has exactly that flaw).
+        v = body.get("priority")
+        if v is None:
+            v = 100
+        try:
+            pr = int(v)
+        except (TypeError, ValueError):
+            raise StoreError("priority must be an integer")
+        if not 1 <= pr <= 1000:
+            raise StoreError("priority must be 1..1000")
+        out["priority"] = pr
+
     if "enabled" in body:
         out["enabled"] = _bool_or_default(body.get("enabled"), True)
 
@@ -1253,9 +1611,10 @@ _TRUNK_COLUMNS = (
     "tenant_id", "id", "name", "address", "protocol", "media_encryption",
     "auth_username", "auth_password_enc", "numbers",
     "from_user", "from_domain", "realm",
+    "outbound_proxy", "from_sip_user",
     "register_enabled", "carrier_ip",
     "channel_limit", "expiration_seconds",
-    "description", "enabled", "created_at", "updated_at",
+    "description", "enabled", "priority", "created_at", "updated_at",
 )
 
 
@@ -1270,17 +1629,29 @@ def _row_to_trunk(row) -> dict:
         "protocol":         row["protocol"],
         "mediaEncryption":  row["media_encryption"],
         "authUsername":     row["auth_username"],
+        # The sentinel the trunk form gates its masked-credentials pill on
+        # (AGH-6664): before that gate the pill implied a stored password
+        # even when none existed. One name for this fact, matching the
+        # trunk-account projection above - a second alias only invites the
+        # two sides to migrate in opposite directions. The password itself
+        # is never serialized, on any path.
         "hasPassword":      bool(row["auth_password_enc"]),
         "numbers":          list(row["numbers"] or []),
         "fromUser":         row["from_user"],
         "fromDomain":       row["from_domain"],
         "realm":            row["realm"],
+        "outboundProxy":    row["outbound_proxy"],
+        "fromSipUser":      row["from_sip_user"],
         "registerEnabled":  bool(row["register_enabled"]),
         "carrierIp":        str(carrier_ip) if carrier_ip is not None else None,
         "channelLimit":     row["channel_limit"],
         "expirationSeconds": row["expiration_seconds"],
         "description":      row["description"],
         "enabled":          bool(row["enabled"]),
+        # Failover order only — see the column comment on _DDL_TRUNKS.
+        # Serialized so the UI can show and edit the recorded preference;
+        # no caller treats it as a routing decision.
+        "priority":         row["priority"],
         "createdAt":        row["created_at"].isoformat() if row["created_at"] else None,
         "updatedAt":        row["updated_at"].isoformat() if row["updated_at"] else None,
     }
@@ -1304,8 +1675,13 @@ def list_trunks(db_conn_factory, tenant_id: str) -> list[dict]:
     with db_conn_factory() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
             cur.execute(
+                # Preferred trunk first, so the list reads in the order the
+                # operator would switch over in. id breaks the tie the
+                # shared default 100 creates, keeping the order stable
+                # across calls (name used to do that job alone).
                 f"SELECT {', '.join(_TRUNK_COLUMNS)} "
-                "FROM sip_trunks WHERE tenant_id = %s ORDER BY name, id",
+                "FROM sip_trunks WHERE tenant_id = %s "
+                "ORDER BY priority ASC, id",
                 (tenant_id,),
             )
             return [_row_to_trunk(r) for r in cur.fetchall()]
@@ -1369,6 +1745,10 @@ def _trunk_to_pjsip_row(trunk: dict, plaintext_password: str) -> dict:
         "client_uri":       None,
         "from_user":        from_user,
         "from_domain":      trunk.get("fromDomain") or host,
+        # Threaded verbatim; _pjsip_upsert owns both the ';' escaping and the
+        # 'caller_id' sentinel. Absent for rows predating the columns.
+        "outbound_proxy":   trunk.get("outboundProxy"),
+        "from_sip_user":    trunk.get("fromSipUser"),
         "expiration":       trunk["expirationSeconds"],
         "allow":            None,
         "outbound_auth":    None,
@@ -1433,16 +1813,18 @@ def upsert_trunk(
                     (tenant_id, id, name, address, protocol, media_encryption,
                      auth_username, auth_password_enc, numbers,
                      from_user, from_domain, realm,
+                     outbound_proxy, from_sip_user,
                      register_enabled, carrier_ip,
                      channel_limit, expiration_seconds,
-                     description, enabled, updated_at)
+                     description, enabled, priority, updated_at)
                 VALUES (%(tenant_id)s, %(id)s, %(name)s, %(address)s, %(protocol)s,
                         %(media_encryption)s, %(auth_username)s,
                         %(auth_password_enc)s, %(numbers)s,
                         %(from_user)s, %(from_domain)s, %(realm)s,
+                        %(outbound_proxy)s, %(from_sip_user)s,
                         %(register_enabled)s, %(carrier_ip)s,
                         %(channel_limit)s, %(expiration_seconds)s,
-                        %(description)s, %(enabled)s, NOW())
+                        %(description)s, %(enabled)s, %(priority)s, NOW())
                 ON CONFLICT (tenant_id, id) DO UPDATE SET
                     name               = EXCLUDED.name,
                     address            = EXCLUDED.address,
@@ -1454,12 +1836,15 @@ def upsert_trunk(
                     from_user          = EXCLUDED.from_user,
                     from_domain        = EXCLUDED.from_domain,
                     realm              = EXCLUDED.realm,
+                    outbound_proxy     = EXCLUDED.outbound_proxy,
+                    from_sip_user      = EXCLUDED.from_sip_user,
                     register_enabled   = EXCLUDED.register_enabled,
                     carrier_ip         = EXCLUDED.carrier_ip,
                     channel_limit      = EXCLUDED.channel_limit,
                     expiration_seconds = EXCLUDED.expiration_seconds,
                     description        = EXCLUDED.description,
                     enabled            = EXCLUDED.enabled,
+                    priority           = EXCLUDED.priority,
                     updated_at         = NOW()
                 """,
                 {
@@ -1475,12 +1860,15 @@ def upsert_trunk(
                     "from_user":          cols.get("from_user"),
                     "from_domain":        cols.get("from_domain"),
                     "realm":              cols.get("realm"),
+                    "outbound_proxy":     cols.get("outbound_proxy"),
+                    "from_sip_user":      cols.get("from_sip_user"),
                     "register_enabled":   cols.get("register_enabled", True),
                     "carrier_ip":         cols.get("carrier_ip"),
                     "channel_limit":      cols["channel_limit"],
                     "expiration_seconds": cols["expiration_seconds"],
                     "description":        cols.get("description"),
                     "enabled":            cols.get("enabled", True),
+                    "priority":           cols["priority"],
                 },
             )
 

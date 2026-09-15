@@ -154,6 +154,31 @@ if [ -n "${ASTERISK_EXTERNAL_MEDIA_ADDRESS:-}" ]; then
   done
 fi
 
+# 3b-port. Override external_signaling_port when
+# ASTERISK_EXTERNAL_SIGNALING_PORT is set. The sample bakes 5062 for the
+# AWS NLB, which exposes external UDP on 5062 and forwards it to the pod's
+# 5060 (a single NLB listener can't carry UDP and TCP on the same port).
+# A host-network pod (Azure) has no such forward: the carrier reaches it
+# on the bind port 5060 directly, so the baked 5062 makes every 200 OK
+# advertise a dead port, the carrier's ACK is lost, and the call tears
+# down at 64*T1 = 32s. Setting this env to the real external port (5060 on
+# host-network) fixes it; leaving it UNSET keeps the baked default, so AWS
+# is unaffected. Idempotent: replaces the existing line, or injects one
+# under [transport-udp] if the sample ever drops it.
+if [ -n "${ASTERISK_EXTERNAL_SIGNALING_PORT:-}" ]; then
+  ESP="$ASTERISK_EXTERNAL_SIGNALING_PORT"
+  for f in /etc/asterisk/pjsip_trunks.conf; do
+    [ -f "$f" ] || continue
+    if grep -q '^external_signaling_port=' "$f"; then
+      sed -i "s/^external_signaling_port=.*/external_signaling_port=${ESP}/" "$f"
+      log "external_signaling_port overridden to ${ESP} in $f"
+    else
+      sed -i "/^\[transport-udp\]\$/a external_signaling_port=${ESP}" "$f"
+      log "external_signaling_port=${ESP} injected under [transport-udp] in $f"
+    fi
+  done
+fi
+
 # 3c. Inject TURN config into rtp.conf when a TURN server is configured.
 #
 # WebRTC agent endpoints use ICE. Behind the public NLB, Asterisk can
