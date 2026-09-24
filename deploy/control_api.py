@@ -765,14 +765,21 @@ def _provision_agent(tenant_id, agent_id, display_name, context, rotate=False):
 
             cur.execute("""
                 INSERT INTO ps_aors
-                    (id, max_contacts, remove_existing, qualify_frequency, support_path)
-                VALUES (%s, 1, 'yes', 60, 'yes')
+                    (id, max_contacts, remove_existing, qualify_frequency,
+                     qualify_timeout, support_path)
+                VALUES (%s, 1, 'yes', 60, %s, 'yes')
                 ON CONFLICT (id) DO UPDATE SET
                     max_contacts      = EXCLUDED.max_contacts,
                     remove_existing   = EXCLUDED.remove_existing,
                     qualify_frequency = EXCLUDED.qualify_frequency,
+                    qualify_timeout   = EXCLUDED.qualify_timeout,
                     support_path      = EXCLUDED.support_path
-            """, (pjsip_id,))
+            """, (pjsip_id, sip_store.AGENT_QUALIFY_TIMEOUT_SECONDS))
+            # qualify_timeout: Asterisk's 3.0s default is shorter than a busy
+            # browser tab takes to answer OPTIONS, and one slow reply made the
+            # agent unringable for up to qualify_frequency (see the column's
+            # note on sip_store._DDL_PS_AORS_PATCH, which adds it at bootstrap
+            # the same way remove_existing/support_path are added).
 
             cur.execute("""
                 INSERT INTO ps_auths
