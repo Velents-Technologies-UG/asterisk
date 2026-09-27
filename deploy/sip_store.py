@@ -579,10 +579,27 @@ ALTER TABLE ps_endpoints ADD COLUMN IF NOT EXISTS updated_at               TIMES
 # register through a proxy. Both are standard Asterisk 22 ps_aors
 # columns; the stripped-schema deploys that lack the ps_endpoints
 # carrier-compat columns generally also lack these.
+#
+# qualify_timeout (seconds, float - Asterisk's own type) lets agent AORs
+# tolerate a slow browser. Absent, Asterisk uses 3.0s; a WebRTC softphone
+# answers qualify OPTIONS from a browser tab and a busy or throttled tab
+# answers slower than that, so one late reply marks the contact Unreachable
+# until the NEXT qualify (qualify_frequency, 60s) and the agent cannot be
+# rung for that whole window - observed live 2026-09-24 on testCallCenter
+# staff 2 (healthy RTTs up to 2327ms, Unreachable at 08:19:07, a queue call
+# failed "Could not create dialog to invalid URI" at 08:20:24, Reachable
+# again the same second). _provision_agent writes AGENT_QUALIFY_TIMEOUT_SECONDS.
 _DDL_PS_AORS_PATCH = r"""
 ALTER TABLE ps_aors ADD COLUMN IF NOT EXISTS remove_existing VARCHAR(3);
 ALTER TABLE ps_aors ADD COLUMN IF NOT EXISTS support_path    VARCHAR(3);
+ALTER TABLE ps_aors ADD COLUMN IF NOT EXISTS qualify_timeout DOUBLE PRECISION;
 """
+
+# Seconds Asterisk waits for an agent softphone's qualify reply before marking
+# the contact Unreachable. 10s tolerates a slow tab while a dead contact is
+# still caught within one qualify cycle. Mirrored in call-engine's
+# AgentSipStore (AGENT_QUALIFY_TIMEOUT_SECONDS); keep the two equal.
+AGENT_QUALIFY_TIMEOUT_SECONDS = 10.0
 
 # Seed the one provider we actively need so the UI has a selectable
 # carrier on first boot. ON CONFLICT keeps re-seeding idempotent and
@@ -844,7 +861,7 @@ def bootstrap(db_conn_factory) -> None:
         finally:
             conn.close()
         log.info(
-            "sip_store.bootstrap: ps_aors schema patched (remove_existing + support_path)"
+            "sip_store.bootstrap: ps_aors schema patched (remove_existing + support_path + qualify_timeout)"
         )
     except Exception as exc:
         log.warning(
