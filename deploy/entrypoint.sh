@@ -242,6 +242,41 @@ if [ -n "${ASTERISK_RTP_START:-}" ] || [ -n "${ASTERISK_RTP_END:-}" ]; then
   fi
 fi
 
+# 3e. Override (or disable) the STUN server in rtp.conf from env.
+#
+# The baked rtp.conf.sample points stunaddr at Google's public STUN. That is a
+# fine default, but a deployment may need its own (a region where Google is
+# slow or blocked, or its own coturn answering STUN), or none at all (a
+# hostNetwork pod on a public address gains nothing from STUN and pays one
+# lookup per ICE gather).
+#
+#   unset            -> rtp.conf stays exactly as baked (Google STUN).
+#   host[:port]      -> the stunaddr= line is replaced (or added under
+#                       [general] if there is none).
+#   none             -> the stunaddr= line is commented out: STUN disabled.
+#                       A literal, because an unset and an empty variable look
+#                       the same in most manifests and must keep the default.
+#
+# An unusable value is refused LOUDLY and the baked line stands, like the RTP
+# range above. Idempotent across restarts: the replace is a no-op on a second
+# run, and "none" only matches an uncommented line.
+if [ -n "${ASTERISK_STUN_ADDR:-}" ]; then
+  stun_conf=/etc/asterisk/rtp.conf
+  stun_addr="${ASTERISK_STUN_ADDR}"
+  if [ "$stun_addr" = "none" ]; then
+    sed -i 's/^stunaddr=/;stunaddr=/' "$stun_conf"
+    log "ASTERISK_STUN_ADDR=none - STUN disabled in rtp.conf (stunaddr commented out)"
+  elif ! printf '%s' "$stun_addr" | grep -qE '^[A-Za-z0-9._-]+(:[0-9]{1,5})?$'; then
+    log "WARNING: ASTERISK_STUN_ADDR must be host or host:port, or 'none' (got '${stun_addr}') - keeping the baked rtp.conf stunaddr"
+  elif grep -q '^stunaddr=' "$stun_conf"; then
+    sed -i "s/^stunaddr=.*/stunaddr=${stun_addr}/" "$stun_conf"
+    log "rtp.conf stunaddr set from env: ${stun_addr}"
+  else
+    sed -i "/^\[general\]\$/a stunaddr=${stun_addr}" "$stun_conf"
+    log "rtp.conf stunaddr added under [general] from env: ${stun_addr}"
+  fi
+fi
+
 # 4. Runtime dirs - idempotent. PVCs / emptyDirs may mask the image's
 # pre-created versions, so re-create on every start.
 #

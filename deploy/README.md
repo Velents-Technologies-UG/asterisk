@@ -74,6 +74,7 @@ Common vars to template:
 | `EXTERNAL_MEDIA_ADDRESS`     | `pjsip.conf` `transport-udp` / `transport-wss` |
 | `EXTERNAL_SIGNALING_ADDRESS` | same |
 | `TLS_CERT_FILE` / `TLS_PRIVATE_KEY` | `http.conf` |
+| `ASTERISK_STUN_ADDR`         | not templated: the entrypoint rewrites `rtp.conf` `stunaddr` (`host[:port]`, or `none` to disable; unset keeps the baked Google STUN) |
 
 ## Health checks
 

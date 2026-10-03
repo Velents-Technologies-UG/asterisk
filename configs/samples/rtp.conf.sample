@@ -71,4 +71,7 @@ rtpend=10029
 ; the relay's public IP that the browser CAN reach, and bidirectional
 ; audio comes up. Leaving stunaddr in place lets STUN succeed first on
 ; networks where it can, falling back to TURN otherwise.
+;
+; stunaddr can be overridden per deployment with ASTERISK_STUN_ADDR
+; (host[:port], or "none" to disable STUN); see deploy/entrypoint.sh 3e.
 stunaddr=stun.l.google.com:19302
