@@ -932,6 +932,62 @@ def _state_to_status(state):
     return "unknown"
 
 
+# `pjsip show registrations` status words. Registered is positive evidence
+# that the carrier is reachable AND accepts our credentials; the refusals are
+# positive evidence of the opposite. Anything else (Unknown, a transient
+# state) says nothing and must not override the endpoint's own state.
+_REGISTRATION_ONLINE = ("registered",)
+_REGISTRATION_OFFLINE = ("rejected", "unregistered", "stopped")
+
+
+def _parse_pjsip_registrations(output):
+    """Yield (registration id, "online"|"offline") from `pjsip show registrations`.
+
+    A row reads `<id>/<server uri>  <auth id>  <Status>  (exp. Ns)`. Both
+    trunk writers (sip_store and call-engine's TrunkStore) key
+    ps_registrations by the PJSIP endpoint id, so the caller joins on it
+    directly. Header, separator and footer lines carry no '/' in the first
+    token and are skipped. A status word that is neither list yields
+    nothing, so it cannot override the endpoint state.
+    """
+    for line in output.splitlines():
+        s = line.strip()
+        if not s or s.startswith("<") or s.startswith("="):
+            continue
+        tokens = s.split()
+        first = tokens[0]
+        if "/" not in first:
+            continue
+        reg_id = first.split("/", 1)[0]
+        for tok in tokens[1:]:
+            tl = tok.lower()
+            if tl in _REGISTRATION_ONLINE:
+                yield reg_id, "online"
+                break
+            if tl in _REGISTRATION_OFFLINE:
+                yield reg_id, "offline"
+                break
+
+
+def _trunk_live_status(endpoint_id, endpoint_state, ip_trunks, registrations):
+    """The badge for one trunk endpoint.
+
+    An IP-identified trunk is online by construction (nothing to measure).
+    A trunk that registers is judged by its registration, which Asterisk
+    measures on every refresh: its contact is a fixed AOR contact that
+    Asterisk may never qualify (NonQual), so the endpoint's own state reads
+    Unavailable for a line that is registered and carrying calls (seen on
+    prod 2026-10-05, ta985cf9d_voylo-outbound). Otherwise the endpoint
+    state decides, as before.
+    """
+    if endpoint_id in ip_trunks:
+        return "online"
+    reg = registrations.get(endpoint_id)
+    if reg is not None:
+        return reg
+    return _state_to_status(endpoint_state)
+
+
 def _build_trunk_id_reverse_map():
     """Map PJSIP realtime endpoint ids back to their sip_trunks rows.
 
@@ -963,6 +1019,56 @@ def _build_trunk_id_reverse_map():
     for tenant_id, slug, name in rows:
         out[sip_store.pjsip_trunk_endpoint_id(tenant_id, slug)] = (
             tenant_id, slug, name,
+        )
+    # Lines created through call-engine's TrunkStore (the Telephony page
+    # since 2026-09-01) have no sip_trunks row: they live in its
+    # trunks_meta side-table, keyed by the PJSIP endpoint id. Without them
+    # here their state never reaches the tenant's hash (the page reads
+    # "not confirmed"), the stale sweep has nothing to keep, and no drop
+    # alert can fire. A failure here costs only these rows, never the
+    # sip_trunks map. sip_trunks wins where both name one endpoint.
+    for pjsip_id, entry in _trunks_meta_reverse_rows():
+        out.setdefault(pjsip_id, entry)
+    return out
+
+
+def _trunk_slug(tenant_id, pjsip_id):
+    """The operator-facing slug for a namespaced endpoint id.
+
+    Mirrors call-engine's TrunkStore._rowToTrunk: strip THIS tenant's
+    `t<prefix>_` only, so a row that merely looks namespaced under some
+    other tenant keeps its full id.
+    """
+    prefix = f"t{sip_store.safe_tenant_prefix(tenant_id)}_"
+    return pjsip_id[len(prefix):] if pjsip_id.startswith(prefix) else pjsip_id
+
+
+def _trunks_meta_reverse_rows():
+    """[(pjsip id, (tenant, slug, name))] for every attributed trunks_meta row.
+
+    Unattributed rows (tenant_id NULL) are skipped: nothing says which
+    tenant hash they belong in, and they keep landing in the legacy global
+    key exactly as before. A database without the table yields nothing.
+    """
+    try:
+        with _db_conn() as conn, conn.cursor() as cur:
+            cur.execute("SELECT to_regclass('public.trunks_meta')")
+            if cur.fetchone()[0] is None:
+                return []
+            cur.execute(
+                "SELECT trunk_id, tenant_id, display_name FROM trunks_meta "
+                "WHERE tenant_id IS NOT NULL"
+            )
+            rows = cur.fetchall()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("status feeder: trunks_meta query failed: %s", exc)
+        return []
+    out = []
+    for pjsip_id, tenant_id, name in rows:
+        if not pjsip_id or not tenant_id:
+            continue
+        out.append(
+            (pjsip_id, (tenant_id, _trunk_slug(tenant_id, pjsip_id), name))
         )
     return out
 
@@ -1695,23 +1801,33 @@ def _decorate_trunks_with_live_state(items, tenant_id):
             [ASTERISK_BIN, "-rx", "pjsip show identifies"],
             capture_output=True, text=True, timeout=5, check=False,
         )
+        reg_proc = subprocess.run(
+            [ASTERISK_BIN, "-rx", "pjsip show registrations"],
+            capture_output=True, text=True, timeout=5, check=False,
+        )
     except Exception as exc:  # noqa: BLE001
         log.warning("trunk live-state decorate failed: %s", exc)
         return
     if ep_proc.returncode != 0:
         return
 
-    # Map slug -> live state. PJSIP endpoint ids are tenant-namespaced,
+    ip_trunks = (
+        set(_parse_pjsip_identifies(id_proc.stdout))
+        if id_proc.returncode == 0 else set()
+    )
+    registrations = (
+        dict(_parse_pjsip_registrations(reg_proc.stdout))
+        if reg_proc.returncode == 0 else {}
+    )
+    # Map pjsip id -> live state. PJSIP endpoint ids are tenant-namespaced,
     # so for each row compute the expected pjsip id and look it up.
     state_by_pjsip = {}
     for ep_id, state in _parse_pjsip_endpoints(ep_proc.stdout):
         # Strip trailing /contact suffix some pjsip versions add.
         head = ep_id.split("/", 1)[0]
-        state_by_pjsip[head] = _state_to_status(state)
-    ip_trunks = (
-        set(_parse_pjsip_identifies(id_proc.stdout))
-        if id_proc.returncode == 0 else set()
-    )
+        state_by_pjsip[head] = _trunk_live_status(
+            head, state, ip_trunks, registrations,
+        )
 
     ari_usable = True
     for row in items:
@@ -1719,10 +1835,9 @@ def _decorate_trunks_with_live_state(items, tenant_id):
         if not slug:
             continue
         pjsip_id = sip_store.pjsip_trunk_endpoint_id(tenant_id, slug)
-        if pjsip_id in ip_trunks:
-            row["state"] = "online"
-        else:
-            row["state"] = state_by_pjsip.get(pjsip_id, "unknown")
+        row["state"] = state_by_pjsip.get(
+            pjsip_id, "online" if pjsip_id in ip_trunks else "unknown",
+        )
         # Real per-trunk channel count via ARI (GET /endpoints/PJSIP/{id}
         # -> len(channel_ids)). Written only when actually measured — a
         # genuine 0 included — together with channelsMeasured=True, the
@@ -1839,6 +1954,14 @@ def _status_feeder_loop(stop_event):
                 [ASTERISK_BIN, "-rx", "pjsip show aors"],
                 capture_output=True, text=True, timeout=5, check=False,
             )
+            reg_proc = subprocess.run(
+                [ASTERISK_BIN, "-rx", "pjsip show registrations"],
+                capture_output=True, text=True, timeout=5, check=False,
+            )
+            registrations = (
+                dict(_parse_pjsip_registrations(reg_proc.stdout))
+                if reg_proc.returncode == 0 else {}
+            )
             ip_trunk_endpoints = (
                 set(_parse_pjsip_identifies(id_proc.stdout))
                 if id_proc.returncode == 0 else set()
@@ -1866,8 +1989,9 @@ def _status_feeder_loop(stop_event):
                     # as `endpoint/contact` once a contact has registered;
                     # we only want the endpoint part for the UI join.
                     head = ep_id.split("/", 1)[0]
-                    status = ("online" if head in ip_trunk_endpoints
-                              else _state_to_status(state))
+                    status = _trunk_live_status(
+                        head, state, ip_trunk_endpoints, registrations,
+                    )
                     known = reverse.get(head)
                     if known:
                         row_tenant, slug, _name = known
