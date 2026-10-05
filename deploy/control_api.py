@@ -947,6 +947,10 @@ def _state_to_status(state):
 _REGISTRATION_ONLINE = ("registered",)
 _REGISTRATION_OFFLINE = ("rejected",)
 
+# Contact states that are not a measurement of reachability (see
+# _trunk_live_status). Avail / Unavail / Removed / Rejected are.
+_UNMEASURED_CONTACT_STATES = ("nonqual", "unknown", "created")
+
 
 def _parse_pjsip_registrations(output):
     """Yield (registration id, "online"|"offline") from `pjsip show registrations`.
@@ -989,11 +993,13 @@ def _trunk_live_status(endpoint_id, endpoint_state, ip_trunks, registrations,
     prod 2026-10-05, ta985cf9d_voylo-outbound).
 
     Otherwise the endpoint state decides, with one exception: Unavailable
-    over contacts that are ALL NonQual is "unknown", not "offline". Nothing
-    measured such a line (a carrier with qualify off, e.g. MAG-ICT's
-    outbound endpoint, where qualify is 0 on purpose), so Unavailable is
-    only Asterisk's default and a red badge would claim a fault on a line
-    that may be carrying every call. Both trunk writers name the AOR after
+    over contacts NONE of which has been measured is "unknown", not
+    "offline". Unmeasured is NonQual (qualify off on purpose, e.g. MAG-ICT's
+    outbound endpoint), Unknown (qualify on, first OPTIONS not answered yet,
+    which every contact reads right after an Asterisk restart) or Created.
+    Unavailable is then only Asterisk's default: a red badge would claim a
+    fault on a line that may be carrying every call, and after a restart it
+    would fire a false drop alert. Both trunk writers name the AOR after
     the endpoint, so the AOR id is the endpoint id.
     """
     if endpoint_id in ip_trunks:
@@ -1004,7 +1010,9 @@ def _trunk_live_status(endpoint_id, endpoint_state, ip_trunks, registrations,
     status = _state_to_status(endpoint_state)
     if status == "offline" and contact_states:
         states = contact_states.get(endpoint_id) or []
-        if states and all(st.lower().startswith("nonqual") for st in states):
+        if states and all(
+            st.lower().startswith(_UNMEASURED_CONTACT_STATES) for st in states
+        ):
             return "unknown"
     return status
 
@@ -1061,7 +1069,7 @@ def _build_trunk_id_reverse_map():
             if (key, pjsip_id) not in _SLUG_CLASH_WARNED:
                 _SLUG_CLASH_WARNED.add((key, pjsip_id))
                 log.warning(
-                    "status feeder: trunks_meta %s and %s both map to tenant "
+                    "status feeder: endpoints %s and %s both map to tenant "
                     "%s slug %r; keeping %s", pjsip_id, other, key[0], key[1],
                     other,
                 )

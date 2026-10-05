@@ -98,6 +98,13 @@ AORS = """
     Contact:  t062ac5eb_dead/sip:203.0.113.9:5060            1a2b3c4d5e Unavail         nan
 
       Aor:  t062ac5eb_empty                                     1
+
+      Aor:  t062ac5eb_fresh                                     1
+    Contact:  t062ac5eb_fresh/sip:203.0.113.7:5060           9a8b7c6d5e Unknown         nan
+
+      Aor:  t062ac5eb_mixed                                     1
+    Contact:  t062ac5eb_mixed/sip:203.0.113.5:5060           2b3c4d5e6f NonQual         nan
+    Contact:  t062ac5eb_mixed/sip:203.0.113.6:5060           3c4d5e6f7a Unavail         nan
 """
 
 
@@ -120,6 +127,23 @@ class NonQualTrunkTest(unittest.TestCase):
             ca._trunk_live_status("tinfath_trunk_magict_out", "Unavailable",
                                   set(), {}, self.contacts),
             "unknown",
+        )
+
+    def test_a_contact_not_yet_qualified_after_a_restart_is_unknown(self):
+        # Qualify on, first OPTIONS not answered yet: offline here would be
+        # an online -> offline edge, i.e. a false drop alert, on every
+        # Asterisk restart.
+        self.assertEqual(
+            ca._trunk_live_status("t062ac5eb_fresh", "Unavailable",
+                                  set(), {}, self.contacts),
+            "unknown",
+        )
+
+    def test_one_measured_unreachable_contact_keeps_it_offline(self):
+        self.assertEqual(
+            ca._trunk_live_status("t062ac5eb_mixed", "Unavailable",
+                                  set(), {}, self.contacts),
+            "offline",
         )
 
     def test_a_measured_unreachable_contact_is_still_offline(self):
