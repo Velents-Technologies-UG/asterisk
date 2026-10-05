@@ -879,7 +879,8 @@ def _parse_pjsip_identifies(output):
             yield endpoint_id
 
 
-def _parse_pjsip_aors(output):
+def _aor_contact_states(output):
+    """{aor id: [contact state token, ...]} from `pjsip show aors`."""
     aors = {}
     current = None
     for line in output.splitlines():
@@ -907,8 +908,11 @@ def _parse_pjsip_aors(output):
                 else:
                     continue
                 break
+    return aors
 
-    for aor_id, states in aors.items():
+
+def _parse_pjsip_aors(output):
+    for aor_id, states in _aor_contact_states(output).items():
         if not states:
             yield aor_id, "offline"
             continue
@@ -933,11 +937,15 @@ def _state_to_status(state):
 
 
 # `pjsip show registrations` status words. Registered is positive evidence
-# that the carrier is reachable AND accepts our credentials; the refusals are
-# positive evidence of the opposite. Anything else (Unknown, a transient
-# state) says nothing and must not override the endpoint's own state.
+# that the carrier is reachable AND accepts our credentials; Rejected is
+# positive evidence of the opposite. Everything else says nothing and must
+# not override the endpoint's own state - in particular Unregistered, which
+# every registration reads right after an Asterisk restart until its first
+# REGISTER completes, and Stopped, which it reads during shutdown. Reading
+# either as offline would turn every restart into an online -> offline ->
+# online pair of TrunkStatusChanged alerts for lines that never dropped.
 _REGISTRATION_ONLINE = ("registered",)
-_REGISTRATION_OFFLINE = ("rejected", "unregistered", "stopped")
+_REGISTRATION_OFFLINE = ("rejected",)
 
 
 def _parse_pjsip_registrations(output):
@@ -969,7 +977,8 @@ def _parse_pjsip_registrations(output):
                 break
 
 
-def _trunk_live_status(endpoint_id, endpoint_state, ip_trunks, registrations):
+def _trunk_live_status(endpoint_id, endpoint_state, ip_trunks, registrations,
+                       contact_states=None):
     """The badge for one trunk endpoint.
 
     An IP-identified trunk is online by construction (nothing to measure).
@@ -977,15 +986,27 @@ def _trunk_live_status(endpoint_id, endpoint_state, ip_trunks, registrations):
     measures on every refresh: its contact is a fixed AOR contact that
     Asterisk may never qualify (NonQual), so the endpoint's own state reads
     Unavailable for a line that is registered and carrying calls (seen on
-    prod 2026-10-05, ta985cf9d_voylo-outbound). Otherwise the endpoint
-    state decides, as before.
+    prod 2026-10-05, ta985cf9d_voylo-outbound).
+
+    Otherwise the endpoint state decides, with one exception: Unavailable
+    over contacts that are ALL NonQual is "unknown", not "offline". Nothing
+    measured such a line (a carrier with qualify off, e.g. MAG-ICT's
+    outbound endpoint, where qualify is 0 on purpose), so Unavailable is
+    only Asterisk's default and a red badge would claim a fault on a line
+    that may be carrying every call. Both trunk writers name the AOR after
+    the endpoint, so the AOR id is the endpoint id.
     """
     if endpoint_id in ip_trunks:
         return "online"
     reg = registrations.get(endpoint_id)
     if reg is not None:
         return reg
-    return _state_to_status(endpoint_state)
+    status = _state_to_status(endpoint_state)
+    if status == "offline" and contact_states:
+        states = contact_states.get(endpoint_id) or []
+        if states and all(st.lower().startswith("nonqual") for st in states):
+            return "unknown"
+    return status
 
 
 def _build_trunk_id_reverse_map():
@@ -1027,9 +1048,32 @@ def _build_trunk_id_reverse_map():
     # "not confirmed"), the stale sweep has nothing to keep, and no drop
     # alert can fire. A failure here costs only these rows, never the
     # sip_trunks map. sip_trunks wins where both name one endpoint.
+    taken = {(t, sl): pid for pid, (t, sl, _n) in out.items()}
     for pjsip_id, entry in _trunks_meta_reverse_rows():
-        out.setdefault(pjsip_id, entry)
+        if pjsip_id in out:
+            continue
+        key = (entry[0], entry[1])
+        other = taken.get(key)
+        if other is not None:
+            # Two endpoints would write one field of one tenant hash, and
+            # which badge showed would depend on sweep order. Keep the first
+            # (sip_trunks, then trunks_meta in query order) and say so once.
+            if (key, pjsip_id) not in _SLUG_CLASH_WARNED:
+                _SLUG_CLASH_WARNED.add((key, pjsip_id))
+                log.warning(
+                    "status feeder: trunks_meta %s and %s both map to tenant "
+                    "%s slug %r; keeping %s", pjsip_id, other, key[0], key[1],
+                    other,
+                )
+            continue
+        taken[key] = pjsip_id
+        out[pjsip_id] = entry
     return out
+
+
+# (tenant, slug) clashes already logged, so a sweep every few seconds does not
+# repeat the same warning for the life of the process.
+_SLUG_CLASH_WARNED = set()
 
 
 def _trunk_slug(tenant_id, pjsip_id):
@@ -1805,6 +1849,10 @@ def _decorate_trunks_with_live_state(items, tenant_id):
             [ASTERISK_BIN, "-rx", "pjsip show registrations"],
             capture_output=True, text=True, timeout=5, check=False,
         )
+        aor_proc = subprocess.run(
+            [ASTERISK_BIN, "-rx", "pjsip show aors"],
+            capture_output=True, text=True, timeout=5, check=False,
+        )
     except Exception as exc:  # noqa: BLE001
         log.warning("trunk live-state decorate failed: %s", exc)
         return
@@ -1819,6 +1867,10 @@ def _decorate_trunks_with_live_state(items, tenant_id):
         dict(_parse_pjsip_registrations(reg_proc.stdout))
         if reg_proc.returncode == 0 else {}
     )
+    contact_states = (
+        _aor_contact_states(aor_proc.stdout)
+        if aor_proc.returncode == 0 else {}
+    )
     # Map pjsip id -> live state. PJSIP endpoint ids are tenant-namespaced,
     # so for each row compute the expected pjsip id and look it up.
     state_by_pjsip = {}
@@ -1826,7 +1878,7 @@ def _decorate_trunks_with_live_state(items, tenant_id):
         # Strip trailing /contact suffix some pjsip versions add.
         head = ep_id.split("/", 1)[0]
         state_by_pjsip[head] = _trunk_live_status(
-            head, state, ip_trunks, registrations,
+            head, state, ip_trunks, registrations, contact_states,
         )
 
     ari_usable = True
@@ -1962,6 +2014,10 @@ def _status_feeder_loop(stop_event):
                 dict(_parse_pjsip_registrations(reg_proc.stdout))
                 if reg_proc.returncode == 0 else {}
             )
+            contact_states = (
+                _aor_contact_states(aor_proc.stdout)
+                if aor_proc.returncode == 0 else {}
+            )
             ip_trunk_endpoints = (
                 set(_parse_pjsip_identifies(id_proc.stdout))
                 if id_proc.returncode == 0 else set()
@@ -1991,6 +2047,7 @@ def _status_feeder_loop(stop_event):
                     head = ep_id.split("/", 1)[0]
                     status = _trunk_live_status(
                         head, state, ip_trunk_endpoints, registrations,
+                        contact_states,
                     )
                     known = reverse.get(head)
                     if known:
