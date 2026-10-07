@@ -14,6 +14,15 @@ enabled=yes
 bindaddr=0.0.0.0
 bindport=8088
 
+; Every open TCP connection to this server counts as one session: each
+; agent's WSS registration, call-engine's ARI event socket and every ARI
+; request, the sidecar's status feeder and the health probes. Asterisk's
+; compiled default is 100, and prod hit it on 2026-10-07 (http.c logged
+; "HTTP session count exceeded 100 sessions" several times a second): new
+; agent registrations and new originates were refused, which is the whole
+; call center. 100 agents' sockets alone would fill it.
+sessionlimit=1000
+
 ; --- TLS / WSS ---
 tlsenable=yes
 tlsbindaddr=0.0.0.0:8089
