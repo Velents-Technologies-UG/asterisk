@@ -112,6 +112,17 @@ STATUS_FEEDER_AGENTS_KEY = os.environ.get("STATUS_FEEDER_AGENTS_KEY", "cx:agents
 STATUS_FEEDER_CHECKED_AT_KEY = os.environ.get(
     "STATUS_FEEDER_CHECKED_AT_KEY", "cx:trunks:checked_at"
 )
+# Whether this feeder keeps dual-writing the legacy flat `cx:trunks:status`
+# hash (slug-keyed, no tenant). Default on = the behaviour since
+# 2026-08-23. Two Asterisk instances can share one Redis (Azure prod:
+# "primary" for infath, "shared" for every other tenant, each with its own
+# realtime DB); the legacy hash is the one key they cannot partition, so
+# once agent-hub reads only the per-tenant hashes, set this to false on
+# every instance. Either way a feeder only ever HDELs legacy fields it
+# wrote itself (see _sweep_stale_trunk_status).
+STATUS_FEEDER_LEGACY_HASH = os.environ.get(
+    "STATUS_FEEDER_LEGACY_HASH", "true"
+).strip().lower() not in ("0", "no", "false", "off")
 # Server-side trunk drop/restore alerts (AGH-6664). When a known trunk
 # crosses online<->offline the feeder POSTs TrunkStatusChanged here, so
 # the alert fires with no browser open (the previously shipped alert was
@@ -1927,6 +1938,88 @@ def _user_facing_agent_id(pjsip_id):
     return f"staff_{m.group('rest')}"
 
 
+class _FeederOwnership:
+    """What this feeder process owns in the Redis it may share.
+
+    Two Asterisk instances (each with its own realtime DB and sidecar) can
+    feed one Redis. Neither may delete what the other wrote, so the stale
+    sweep only touches what this record says is ours:
+
+    - `tenants`: tenants with at least one row in this instance's
+      sip_trunks / trunks_meta on the last successful sweep. Their
+      `cx:trunks:status:<tenant>` hash is ours outright.
+    - `legacy_written`: fields this process wrote to the legacy flat hash.
+      That hash has no tenant in it, so ownership is "I wrote it".
+    """
+
+    def __init__(self):
+        self.tenants = set()
+        self.legacy_written = set()
+
+
+def _sweep_stale_trunk_status(client, trunk_reverse, trunk_updates,
+                              prev_trunk_status, owned):
+    """HDEL trunk status fields for trunks this instance no longer holds.
+
+    Deleted trunks must not stay "online" forever: an HSET merge alone
+    never removes a field. Until 2026-10 this scanned EVERY
+    `cx:trunks:status:*` key and emptied any tenant missing from this
+    instance's sip_trunks — with two instances on one Redis, each would
+    wipe the other's tenants every tick (and the restart seed would then
+    miss edges, or re-fire them). Now it touches only:
+
+    1. hashes of tenants this instance owns this sweep: any field not in
+       its live roster goes, exactly as before;
+    2. hashes of tenants it owned last sweep but holds no trunk for now
+       (last trunk deleted, or the tenant moved instances): only the slugs
+       this process itself tracked for them, never the whole hash;
+    3. the legacy flat hash: only fields this process wrote, and only when
+       STATUS_FEEDER_LEGACY_HASH is on.
+
+    Known gap, accepted: a trunk deleted while this sidecar was down, in a
+    tenant that has no trunk left, keeps its field until someone clears
+    it — no instance can prove the field is its own.
+
+    `trunk_reverse` must be a real roster (not None): a DB outage must not
+    read as "every trunk was deleted". Returns slugs_by_tenant.
+    """
+    slugs_by_tenant = {}
+    for row_tenant, slug, _name in trunk_reverse.values():
+        slugs_by_tenant.setdefault(row_tenant, set()).add(slug)
+    tenants_now = set(slugs_by_tenant)
+
+    for tenant in sorted(tenants_now):
+        key = f"{STATUS_FEEDER_KEY}:{tenant}"
+        live = slugs_by_tenant[tenant]
+        stale = sorted(s for s in client.hkeys(key) if s not in live)
+        if stale:
+            client.hdel(key, *stale)
+        for s in stale:
+            prev_trunk_status.pop((tenant, s), None)
+
+    for tenant in sorted(owned.tenants - tenants_now):
+        known = sorted(s for (t, s) in prev_trunk_status if t == tenant)
+        if known:
+            client.hdel(f"{STATUS_FEEDER_KEY}:{tenant}", *known)
+        for s in known:
+            prev_trunk_status.pop((tenant, s), None)
+    owned.tenants = tenants_now
+
+    if STATUS_FEEDER_LEGACY_HASH:
+        # Spare fields written this sweep — strays (agent endpoints that
+        # leak into `pjsip show endpoints`) land there too and would
+        # otherwise be deleted and re-added every tick.
+        all_slugs = {s for slugs in slugs_by_tenant.values() for s in slugs}
+        legacy_stale = sorted(
+            s for s in owned.legacy_written
+            if s not in all_slugs and s not in trunk_updates
+        )
+        if legacy_stale:
+            client.hdel(STATUS_FEEDER_KEY, *legacy_stale)
+        owned.legacy_written.difference_update(legacy_stale)
+    return slugs_by_tenant
+
+
 def _post_trunk_status_webhook(tenant_id, trunk_id, trunk_name, status):
     """Notify Laravel that a known trunk crossed online<->offline.
 
@@ -1980,8 +2073,10 @@ def _status_feeder_loop(stop_event):
         log.error("status feeder: cannot connect to %s: %s", REDIS_URL, exc)
         return
     log.info(
-        "status feeder started: interval=%ds trunks_key=%s agents_key=%s webhook=%s",
+        "status feeder started: interval=%ds trunks_key=%s agents_key=%s "
+        "legacy_hash=%s webhook=%s",
         STATUS_FEEDER_INTERVAL, STATUS_FEEDER_KEY, STATUS_FEEDER_AGENTS_KEY,
+        "on" if STATUS_FEEDER_LEGACY_HASH else "off",
         "on" if TRUNK_STATUS_WEBHOOK_URL else "off",
     )
     # Last sweep's status per (tenant_id, slug), seeded from the Redis
@@ -1990,6 +2085,7 @@ def _status_feeder_loop(stop_event):
     # only costs the first sweep's edges (no prior = no edge), never
     # produces a duplicate alert.
     prev_trunk_status = {}
+    owned = _FeederOwnership()
     try:
         for key in client.scan_iter(match=f"{STATUS_FEEDER_KEY}:*"):
             seed_tenant = key[len(STATUS_FEEDER_KEY) + 1:]
@@ -2071,55 +2167,40 @@ def _status_feeder_loop(stop_event):
                     client.hset(
                         f"{STATUS_FEEDER_KEY}:{row_tenant}", mapping=updates
                     )
-                if trunk_updates:
+                if trunk_updates and STATUS_FEEDER_LEGACY_HASH:
                     # Legacy global dual-write while agent-hub still falls
                     # back to it — started 2026-08-23, drop next release.
                     client.hset(STATUS_FEEDER_KEY, mapping=trunk_updates)
+                    owned.legacy_written.update(trunk_updates)
                 # Stamp the sweep time whenever Asterisk answered, even if
                 # no trunk rows matched — the freshness signal is "did we
                 # just verify reachability", independent of trunk count.
-                client.set(
-                    STATUS_FEEDER_CHECKED_AT_KEY, int(time.time() * 1000)
-                )
+                # The global key is kept for today's readers, but with two
+                # instances on one Redis it only says "SOME feeder swept",
+                # so each owned tenant also gets its own stamp
+                # (`<key>:<tenant>`): only the instance holding that
+                # tenant's trunks writes it, so a dead instance shows up
+                # as stale for exactly its tenants.
+                now_ms = int(time.time() * 1000)
+                client.set(STATUS_FEEDER_CHECKED_AT_KEY, now_ms)
+                for row_tenant in sorted(
+                    {t for t, _s, _n in reverse.values()}
+                ):
+                    client.set(
+                        f"{STATUS_FEEDER_CHECKED_AT_KEY}:{row_tenant}", now_ms
+                    )
 
                 if trunk_reverse is not None:
-                    slugs_by_tenant = {}
-                    trunk_names = {}
-                    for row_tenant, slug, name in trunk_reverse.values():
-                        slugs_by_tenant.setdefault(row_tenant, set()).add(slug)
-                        trunk_names[(row_tenant, slug)] = name
-
-                    # Deleted trunks must not stay "online" forever: the
-                    # old poller's DEL+rewrite masked deletions, and an
-                    # HSET merge alone never removes a field. Sweep every
-                    # tenant hash (a tenant whose last trunk was deleted
-                    # still has a hash to empty, so iterate Redis keys,
-                    # not just the tenants seen this tick) and HDEL what
-                    # sip_trunks no longer holds.
-                    for key in client.scan_iter(
-                        match=f"{STATUS_FEEDER_KEY}:*"
-                    ):
-                        key_tenant = key[len(STATUS_FEEDER_KEY) + 1:]
-                        live = slugs_by_tenant.get(key_tenant, set())
-                        stale = [
-                            s for s in client.hkeys(key) if s not in live
-                        ]
-                        if stale:
-                            client.hdel(key, *stale)
-                        for s in stale:
-                            prev_trunk_status.pop((key_tenant, s), None)
-                    # Same cleanup for the legacy hash, sparing fields
-                    # written this sweep — strays still land there and
-                    # would otherwise be deleted and re-added every tick.
-                    all_slugs = {
-                        s for slugs in slugs_by_tenant.values() for s in slugs
+                    trunk_names = {
+                        (row_tenant, slug): name
+                        for row_tenant, slug, name in trunk_reverse.values()
                     }
-                    legacy_stale = [
-                        s for s in client.hkeys(STATUS_FEEDER_KEY)
-                        if s not in all_slugs and s not in trunk_updates
-                    ]
-                    if legacy_stale:
-                        client.hdel(STATUS_FEEDER_KEY, *legacy_stale)
+                    # Deletes only what this instance owns — see the
+                    # function's docstring for why (shared Redis, 2026-10).
+                    _sweep_stale_trunk_status(
+                        client, trunk_reverse, trunk_updates,
+                        prev_trunk_status, owned,
+                    )
 
                     # online<->offline edges become the TrunkStatusChanged
                     # webhook. Fired after the HSETs so the Redis copy —
@@ -2151,6 +2232,12 @@ def _status_feeder_loop(stop_event):
                     # don't, so use the regex-based stripper.
                     agent_updates[_user_facing_agent_id(head)] = status
                 if agent_updates:
+                    # Merge-only (HSET, never swept or DEL'd), so a second
+                    # instance on the same Redis cannot erase this one's
+                    # agents; each writes only AORs registered to it. The
+                    # one shared-key hazard is an identical user-facing id
+                    # on both instances, and that exists within one
+                    # instance today (`staff_<id>` drops the tenant).
                     client.hset(STATUS_FEEDER_AGENTS_KEY, mapping=agent_updates)
         except Exception as exc:
             log.warning("status feeder iteration failed: %s", exc)

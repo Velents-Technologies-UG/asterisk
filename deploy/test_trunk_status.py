@@ -234,5 +234,117 @@ class TrunkSlugTest(unittest.TestCase):
         self.assertEqual(ca._trunk_slug("livedemos", "trunk_voylo_out"), "trunk_voylo_out")
 
 
+class FakeRedis:
+    """The few hash commands the stale sweep uses, over plain dicts."""
+
+    def __init__(self, data=None):
+        self.data = {k: dict(v) for k, v in (data or {}).items()}
+
+    def hkeys(self, key):
+        return list(self.data.get(key, {}))
+
+    def hdel(self, key, *fields):
+        h = self.data.get(key, {})
+        for f in fields:
+            h.pop(f, None)
+
+    def scan_iter(self, match):
+        raise AssertionError("the sweep must not scan other instances' keys")
+
+
+def _roster(*rows):
+    """(tenant, slug) rows -> the reverse-map shape the feeder builds."""
+    return {f"t_{t}_{s}": (t, s, s.title()) for t, s in rows}
+
+
+class SharedRedisSweepTest(unittest.TestCase):
+    """Two instances, one Redis: a sweep deletes only what it owns.
+
+    Azure prod (2026-10): "primary" holds infath, "shared" every other
+    tenant, each with its own sip_trunks. Before this, each sweep emptied
+    every cx:trunks:status:<tenant> hash missing from its own table.
+    """
+
+    KEY = ca.STATUS_FEEDER_KEY
+
+    def setUp(self):
+        self._legacy = ca.STATUS_FEEDER_LEGACY_HASH
+        ca.STATUS_FEEDER_LEGACY_HASH = True
+        self.redis = FakeRedis({
+            f"{self.KEY}:infath": {"magict": "online"},
+            f"{self.KEY}:livedemos": {"voylo": "online", "gone": "online"},
+            self.KEY: {"magict": "online", "voylo": "online",
+                       "gone": "online"},
+        })
+
+    def tearDown(self):
+        ca.STATUS_FEEDER_LEGACY_HASH = self._legacy
+
+    def test_another_instances_tenant_is_never_touched(self):
+        owned = ca._FeederOwnership()
+        prev = {("infath", "magict"): "online"}
+        ca._sweep_stale_trunk_status(
+            self.redis, _roster(("livedemos", "voylo")), {"voylo": "online"},
+            prev, owned,
+        )
+        self.assertEqual(self.redis.data[f"{self.KEY}:infath"],
+                         {"magict": "online"})
+        self.assertIn(("infath", "magict"), prev)
+
+    def test_an_owned_tenants_deleted_trunk_is_still_removed(self):
+        owned = ca._FeederOwnership()
+        prev = {("livedemos", "gone"): "online"}
+        ca._sweep_stale_trunk_status(
+            self.redis, _roster(("livedemos", "voylo")), {"voylo": "online"},
+            prev, owned,
+        )
+        self.assertEqual(self.redis.data[f"{self.KEY}:livedemos"],
+                         {"voylo": "online"})
+        self.assertNotIn(("livedemos", "gone"), prev)
+
+    def test_legacy_fields_this_instance_never_wrote_survive(self):
+        owned = ca._FeederOwnership()
+        owned.legacy_written = {"voylo", "gone"}
+        ca._sweep_stale_trunk_status(
+            self.redis, _roster(("livedemos", "voylo")), {"voylo": "online"},
+            {}, owned,
+        )
+        # "magict" is the other instance's; "gone" was ours and is deleted.
+        self.assertEqual(self.redis.data[self.KEY],
+                         {"magict": "online", "voylo": "online"})
+        self.assertEqual(owned.legacy_written, {"voylo"})
+
+    def test_a_tenants_last_trunk_deleted_clears_only_known_slugs(self):
+        owned = ca._FeederOwnership()
+        owned.tenants = {"livedemos"}
+        self.redis.data[f"{self.KEY}:livedemos"]["foreign"] = "online"
+        prev = {("livedemos", "voylo"): "online",
+                ("livedemos", "gone"): "online"}
+        ca._sweep_stale_trunk_status(self.redis, {}, {}, prev, owned)
+        self.assertEqual(self.redis.data[f"{self.KEY}:livedemos"],
+                         {"foreign": "online"})
+        self.assertEqual(owned.tenants, set())
+        self.assertEqual(prev, {})
+
+    def test_legacy_hash_off_leaves_it_alone(self):
+        ca.STATUS_FEEDER_LEGACY_HASH = False
+        owned = ca._FeederOwnership()
+        owned.legacy_written = {"gone"}
+        ca._sweep_stale_trunk_status(
+            self.redis, _roster(("livedemos", "voylo")), {}, {}, owned,
+        )
+        self.assertIn("gone", self.redis.data[self.KEY])
+
+    def test_strays_written_this_sweep_are_spared(self):
+        owned = ca._FeederOwnership()
+        owned.legacy_written = {"staff_2"}
+        self.redis.data[self.KEY]["staff_2"] = "online"
+        ca._sweep_stale_trunk_status(
+            self.redis, _roster(("livedemos", "voylo")),
+            {"staff_2": "online"}, {}, owned,
+        )
+        self.assertIn("staff_2", self.redis.data[self.KEY])
+
+
 if __name__ == "__main__":
     unittest.main()
